@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# =============================================================
+# feature 파이프라인 설정
+# 파일 경로: .claude/skills/feature/config.sh
+# 사용 전 반드시 모델 ID를 실제 환경에 맞게 채워 넣으세요.
+#  - Claude 계열: claude 대화 세션에서 /model 로 확인
+#  - Codex 계열: codex --help 또는 codex -m 후보 목록으로 확인
+# =============================================================
+
+# --- 역할별 모델 (정확한 ID 필수. 틀리면 스크립트가 즉시 실패함) ---
+FABLE_MODEL="claude-fable-5"   # 오케스트레이터 겸 명세 작성자 (claude CLI)
+SOL_MODEL="gpt-5.6-sol"        # 명세 검증자 (codex CLI)
+LUNA_MODEL="gpt-5.6-luna"      # 구현 담당 (codex CLI)
+SONNET_MODEL="claude-sonnet-5" # 구현 리뷰 담당 (claude CLI)
+
+# --- 역할별 reasoning effort (아래 가드가 고정값 외 설정을 거부) ---
+CLAUDE_EFFORT="medium"          # Fable/Sonnet 공통
+SOL_EFFORT="high"              # 명세 검증
+LUNA_EFFORT="max"              # 메인 구현
+
+# --- CLI 실행 형식 ---
+# Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
+CLAUDE_BIN="claude"
+CODEX_BIN="codex"
+
+# --- 수렴/안전 한도 ---
+MAX_SPEC_ROUNDS=3        # 명세 합의 최대 라운드
+MAX_IMPL_ROUNDS=2        # 구현 리뷰 최대 라운드
+MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 Luna 재수정 허용 횟수
+
+# --- 산출물 디렉터리 (저장소 루트 기준 상대 경로) ---
+WORK_DIR=".agent-work"
+
+# --- 프로젝트 명령 (저장소 루트에서 실행 기준, 프로젝트에 맞게 교체) ---
+# 예: Gradle "./gradlew test" / pytest "venv/bin/pytest tests -q" / npm "npm test"
+TEST_CMD="CHANGE_ME"
+LINT_CMD="CHANGE_ME"
+
+# --- 워커에게 매 턴 적용할 규칙 파일 (system prompt로 주입) ---
+CORE_RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../hooks" && pwd)/core_rules.md"
+
+# =============================================================
+# 헬퍼
+# =============================================================
+
+# 페르소나 템플릿(prompts/*.md) 렌더링. 지정한 변수만 치환해 본문의 다른 $ 문자를 보존한다.
+# 사용: VAR1=... VAR2=... render_prompt <템플릿 파일> '${VAR1} ${VAR2}'
+render_prompt() {
+  envsubst "$2" < "$1"
+}
+
+# 역할별 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
+# 라운드 사이 저장소 재탐색을 없애고 프롬프트 캐시를 살리기 위함.
+# 새 피처 시작 시 $WORK_DIR/.session-* 를 지워야 이전 피처 문맥이 섞이지 않는다.
+claude_session_args() {
+  local role="$1"
+  local id_file="$WORK_DIR/.session-$role"
+  if [ -f "$id_file" ]; then
+    printf -- '--resume %s' "$(cat "$id_file")"
+  else
+    local new_id
+    new_id="$(uuidgen | tr 'A-Z' 'a-z')"
+    printf '%s' "$new_id" > "$id_file.new"
+    printf -- '--session-id %s' "$new_id"
+  fi
+}
+
+# 호출 '성공' 직후에만 세션 ID 확정. 첫 호출이 실패하면 .new 가 확정되지 않아
+# 다음 실행이 존재하지 않는 세션을 --resume 하는 사고를 막는다.
+claude_session_commit() {
+  local id_file="$WORK_DIR/.session-$1"
+  if [ -f "$id_file.new" ]; then mv "$id_file.new" "$id_file"; fi
+}
+
+# claude --output-format json 결과에서 사용량을 $WORK_DIR/usage.jsonl 에 누적.
+# 필수 필드가 없으면 null 을 조용히 쌓지 않고 경고 후 생략한다.
+log_claude_usage() {
+  local label="$1" result_file="$2"
+  if ! jq -e '.usage.input_tokens != null' "$result_file" >/dev/null 2>&1; then
+    echo "[WARN] usage 필드 없음 — 기록 생략: $result_file" >&2
+    return 0
+  fi
+  jq -c --arg label "$label" \
+    '{label: $label, session: .session_id, cost_usd: .total_cost_usd, in: .usage.input_tokens, out: .usage.output_tokens, cache_read: .usage.cache_read_input_tokens, cache_write: .usage.cache_creation_input_tokens}' \
+    "$result_file" >> "$WORK_DIR/usage.jsonl"
+}
+
+# =============================================================
+# 가드: 설정이 틀리면 이 파일을 source 하는 스크립트를 즉시 중단
+# =============================================================
+case "$SOL_MODEL$LUNA_MODEL$TEST_CMD$LINT_CMD" in
+  *CHANGE_ME*) echo "[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요." >&2; exit 1;;
+esac
+[ "$LUNA_EFFORT" = "max" ] || { echo "[FAIL] LUNA_EFFORT('$LUNA_EFFORT')는 max 여야 합니다. 워커 실행 거부." >&2; exit 1; }
+[ "$CLAUDE_EFFORT" = "medium" ] || { echo "[FAIL] CLAUDE_EFFORT('$CLAUDE_EFFORT')는 medium 이어야 합니다. 워커 실행 거부." >&2; exit 1; }
+[ "$SOL_EFFORT" = "high" ] || { echo "[FAIL] SOL_EFFORT('$SOL_EFFORT')는 high 여야 합니다. 워커 실행 거부." >&2; exit 1; }
+[ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] core_rules.md 없음: $CORE_RULES_FILE" >&2; exit 1; }

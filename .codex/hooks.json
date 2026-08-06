@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .codex/hooks/luna_guard.sh",
+            "statusMessage": "워커 가드 검사 중 (commit/push 차단)",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

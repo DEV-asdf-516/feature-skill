@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["PASS", "BLOCK"] },
+    "blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "problem": { "type": "string" },
+          "required_change": { "type": "string" }
+        },
+        "required": ["id", "problem", "required_change"],
+        "additionalProperties": false
+      }
+    },
+    "non_blocking_notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["verdict", "blocking_issues", "non_blocking_notes"],
+  "additionalProperties": false
+}

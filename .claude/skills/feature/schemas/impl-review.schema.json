@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "file": { "type": "string" },
+          "problem": { "type": "string" },
+          "required_change": { "type": "string" }
+        },
+        "required": ["id", "file", "problem", "required_change"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["verdict", "issues"],
+  "additionalProperties": false
+}
