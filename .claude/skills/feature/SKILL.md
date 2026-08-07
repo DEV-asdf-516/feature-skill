@@ -49,7 +49,8 @@ source .claude/skills/feature/config.sh   # LUNA_EFFORT=max 가드 포함
 git checkout -b feature/<이름>
 codex exec -m "$LUNA_MODEL" -c "model_reasoning_effort=\"$LUNA_EFFORT\"" --sandbox workspace-write \
   "$(CORE_RULES="$(cat "$CORE_RULES_FILE")" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" \
-    render_prompt .claude/skills/feature/prompts/luna-implement.md '${CORE_RULES} ${WORK_DIR} ${TEST_CMD}')"
+    render_prompt .claude/skills/feature/prompts/luna-implement.md '${CORE_RULES} ${WORK_DIR} ${TEST_CMD}')" \
+  </dev/null
 ```
 
 Luna의 1차 구현 완료 전에는 다른 에이전트가 코드를 만지지 않는다. Sonnet은 Phase 3에서만 진입.
@@ -78,6 +79,8 @@ bash <skill_dir>/scripts/impl-review-loop.sh
 - 마지막 APPROVE 이후 코드가 조금이라도 바뀌면(누가 바꿨든) Phase 3 재리뷰 없이 파이프라인 종료 금지. 지문으로 강제: `impl-review-loop.sh`가 승인 시 작업 트리 지문(tracked diff + status + untracked 파일 내용)을 `$WORK_DIR/approved.fingerprint`에 남기고, Phase 4 진입 직전·테스트 통과 후·커밋 위임 직전에 `verify_approved_fingerprint`(config.sh)로 검증.
 - 어떤 단계도 "대충 통과 간주" 금지. PASS/APPROVE는 스키마 검증된 JSON 파일에 남고 이슈 0건과 동시일 때만 인정 — 모순 응답은 스크립트가 즉시 거부.
 - 라운드 초과·교착은 실패가 아니라 **사용자 에스컬레이션** — 쟁점 요약만 올리고 멈춘다.
+- **모든 하위 실행은 stdin을 닫고 돌린다** — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면 EOF를 기다리며 무기한 멈춘다. 루프 스크립트는 시작부 `exec </dev/null`로 일괄 차단돼 있고, 스크립트 밖에서 직접 호출하는 하위 실행(Phase 2·4의 Luna 등)은 `</dev/null`을 반드시 붙인다. `decisions.md` 기록(heredoc 등)과 장기 실행 명령을 같은 명령·파이프라인·백그라운드 블록으로 묶지 않는다 — 기록 먼저, 실행은 별도 명령으로.
+- **진행 확인은 "프로세스 생존"이 아니라 "실제 진척"으로 판정** — `live.log`(또는 해당 실행의 로그)가 최근 수 분 내 갱신됐는지와 CPU 시간이 증가하는지를 본다. 둘 다 멈춰 있으면 effort가 높아 느린 게 아니라 입력 대기·행(hang)이다: 해당 PID만 정확히 TERM으로 정리하고(`pkill` 광역 금지) 원인 확인 후 재시작한다. 중단된 라운드의 산출물은 정상 결과와 섞이지 않게 archive로 옮긴다.
 
 ## 토큰 절약 구조 (스크립트에 내장)
 
