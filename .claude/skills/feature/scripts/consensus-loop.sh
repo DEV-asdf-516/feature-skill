@@ -74,6 +74,13 @@ for round in $(seq 1 $((MAX_SPEC_ROUNDS + 1))); do
   fingerprint=$(jq -Sc '[.blocking_issues[] | {id, problem, required_change}] | sort_by(.id)' "$review")
   echo "Sol verdict: $verdict / blocking: ${ids:-없음}"
 
+  # 모순 응답은 재시도 없이 즉시 실패 — 스키마만 통과했다고 올바른 리뷰로 간주하지 않는다
+  if { [ "$verdict" = "PASS" ] && [ -n "$ids" ]; } \
+     || { [ "$verdict" = "BLOCK" ] && [ -z "$ids" ]; }; then
+    echo "[FAIL] 모순 리뷰 응답: verdict=$verdict / blocking=${ids:-0건} — 응답 오류로 중단: $review" >&2
+    exit 1
+  fi
+
   if [ "$verdict" = "PASS" ] && [ -z "$ids" ]; then
     echo "=== [$TARGET] 문서 합의 완료 (round $round) ==="
     jq -n --arg t "$TARGET" --arg r "$round" '{phase:$t, status:"PASS", rounds:($r|tonumber)}' > "$WORK_DIR/state.json"

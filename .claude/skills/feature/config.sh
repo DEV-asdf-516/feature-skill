@@ -72,6 +72,54 @@ claude_session_commit() {
   if [ -f "$id_file.new" ]; then mv "$id_file.new" "$id_file"; fi
 }
 
+# SHA-256 해시 (Linux sha256sum / macOS shasum 겸용)
+sha256_stdin() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+# 작업 트리 지문: tracked diff + status(-uall) + untracked 파일 '내용'까지 해시.
+# git diff HEAD 만으로는 untracked 파일이, status 만으로는 untracked 내용 변경이
+# 빠지므로 셋을 함께 묶어야 "승인 이후 어떤 변경도 없었다"를 보장할 수 있다.
+# $WORK_DIR 는 제외 — 파이프라인 산출물(state.json, 리뷰, 지문 파일 자신)은
+# 코드 변경이 아니며, gitignore 되지 않은 환경에서 지문이 자기참조되는 것을 막는다.
+compute_worktree_fingerprint() {
+  {
+    git diff --binary HEAD -- . ":(exclude)$WORK_DIR"
+    git status --porcelain=v1 -uall -- . ":(exclude)$WORK_DIR"
+    git ls-files --others --exclude-standard -z -- . ":(exclude)$WORK_DIR" \
+      | while IFS= read -r -d '' untracked_file; do
+          if [ -L "$untracked_file" ]; then
+            # 심볼릭 링크는 대상 내용이 아니라 '가리키는 경로'를 해시한다
+            # (깨진 링크 실패 방지 + 같은 내용의 다른 대상으로 바꿔치기 감지)
+            printf 'symlink %s ' "$untracked_file"
+            readlink "$untracked_file" | sha256_stdin
+          else
+            printf '%s ' "$untracked_file"
+            sha256_stdin < "$untracked_file"
+          fi
+        done
+  } | sha256_stdin
+}
+
+# 마지막 APPROVE 시점 지문과 현재 작업 트리를 비교. 다르면 승인 무효(APPROVAL_STALE).
+# Phase 4 진입 직전과 커밋 위임 직전, 두 지점에서 반드시 호출한다.
+verify_approved_fingerprint() {
+  local fingerprint_file="$WORK_DIR/approved.fingerprint"
+  [ -f "$fingerprint_file" ] || { echo "[FAIL] 승인 지문 없음: $fingerprint_file — Phase 3 승인이 선행돼야 함." >&2; return 1; }
+  local approved_hash current_hash
+  approved_hash="$(cat "$fingerprint_file")"
+  current_hash="$(compute_worktree_fingerprint)"
+  if [ "$approved_hash" != "$current_hash" ]; then
+    echo "[APPROVAL_STALE] 마지막 APPROVE 이후 코드가 변경됨. Phase 3 재리뷰 없이는 진행 금지." >&2
+    return 1
+  fi
+  echo "승인 지문 일치 — 마지막 APPROVE 이후 변경 없음."
+}
+
 # claude --output-format json 결과에서 사용량을 $WORK_DIR/usage.jsonl 에 누적.
 # 필수 필드가 없으면 null 을 조용히 쌓지 않고 경고 후 생략한다.
 log_claude_usage() {

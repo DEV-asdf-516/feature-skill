@@ -7,9 +7,9 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "problem": { "type": "string" },
-          "required_change": { "type": "string" }
+          "id": { "type": "string", "minLength": 1 },
+          "problem": { "type": "string", "minLength": 1 },
+          "required_change": { "type": "string", "minLength": 1 }
         },
         "required": ["id", "problem", "required_change"],
         "additionalProperties": false

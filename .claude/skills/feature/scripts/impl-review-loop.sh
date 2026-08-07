@@ -46,8 +46,17 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
   #  모든 수정은 다음 라운드에서 재검증된다는 불변식이 깨진다)
   diff_file="$ATTEMPT_DIR/diff-round-$tag.patch"
   status_file="$ATTEMPT_DIR/status-round-$tag.txt"
+  # 리뷰 입력 스냅샷의 지문 — 승인 시 현재 지문과 일치해야만 승인으로 인정
+  # (리뷰 도중 작업 트리가 바뀌면 리뷰되지 않은 변경이 승인에 섞이는 것을 차단)
+  # 지문을 diff/status 캡처보다 먼저 찍고 직후 재비교해, 캡처 도중 변경까지 배제한다
+  review_fingerprint=$(compute_worktree_fingerprint)
   git diff HEAD -- > "$diff_file"
   git status --short > "$status_file"
+  snapshot_fingerprint=$(compute_worktree_fingerprint)
+  if [ "$snapshot_fingerprint" != "$review_fingerprint" ]; then
+    echo "[FAIL] 리뷰 입력 스냅샷 생성 중 작업 트리가 변경됨. 재실행 필요." >&2
+    exit 1
+  fi
 
   review_session=$(claude_session_args sonnet-review)
   "$CLAUDE_BIN" -p $review_session --model "$SONNET_MODEL" --effort "$CLAUDE_EFFORT" \
@@ -67,14 +76,25 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
   issue_count=$(jq '.issues | length' "$review")
   echo "Sonnet verdict: $verdict / issues: $issue_count"
 
+  # 모순 응답은 재시도 없이 즉시 실패 — 스키마만 통과했다고 올바른 리뷰로 간주하지 않는다
+  if { [ "$verdict" = "APPROVE" ] && [ "$issue_count" -gt 0 ]; } \
+     || { [ "$verdict" = "REQUEST_CHANGES" ] && [ "$issue_count" -eq 0 ]; }; then
+    echo "[FAIL] 모순 리뷰 응답: verdict=$verdict / issues=$issue_count — 응답 오류로 중단: $review" >&2
+    exit 1
+  fi
+
   # 승인은 verdict 와 issues 가 일치할 때만 인정 (API가 조건부 스키마를 막아 여기서 강제)
-  if [ "$verdict" = "APPROVE" ] && [ "$issue_count" -eq 0 ]; then
+  if [ "$verdict" = "APPROVE" ]; then
+    current_fingerprint=$(compute_worktree_fingerprint)
+    if [ "$current_fingerprint" != "$review_fingerprint" ]; then
+      echo "[FAIL] 리뷰 도중 작업 트리가 변경됨 — 리뷰되지 않은 변경은 승인할 수 없음. 재실행 필요." >&2
+      exit 1
+    fi
     echo "=== 구현 리뷰 승인 (round $round) ==="
+    # 승인된 것은 '리뷰 입력 스냅샷' 상태다 — Phase 4 진입·커밋 직전에 verify_approved_fingerprint 로 검증
+    printf '%s\n' "$review_fingerprint" | tee "$ATTEMPT_DIR/approved.fingerprint" > "$WORK_DIR/approved.fingerprint"
     jq -n --arg r "$round" --arg a "$attempt" '{phase:"impl", status:"APPROVE", rounds:($r|tonumber), attempt:($a|tonumber)}' > "$WORK_DIR/state.json"
     exit 0
-  fi
-  if [ "$verdict" = "APPROVE" ]; then
-    echo "[WARN] APPROVE 인데 issues $issue_count 건 존재 — 모순 응답이라 REQUEST_CHANGES 로 취급." >&2
   fi
 
   # 마지막 검증 라운드였다면 수정 없이 종료 (수정은 항상 재검증 대상이어야 함)

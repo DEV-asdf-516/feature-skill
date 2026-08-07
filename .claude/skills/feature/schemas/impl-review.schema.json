@@ -7,10 +7,10 @@
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "string" },
-          "file": { "type": "string" },
-          "problem": { "type": "string" },
-          "required_change": { "type": "string" }
+          "id": { "type": "string", "minLength": 1 },
+          "file": { "type": "string", "minLength": 1 },
+          "problem": { "type": "string", "minLength": 1 },
+          "required_change": { "type": "string", "minLength": 1 }
         },
         "required": ["id", "file", "problem", "required_change"],
         "additionalProperties": false
