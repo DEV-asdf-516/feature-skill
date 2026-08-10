@@ -11,6 +11,11 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 
+# stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
+# EOF 를 기다리며 무기한 대기한다. 호출부가 어떤 형태로 이 스크립트를 묶어
+# 실행하든(heredoc 조합, 백그라운드 등) 여기서 닫아 하위 실행 전체를 보호한다.
+exec </dev/null
+
 # 진행 로그를 $WORK_DIR/live.log 에 실시간 누적 (tail -f 로 관찰 가능)
 mkdir -p "$WORK_DIR"
 exec > >(tee -a "$WORK_DIR/live.log") 2>&1
