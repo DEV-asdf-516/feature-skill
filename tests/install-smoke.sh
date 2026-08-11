@@ -91,5 +91,24 @@ duplicate_count="$(grep -c '^\.agent-work/$' "$TARGET/.gitignore")"
 [ "$duplicate_count" = "1" ] || fail ".gitignore: .agent-work/ 항목 ${duplicate_count}개 (1개여야 함)"
 echo "[OK] 6. .gitignore 중복 방지"
 
+# ---------- 7. 삭제 가드 동작 검증 (pre_bash_guard / luna_guard) ----------
+BASH_GUARD="$TARGET/.claude/hooks/pre_bash_guard.sh"
+run_bash_guard() { printf '{"tool_input":{"command":"%s"}}' "$1" | CLAUDE_PROJECT_DIR="$TARGET" bash "$BASH_GUARD"; }
+run_bash_guard 'rm -rf src/legacy' 2>/dev/null && fail "삭제 가드: 플래그 없는 rm 이 통과됨"
+run_bash_guard 'git rm old_module.py' 2>/dev/null && fail "삭제 가드: 플래그 없는 git rm 이 통과됨"
+run_bash_guard 'rm -rf .agent-work/reviews' 2>/dev/null || fail "삭제 가드: .agent-work 예외 경로가 차단됨"
+run_bash_guard 'echo removed' 2>/dev/null || fail "삭제 가드: rm 을 포함하지 않는 명령이 차단됨"
+touch "$TARGET/.claude/ALLOW_DELETE"
+run_bash_guard 'rm src/legacy/old.txt' 2>/dev/null || fail "삭제 가드: ALLOW_DELETE 플래그가 있는데 차단됨"
+[ ! -f "$TARGET/.claude/ALLOW_DELETE" ] || fail "삭제 가드: ALLOW_DELETE 플래그가 1회용으로 소모되지 않음"
+LUNA_GUARD="$TARGET/.codex/hooks/luna_guard.sh"
+printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","rm -rf src/legacy"]}}' "$TARGET" \
+  | bash "$LUNA_GUARD" 2>/dev/null && fail "luna 가드: rm 이 통과됨"
+printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","rm -rf .agent-work/tmp"]}}' "$TARGET" \
+  | bash "$LUNA_GUARD" 2>/dev/null || fail "luna 가드: .agent-work 예외 경로가 차단됨"
+printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","git commit -m x"]}}' "$TARGET" \
+  | bash "$LUNA_GUARD" 2>/dev/null && fail "luna 가드: 워커 커밋이 통과됨"
+echo "[OK] 7. 삭제 가드 (pre_bash_guard / luna_guard)"
+
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

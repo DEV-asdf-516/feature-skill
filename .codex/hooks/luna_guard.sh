@@ -20,4 +20,12 @@ if echo "$TOOL_INPUT_TEXT" | grep -qE 'git\s+(commit|push)'; then
   exit 2
 fi
 
+# 워커 파일 삭제 금지 (.agent-work·임시 경로 제외) — 삭제가 필요하면 사유를 보고하고 중단
+if echo "$TOOL_INPUT_TEXT" | grep -qE '(^|[;&|[:space:]"])(rm|unlink)[[:space:]]|git[[:space:]]+rm[[:space:]]|-delete([[:space:]"]|$)'; then
+  if ! echo "$TOOL_INPUT_TEXT" | grep -qE '(rm|unlink)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*("?\.agent-work/|"?/tmp/|"?/private/tmp/)'; then
+    echo "차단: 워커는 프로젝트 파일을 삭제할 수 없습니다. 삭제가 필요하면 대상과 사유를 결과 보고에 남기세요(.agent-work·/tmp 하위는 허용)." >&2
+    exit 2
+  fi
+fi
+
 exit 0

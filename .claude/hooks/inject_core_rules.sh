@@ -8,9 +8,10 @@
 #  - exit 2는 이 이벤트에서 '프롬프트 자체를 차단'하므로 절대 사용 금지.
 
 RULES_FILE="$CLAUDE_PROJECT_DIR/.claude/hooks/core_rules.md"
+# 저장소 루트에 conventions.md 가 있으면 프로젝트 컨벤션도 함께 주입 (없으면 무시)
+CONVENTIONS_FILE="$CLAUDE_PROJECT_DIR/conventions.md"
 
 # 룰 파일이 없어도 사용자 프롬프트를 막으면 안 되므로 조용히 통과
-[ -f "$RULES_FILE" ] || exit 0
-
-cat "$RULES_FILE"
+[ -f "$RULES_FILE" ] && cat "$RULES_FILE"
+[ -f "$CONVENTIONS_FILE" ] && cat "$CONVENTIONS_FILE"
 exit 0

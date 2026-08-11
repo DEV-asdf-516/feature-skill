@@ -18,7 +18,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 0. 새 피처 시작이면 `.agent-work/` 안의 이전 산출물 전부(`request.md`, `design.md`, `implementation.md`, `decisions.md`, `.session-*`, `reviews/`, `state.json`, `usage.jsonl` 등 — `archive/` 자신만 제외)를 삭제하지 말고 `.agent-work/archive/<이전-피처명-또는-날짜>/`로 `mv`(rm 금지 — 삭제는 사용자에게 요청). `.session-*`이 남으면 이전 피처 문맥이 섞이고, 명세·결정 기록은 덮어써져 유실된다. 같은 피처의 계속(Phase 4 재진입 등)이면 그대로 둔다 — 세션 이어가기가 캐시 절감의 핵심.
 1. 빈 `.agent-work/decisions.md` 생성 — 이후 모든 기록은 append만, 재초기화 금지.
-2. 사용자 요구를 `.agent-work/request.md`에 기록(원문 + 해석한 범위 + 명시적 제외). **모호하면 추측 대신 사용자에게 질문해 답을 받은 뒤 기록.**
+2. 사용자 요구를 `.agent-work/request.md`에 기록(원문 + 해석한 범위 + 명시적 제외). 사용자가 스펙 폴더(예: `<skill_dir>/specs/feature_<번호>/`)에 브레인스토밍·기획 문서·이미지를 넣어뒀으면 전부 읽어 함께 반영한다. **모호하면 추측 대신 사용자에게 질문해 답을 받은 뒤 기록.**
 3. `.agent-work/design.md` 초안 작성. 포함: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준(무엇이 통과해야 완료인지), 비범위(non-goals). 갈리는 설계 판단은 임의로 정하지 말고 사용자에게 옵션을 제시해 결정받는다. 질문과 답은 `decisions.md`에 `- [USER-QUESTION] <질문> → <답>` 형식으로 기록 — Sol 이슈 판정(ACCEPT/REJECT)과 사용자 결정을 구분 추적하기 위함.
 
 ## Phase 1 — 설계 합의 (스크립트가 수렴 강제)
@@ -75,6 +75,7 @@ bash <skill_dir>/scripts/impl-review-loop.sh
 - 모호한 요구·갈리는 설계 판단(Phase 0·1)은 추측 금지 — 사용자 질문 후 문서 반영, `decisions.md`에 `- [USER-QUESTION] <질문> → <답>` 기록. Sol과의 교착도 사용자 판단으로 푼다.
 - 하위 실행은 반드시 `--model`/`-m` 명시. CLI 실패 시 다음 단계 진행 금지.
 - effort는 Claude `medium`, Sol `high`, Luna `max`만 허용(config.sh 가드 + 모든 호출 명시). Phase 0·4의 Fable 직접 실행도 `medium` 세션. 규칙 주입: Sonnet은 `--append-system-prompt`, Luna(codex)는 프롬프트 선두 `[반드시 지킬 규칙]` 블록으로 `core_rules.md`를 매 실행 주입 + 프로젝트 codex hooks(`.codex/hooks.json` + `.codex/hooks/luna_guard.sh`)가 매 툴 호출 적용.
+- **워커(Luna/Sonnet)는 파일 삭제 절대 금지** — 리뷰·수정·리팩터링 어떤 명목으로도 프로젝트 파일을 지우지 않는다(.agent-work·/tmp 하위만 예외). 훅이 강제한다: claude 쪽은 `pre_bash_guard`(rm/unlink/git rm/find -delete 차단, 사용자 지시를 직접 받은 오케스트레이터의 1회용 `.claude/ALLOW_DELETE` 플래그만 통과), codex 쪽은 `luna_guard`(무조건 차단). 삭제가 필요하면 대상·사유를 `decisions.md`에 남기고 사용자 에스컬레이션.
 - 워커(Luna/Sonnet)는 라운드 중 커밋·푸시 금지. 커밋은 사용자가 요청했을 때만 — Phase 3 승인 + Phase 4 통과 후, Fable이 `verify_approved_fingerprint`로 승인 지문 유효성을 재확인하고 `touch .claude/ALLOW_COMMIT`(1회용 플래그 — `pre_bash_guard` 훅이 플래그 없는 커밋을 차단하므로 이 플래그가 곧 "사용자 지시 확인" 증거) 후 `sonnet-fix` 세션에 별도 호출로 위임해 Sonnet이 수행.
 - 마지막 APPROVE 이후 코드가 조금이라도 바뀌면(누가 바꿨든) Phase 3 재리뷰 없이 파이프라인 종료 금지. 지문으로 강제: `impl-review-loop.sh`가 승인 시 작업 트리 지문(tracked diff + status + untracked 파일 내용)을 `$WORK_DIR/approved.fingerprint`에 남기고, Phase 4 진입 직전·테스트 통과 후·커밋 위임 직전에 `verify_approved_fingerprint`(config.sh)로 검증.
 - 어떤 단계도 "대충 통과 간주" 금지. PASS/APPROVE는 스키마 검증된 JSON 파일에 남고 이슈 0건과 동시일 때만 인정 — 모순 응답은 스크립트가 즉시 거부.
