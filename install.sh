@@ -81,7 +81,7 @@ install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_S
 # 대상에 이 파이프라인 외의 훅이 있어도 일절 건드리지 않는다 (지정 파일만 다룸).
 TARGET_CLAUDE_HOOKS="$TARGET_ROOT/.claude/hooks"
 mkdir -p "$TARGET_CLAUDE_HOOKS"
-for hook_script in inject_core_rules.sh pre_bash_guard.sh; do
+for hook_script in inject_conventions.sh pre_bash_guard.sh; do
   install_user_editable "$SOURCE_ROOT/.claude/hooks/$hook_script" "$TARGET_CLAUDE_HOOKS/$hook_script"
 done
 install_user_editable "$SOURCE_ROOT/.claude/hooks/core_rules.md" "$TARGET_CLAUDE_HOOKS/core_rules.md"
@@ -92,9 +92,15 @@ if [ ! -f "$TARGET_SETTINGS" ]; then
   cp "$SOURCE_ROOT/.claude/settings.json" "$TARGET_SETTINGS"
   echo "[OK] 생성: $TARGET_SETTINGS"
 else
+  if jq -e '[.hooks.UserPromptSubmit[]?.hooks[]? | select(.type == "command" and (.command | endswith("/.claude/hooks/inject_core_rules.sh")))] | length > 0' \
+      "$TARGET_SETTINGS" >/dev/null; then
+    echo "[WARN] $TARGET_SETTINGS 에 레거시 inject_core_rules.sh가 등록돼 있습니다."
+    echo "       해당 항목을 inject_conventions.sh로 교체해야 core_rules.md가 워커에게만 주입됩니다."
+    manual_steps=1
+  fi
   # 이벤트 + 실제 command 문자열이 소스와 정확히 일치해야 등록으로 인정
   # (contains 검사는 "echo disabled ...guard.sh" 같은 비활성 문자열도 통과시킨다)
-  for hook_entry in "UserPromptSubmit:inject_core_rules.sh" "PreToolUse:pre_bash_guard.sh"; do
+  for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh"; do
     hook_event="${hook_entry%%:*}"; hook_script="${hook_entry#*:}"
     expected_command="$(jq -r --arg event "$hook_event" \
       '.hooks[$event][].hooks[] | select(.type == "command") | .command' "$SOURCE_ROOT/.claude/settings.json")"
@@ -111,7 +117,7 @@ fi
 # ---------- 4. Codex 훅 ----------
 TARGET_CODEX_DIR="$TARGET_ROOT/.codex"
 mkdir -p "$TARGET_CODEX_DIR/hooks"
-install_user_editable "$SOURCE_ROOT/.codex/hooks/luna_guard.sh" "$TARGET_CODEX_DIR/hooks/luna_guard.sh"
+install_user_editable "$SOURCE_ROOT/.codex/hooks/worker_guard.sh" "$TARGET_CODEX_DIR/hooks/worker_guard.sh"
 if [ ! -f "$TARGET_CODEX_DIR/hooks.json" ]; then
   cp "$SOURCE_ROOT/.codex/hooks.json" "$TARGET_CODEX_DIR/hooks.json"
   echo "[OK] 생성: $TARGET_CODEX_DIR/hooks.json"
@@ -119,7 +125,7 @@ elif expected_codex_command="$(jq -r '.hooks.PreToolUse[].hooks[] | select(.type
   && ! jq -e --arg cmd "$expected_codex_command" \
     '[.hooks.PreToolUse[]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length > 0' \
     "$TARGET_CODEX_DIR/hooks.json" >/dev/null; then
-  echo "[WARN] $TARGET_CODEX_DIR/hooks.json 에 luna_guard.sh 항목 없음. 아래를 직접 추가하세요:"
+  echo "[WARN] $TARGET_CODEX_DIR/hooks.json 에 worker_guard.sh 항목 없음. 아래를 직접 추가하세요:"
   cat "$SOURCE_ROOT/.codex/hooks.json"
   manual_steps=1
 fi

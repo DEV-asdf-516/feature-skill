@@ -7,16 +7,18 @@
 #  - Codex 계열: codex --help 또는 codex -m 후보 목록으로 확인
 # =============================================================
 
-# --- 역할별 모델 (정확한 ID 필수. 틀리면 스크립트가 즉시 실패함) ---
-FABLE_MODEL="claude-fable-5"   # 오케스트레이터 겸 명세 작성자 (claude CLI)
-SOL_MODEL="gpt-5.6-sol"        # 명세 검증자 (codex CLI)
-LUNA_MODEL="gpt-5.6-luna"      # 구현 담당 (codex CLI)
-SONNET_MODEL="claude-sonnet-5" # 구현 리뷰 담당 (claude CLI)
-
-# --- 역할별 reasoning effort (아래 가드가 고정값 외 설정을 거부) ---
-CLAUDE_EFFORT="medium"          # Fable/Sonnet 공통
-SOL_EFFORT="high"              # 명세 검증
-LUNA_EFFORT="max"              # 메인 구현
+# --- 역할별 모델 + reasoning effort ---
+# 모델별 지원 effort가 다르므로 역할마다 함께 설정한다. 실제 허용 여부는 각 CLI가 검증한다.
+DESIGNER_MODEL="claude-fable-5"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
+DESIGNER_EFFORT="medium"
+VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
+VALIDATOR_EFFORT="high"
+WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
+WORKER_EFFORT="max"
+REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
+REVIEWER_EFFORT="medium"
+FIXER_MODEL="claude-sonnet-5"     # 리뷰 이슈 수정 담당 (claude CLI)
+FIXER_EFFORT="medium"
 
 # --- CLI 실행 형식 ---
 # Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
@@ -26,7 +28,7 @@ CODEX_BIN="codex"
 # --- 수렴/안전 한도 ---
 MAX_SPEC_ROUNDS=3        # 명세 합의 최대 라운드
 MAX_IMPL_ROUNDS=2        # 구현 리뷰 최대 라운드
-MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 Luna 재수정 허용 횟수
+MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 워커 재수정 허용 횟수
 
 # --- 산출물 디렉터리 (저장소 루트 기준 상대 경로) ---
 WORK_DIR=".agent-work"
@@ -36,8 +38,10 @@ WORK_DIR=".agent-work"
 TEST_CMD="CHANGE_ME"
 LINT_CMD="CHANGE_ME"
 
-# --- 워커에게 매 턴 적용할 규칙 파일 (system prompt로 주입) ---
-CORE_RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../hooks" && pwd)/core_rules.md"
+# --- 역할별 규칙 파일 ---
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md" # 워커 전용 필수 규칙
+CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md" # 선택 파일: 없으면 조용히 생략
 
 # =============================================================
 # 헬퍼
@@ -47,6 +51,23 @@ CORE_RULES_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../hooks" && pwd)/core_
 # 사용: VAR1=... VAR2=... render_prompt <템플릿 파일> '${VAR1} ${VAR2}'
 render_prompt() {
   envsubst "$2" < "$1"
+}
+
+# 프로젝트 conventions는 모든 역할에 전달하되 없으면 아무것도 출력하지 않는다.
+load_project_conventions() {
+  [ -f "$CONVENTIONS_FILE" ] || return 0
+  printf '[PROJECT CONVENTIONS]\n'
+  cat "$CONVENTIONS_FILE"
+}
+
+# core_rules.md는 워커에게만 전달한다. 선택 conventions가 있으면 뒤에 덧붙인다.
+load_worker_rules() {
+  printf '[CORE RULES]\n'
+  cat "$CORE_RULES_FILE"
+  if [ -f "$CONVENTIONS_FILE" ]; then
+    printf '\n\n[PROJECT CONVENTIONS]\n'
+    cat "$CONVENTIONS_FILE"
+  fi
 }
 
 # 역할별 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
@@ -136,10 +157,16 @@ log_claude_usage() {
 # =============================================================
 # 가드: 설정이 틀리면 이 파일을 source 하는 스크립트를 즉시 중단
 # =============================================================
-case "$SOL_MODEL$LUNA_MODEL$TEST_CMD$LINT_CMD" in
+case "$DESIGNER_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$TEST_CMD$LINT_CMD" in
   *CHANGE_ME*) echo "[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요." >&2; exit 1;;
 esac
-[ "$LUNA_EFFORT" = "max" ] || { echo "[FAIL] LUNA_EFFORT('$LUNA_EFFORT')는 max 여야 합니다. 워커 실행 거부." >&2; exit 1; }
-[ "$CLAUDE_EFFORT" = "medium" ] || { echo "[FAIL] CLAUDE_EFFORT('$CLAUDE_EFFORT')는 medium 이어야 합니다. 워커 실행 거부." >&2; exit 1; }
-[ "$SOL_EFFORT" = "high" ] || { echo "[FAIL] SOL_EFFORT('$SOL_EFFORT')는 high 여야 합니다. 워커 실행 거부." >&2; exit 1; }
+for required_value in \
+  "$DESIGNER_MODEL" "$DESIGNER_EFFORT" \
+  "$VALIDATOR_MODEL" "$VALIDATOR_EFFORT" \
+  "$WORKER_MODEL" "$WORKER_EFFORT" \
+  "$REVIEWER_MODEL" "$REVIEWER_EFFORT" \
+  "$FIXER_MODEL" "$FIXER_EFFORT" \
+  "$TEST_CMD" "$LINT_CMD"; do
+  [ -n "$required_value" ] || { echo "[FAIL] config.sh 역할별 모델/effort 및 프로젝트 명령은 비워둘 수 없습니다." >&2; exit 1; }
+done
 [ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] core_rules.md 없음: $CORE_RULES_FILE" >&2; exit 1; }

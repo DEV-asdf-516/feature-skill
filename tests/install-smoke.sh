@@ -18,6 +18,7 @@ git init -q "$TARGET"
 bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -x "$TARGET_SKILL/scripts/consensus-loop.sh" ] || fail "신규 설치: 스크립트 누락/실행권한 없음"
 [ -x "$TARGET/feature-live" ] || fail "신규 설치: feature-live 누락"
+[ -x "$TARGET/.claude/hooks/inject_conventions.sh" ] || fail "신규 설치: conventions 훅 누락/실행권한 없음"
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"
 jq -e '.hooks.UserPromptSubmit and .hooks.PreToolUse' "$TARGET/.claude/settings.json" >/dev/null \
   || fail "신규 설치: settings.json hooks 누락"
@@ -36,6 +37,35 @@ grep -q 'npm test' "$TARGET_SKILL/config.sh" || fail "수정 보존: config.sh �
 grep -q '커스텀 규칙' "$TARGET/.claude/hooks/core_rules.md" || fail "수정 보존: core_rules.md 덮어써짐"
 [ -f "$TARGET_SKILL/config.sh.new" ] || fail "수정 보존: config.sh.new 미생성"
 echo "[OK] 3. 사용자 수정 보존 + .new"
+
+# ---------- 3b. 역할별 모델/effort + 선택 conventions 규칙 병합 ----------
+sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^WORKER_EFFORT=.*/WORKER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT="low"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^FIXER_EFFORT=.*/FIXER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
+role_efforts="$(bash -c 'source "$1"; printf "%s|%s|%s|%s|%s" "$DESIGNER_EFFORT" "$VALIDATOR_EFFORT" "$WORKER_EFFORT" "$REVIEWER_EFFORT" "$FIXER_EFFORT"' _ "$TARGET_SKILL/config.sh")"
+[ "$role_efforts" = "medium|high|high|low|high" ] || fail "역할별 effort: config 값이 독립적으로 적용되지 않음 ($role_efforts)"
+conventions_without_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
+[ -z "$conventions_without_file" ] || fail "규칙 병합: conventions.md가 없는데 내용이 생성됨"
+worker_rules_without_conventions="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/config.sh")"
+echo "$worker_rules_without_conventions" | grep -q '커스텀 규칙' || fail "워커 규칙: core_rules.md 누락"
+echo "$worker_rules_without_conventions" | grep -q '\[PROJECT CONVENTIONS\]' \
+  && fail "워커 규칙: conventions.md가 없는데 구획이 생성됨"
+printf '# 프로젝트 컨벤션\n' > "$TARGET/conventions.md"
+conventions_with_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
+echo "$conventions_with_file" | grep -q '\[PROJECT CONVENTIONS\]' || fail "규칙 병합: conventions 구획 누락"
+echo "$conventions_with_file" | grep -q '프로젝트 컨벤션' || fail "규칙 병합: conventions.md 내용 누락"
+echo "$conventions_with_file" | grep -q '커스텀 규칙' && fail "규칙 분리: core_rules.md가 비워커 규칙에 포함됨"
+orchestrator_rules="$(CLAUDE_PROJECT_DIR="$TARGET" bash "$TARGET/.claude/hooks/inject_conventions.sh")"
+echo "$orchestrator_rules" | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: conventions.md 누락"
+echo "$orchestrator_rules" | grep -q '커스텀 규칙' && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
+grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-implement.md" || fail "규칙 전달: 워커 프롬프트 누락"
+grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
+grep -Fq -- '--append-system-prompt "$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  || fail "규칙 전달: 리뷰어/수정자 system prompt 누락"
+grep -Fq '.blocking_issues[]?' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 상세 blocking 이슈 출력 누락"
+grep -q 'decisions_lines_before' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 신규 결정 출력 누락"
+echo "[OK] 3b. 역할별 모델/effort + 선택 conventions + 합의 로그"
 
 # ---------- 4. 비호환 구버전 config → 활성 코드 교체 전 중단 ----------
 printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"
@@ -86,12 +116,25 @@ echo "$fake_command_output" | grep -q 'PreToolUse 에 pre_bash_guard.sh 미등�
   || fail "훅 command 검사: 비활성 문자열(echo disabled ...)을 설치됨으로 오판"
 echo "[OK] 5b. 가짜 command 문자열 미등록 판정"
 
+# ---------- 5c. 레거시 core rules 주입 훅 → 교체 경고 ----------
+LEGACY_HOOK_TARGET="$SCRATCH/legacy-hook"
+git init -q "$LEGACY_HOOK_TARGET"
+mkdir -p "$LEGACY_HOOK_TARGET/.claude"
+jq -n '{hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: "$CLAUDE_PROJECT_DIR/.claude/hooks/inject_core_rules.sh"}]}]}}' \
+  > "$LEGACY_HOOK_TARGET/.claude/settings.json"
+legacy_hook_output="$(bash "$SOURCE_ROOT/install.sh" "$LEGACY_HOOK_TARGET")"
+echo "$legacy_hook_output" | grep -q '레거시 inject_core_rules.sh' \
+  || fail "훅 마이그레이션: 레거시 core rules 주입 훅 교체 경고 누락"
+echo "$legacy_hook_output" | grep -q 'inject_conventions.sh로 교체' \
+  || fail "훅 마이그레이션: 교체 대상 안내 누락"
+echo "[OK] 5c. 레거시 core rules 훅 교체 안내"
+
 # ---------- 6. .gitignore 중복 방지 ----------
 duplicate_count="$(grep -c '^\.agent-work/$' "$TARGET/.gitignore")"
 [ "$duplicate_count" = "1" ] || fail ".gitignore: .agent-work/ 항목 ${duplicate_count}개 (1개여야 함)"
 echo "[OK] 6. .gitignore 중복 방지"
 
-# ---------- 7. 삭제 가드 동작 검증 (pre_bash_guard / luna_guard) ----------
+# ---------- 7. 삭제 가드 동작 검증 (pre_bash_guard / worker_guard) ----------
 BASH_GUARD="$TARGET/.claude/hooks/pre_bash_guard.sh"
 run_bash_guard() { printf '{"tool_input":{"command":"%s"}}' "$1" | CLAUDE_PROJECT_DIR="$TARGET" bash "$BASH_GUARD"; }
 run_bash_guard 'rm -rf src/legacy' 2>/dev/null && fail "삭제 가드: 플래그 없는 rm 이 통과됨"
@@ -101,14 +144,14 @@ run_bash_guard 'echo removed' 2>/dev/null || fail "삭제 가드: rm 을 포함�
 touch "$TARGET/.claude/ALLOW_DELETE"
 run_bash_guard 'rm src/legacy/old.txt' 2>/dev/null || fail "삭제 가드: ALLOW_DELETE 플래그가 있는데 차단됨"
 [ ! -f "$TARGET/.claude/ALLOW_DELETE" ] || fail "삭제 가드: ALLOW_DELETE 플래그가 1회용으로 소모되지 않음"
-LUNA_GUARD="$TARGET/.codex/hooks/luna_guard.sh"
+WORKER_GUARD="$TARGET/.codex/hooks/worker_guard.sh"
 printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","rm -rf src/legacy"]}}' "$TARGET" \
-  | bash "$LUNA_GUARD" 2>/dev/null && fail "luna 가드: rm 이 통과됨"
+  | bash "$WORKER_GUARD" 2>/dev/null && fail "worker 가드: rm 이 통과됨"
 printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","rm -rf .agent-work/tmp"]}}' "$TARGET" \
-  | bash "$LUNA_GUARD" 2>/dev/null || fail "luna 가드: .agent-work 예외 경로가 차단됨"
+  | bash "$WORKER_GUARD" 2>/dev/null || fail "worker 가드: .agent-work 예외 경로가 차단됨"
 printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","git commit -m x"]}}' "$TARGET" \
-  | bash "$LUNA_GUARD" 2>/dev/null && fail "luna 가드: 워커 커밋이 통과됨"
-echo "[OK] 7. 삭제 가드 (pre_bash_guard / luna_guard)"
+  | bash "$WORKER_GUARD" 2>/dev/null && fail "worker 가드: 워커 커밋이 통과됨"
+echo "[OK] 7. 삭제 가드 (pre_bash_guard / worker_guard)"
 
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================
-# 구현 리뷰 루프: Sonnet(리뷰 + 직접 개선) 수렴 강제
+# 구현 리뷰 루프: 리뷰어·수정자(리뷰 + 직접 개선) 수렴 강제
 # 파일 경로: .claude/skills/feature/scripts/impl-review-loop.sh
-# 사용법: impl-review-loop.sh  (메인 작성자 Luna의 구현이 끝난 뒤에만 실행)
+# 사용법: impl-review-loop.sh  (메인 작성자 워커의 구현이 끝난 뒤에만 실행)
 # 종료 코드: 0=승인, 2=라운드 초과, 1=환경 오류
-# 각 라운드 = 읽기 전용 리뷰 → (이슈 있으면) Sonnet이 직접 수정 → 다음
+# 각 라운드 = 읽기 전용 리뷰 → (이슈 있으면) 수정자가 직접 수정 → 다음
 # 라운드에서 재검증. 리뷰는 MAX_IMPL_ROUNDS+1 회 — 마지막 수정도 재검증한다.
 # =============================================================
 set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
+PROJECT_CONVENTIONS="$(load_project_conventions)"
+review_rule_args=()
+[ -z "$PROJECT_CONVENTIONS" ] || review_rule_args=(--append-system-prompt "$PROJECT_CONVENTIONS")
 
 # stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
 # EOF 를 기다리며 무기한 대기한다. 호출부가 어떤 형태로 이 스크립트를 묶어
@@ -24,10 +27,9 @@ echo "[$(date '+%F %T')] impl-review-loop 시작"
 for bin in "$CLAUDE_BIN" jq uuidgen envsubst; do
   command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치. 중단." >&2; exit 1; }
 done
-CORE_RULES="$(cat "$CORE_RULES_FILE")"
 SCHEMA_FILE="$SKILL_DIR/schemas/impl-review.schema.json"
 [ -f "$SCHEMA_FILE" ] || { echo "[FAIL] 스키마 없음: $SCHEMA_FILE" >&2; exit 1; }
-for prompt_file in sonnet-review.md sonnet-fix.md; do
+for prompt_file in reviewer.md fixer.md; do
   [ -f "$SKILL_DIR/prompts/$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $SKILL_DIR/prompts/$prompt_file" >&2; exit 1; }
 done
 
@@ -43,8 +45,8 @@ echo "리뷰 산출물: $ATTEMPT_DIR (attempt $attempt)"
 
 for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
   tag=$(printf '%02d' "$round")
-  review="$ATTEMPT_DIR/sonnet-round-$tag.json"
-  echo "=== Impl Round $round/$((MAX_IMPL_ROUNDS + 1)) : Sonnet 리뷰 ==="
+  review="$ATTEMPT_DIR/reviewer-round-$tag.json"
+  echo "=== Impl Round $round/$((MAX_IMPL_ROUNDS + 1)) : 리뷰어 리뷰 ==="
 
   # ---------- 리뷰 단계: 판정 무결성을 위해 이 실행은 읽기 도구만 허용 ----------
   # (리뷰 실행이 코드를 만질 수 있으면 "고치면서 동시에 APPROVE"가 가능해져
@@ -63,23 +65,23 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
     exit 1
   fi
 
-  review_session=$(claude_session_args sonnet-review)
-  "$CLAUDE_BIN" -p $review_session --model "$SONNET_MODEL" --effort "$CLAUDE_EFFORT" \
-    --append-system-prompt "$CORE_RULES" \
+  review_session=$(claude_session_args reviewer)
+  "$CLAUDE_BIN" -p $review_session --model "$REVIEWER_MODEL" --effort "$REVIEWER_EFFORT" \
+    "${review_rule_args[@]}" \
     --tools "Read,Grep,Glob" \
     --disallowedTools "Bash,Edit,Write,NotebookEdit" \
     --json-schema "$(cat "$SCHEMA_FILE")" --output-format json \
     "$(DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
-      render_prompt "$SKILL_DIR/prompts/sonnet-review.md" '${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR}')" \
-    > "$review.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$SONNET_MODEL' 확인)"; exit 1; }
-  claude_session_commit sonnet-review
+      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR}')" \
+    > "$review.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$REVIEWER_MODEL' 확인)"; exit 1; }
+  claude_session_commit reviewer
   log_claude_usage "impl-review-a$attempt_tag-round-$tag" "$review.raw"
 
   jq -e '.structured_output' "$review.raw" > "$review" \
     || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review.raw" >&2; exit 1; }
   verdict=$(jq -er '.verdict' "$review")
   issue_count=$(jq '.issues | length' "$review")
-  echo "Sonnet verdict: $verdict / issues: $issue_count"
+  echo "리뷰어 verdict: $verdict / issues: $issue_count"
 
   # 모순 응답은 재시도 없이 즉시 실패 — 스키마만 통과했다고 올바른 리뷰로 간주하지 않는다
   if { [ "$verdict" = "APPROVE" ] && [ "$issue_count" -gt 0 ]; } \
@@ -105,18 +107,18 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
   # 마지막 검증 라운드였다면 수정 없이 종료 (수정은 항상 재검증 대상이어야 함)
   [ "$round" -le "$MAX_IMPL_ROUNDS" ] || break
 
-  # ---------- 수정 단계: Sonnet 이 자신의 리뷰 이슈를 직접 반영 ----------
+  # ---------- 수정 단계: 수정자가 리뷰 이슈를 직접 반영 ----------
   # 리뷰와 다른 세션을 이어간다 — 실행 비용은 캐시로 줄이되 승인 독립성은 유지
-  echo "--- Sonnet 이 이슈를 직접 수정합니다 ---"
-  fix_result="$ATTEMPT_DIR/sonnet-fix-round-$tag.raw"
-  fix_session=$(claude_session_args sonnet-fix)
-  "$CLAUDE_BIN" -p $fix_session --model "$SONNET_MODEL" --effort "$CLAUDE_EFFORT" --permission-mode acceptEdits \
-    --append-system-prompt "$CORE_RULES" \
+  echo "--- 수정자가 이슈를 직접 수정합니다 ---"
+  fix_result="$ATTEMPT_DIR/fixer-round-$tag.raw"
+  fix_session=$(claude_session_args fixer)
+  "$CLAUDE_BIN" -p $fix_session --model "$FIXER_MODEL" --effort "$FIXER_EFFORT" --permission-mode acceptEdits \
+    "${review_rule_args[@]}" \
     --allowedTools "Bash" --output-format json \
     "$(REVIEW_FILE="$review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" \
-      render_prompt "$SKILL_DIR/prompts/sonnet-fix.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD}')" \
-    > "$fix_result" || { echo "[FAIL] claude 실행 실패 (모델 '$SONNET_MODEL' 확인)"; exit 1; }
-  claude_session_commit sonnet-fix
+      render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD}')" \
+    > "$fix_result" || { echo "[FAIL] claude 실행 실패 (모델 '$FIXER_MODEL' 확인)"; exit 1; }
+  claude_session_commit fixer
   log_claude_usage "impl-fix-a$attempt_tag-round-$tag" "$fix_result"
 done
 
