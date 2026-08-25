@@ -26,7 +26,7 @@ CLAUDE_BIN="claude"
 CODEX_BIN="codex"
 
 # --- 수렴/안전 한도 ---
-MAX_SPEC_ROUNDS=3        # 명세 합의 최대 라운드
+MAX_SPEC_ROUNDS=2        # 명세 합의 최대 라운드
 MAX_IMPL_ROUNDS=2        # 구현 리뷰 최대 라운드
 MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 워커 재수정 허용 횟수
 

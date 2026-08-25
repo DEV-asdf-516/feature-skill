@@ -5,7 +5,8 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 # feature
 
-피처 하나를 "설계 합의 → 구현 문서 합의 → 구현 → 리뷰 수렴 → 최종 테스트"로 끝까지 처리한다. 제어권은 이 세션(오케스트레이터) 하나뿐이고 나머지는 전부 비대화형 하위 실행이다. 두 루프의 판정·이슈·반영 결정은 `.agent-work/live.log`에 실시간 누적 — 별도 터미널에서 `./feature-live`로 관찰.
+피처 하나를 "설계 합의 → 구현 문서 합의 → 구현 → 리뷰 수렴 → 최종 테스트"로 끝까지 처리한다. 제어권은 이 세션(오케스트레이터) 하나뿐이고 나머지는 전부 비대화형 하위 실행이다. 두 루프의 판정·이슈·반영 결정은 `.agent-work/live.log`에 실시간 누적 — Phase 0 마지막에 새 터미널 창을 열어 `<저장소 루트 절대경로>/feature-live`를 절대경로로 실행해 관찰한다(중복 창 금지). 스크립트가 스스로 저장소 루트로 cd 하므로 새 창의 시작 디렉터리와 무관하게 동작한다.
+사용자가 세션 요약을 요청하면 `<skill_dir>/specs/feature_<번호>/session/SESSION-<YYYY-MM-DD>-<피처>.md`에 작성한다(결정·미해결 쟁점·다음 단계 위주).
 
 ## 사전 조건
 
@@ -20,6 +21,18 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 1. 빈 `.agent-work/decisions.md` 생성 — 이후 모든 기록은 append만, 재초기화 금지.
 2. 사용자 요구를 `.agent-work/request.md`에 기록(원문 + 해석한 범위 + 명시적 제외). 사용자가 스펙 폴더(예: `<skill_dir>/specs/feature_<번호>/`)에 브레인스토밍·기획 문서·이미지를 넣어뒀으면 전부 읽어 함께 반영한다. **모호하면 추측 대신 사용자에게 질문해 답을 받은 뒤 기록.**
 3. `.agent-work/design.md` 초안 작성. 포함: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준(무엇이 통과해야 완료인지), 비범위(non-goals). 갈리는 설계 판단은 임의로 정하지 말고 사용자에게 옵션을 제시해 결정받는다. 질문과 답은 `decisions.md`에 `- [USER-QUESTION] <질문> → <답>` 형식으로 기록 — 검증자 이슈 판정(ACCEPT/REJECT)과 사용자 결정을 구분 추적하기 위함.
+4. 실시간 로그 뷰어를 새 터미널 창으로 연다 — **생략 금지**. 이미 열려 있으면(`pgrep -f feature-live`) 다시 열지 않는다.
+
+```bash
+ROOT="$(git rev-parse --show-toplevel)"
+if ! pgrep -f "$ROOT/feature-live" >/dev/null; then
+  case "$(uname)" in
+    Darwin) osascript -e "tell application \"Terminal\" to do script \"$ROOT/feature-live\"" -e 'tell application "Terminal" to activate' ;;
+    Linux)  (x-terminal-emulator -e "$ROOT/feature-live" || gnome-terminal -- "$ROOT/feature-live") >/dev/null 2>&1 & ;;
+    *)      echo "[feature-live] 별도 터미널에서 직접 실행: $ROOT/feature-live" ;;
+  esac
+fi
+```
 
 ## Phase 1 — 설계 합의 (스크립트가 수렴 강제)
 

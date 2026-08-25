@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# feature 파이프라인 실시간 로그 뷰어. 저장소 루트에서: ./feature-live
+# feature 파이프라인 실시간 로그 뷰어. ./feature-live 또는 절대경로로 어디서든 실행 가능(스스로 저장소 루트로 cd).
 # tail -f 대체 — 파이프라인 시작 전에 켜도 live.log 생성을 기다렸다가 자동으로 이어붙는다.
+cd "$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")" || exit 1
 LOG_FILE=".agent-work/live.log"
 
 if [ ! -f "$LOG_FILE" ]; then

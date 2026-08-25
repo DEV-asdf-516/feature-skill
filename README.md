@@ -141,7 +141,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 라운드 한도는 `config.sh`에서 조정한다:
 
 ```bash
-MAX_SPEC_ROUNDS=3    # 문서 합의 라운드 (design/impl 각각 적용)
+MAX_SPEC_ROUNDS=2    # 문서 합의 라운드 (design/impl 각각 적용)
 MAX_IMPL_ROUNDS=2    # 구현 리뷰-수정 라운드
 MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟수
 ```
