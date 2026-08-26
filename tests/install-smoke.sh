@@ -17,6 +17,8 @@ git init -q "$TARGET"
 # ---------- 1. 신규 설치 ----------
 bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -x "$TARGET_SKILL/scripts/consensus-loop.sh" ] || fail "신규 설치: 스크립트 누락/실행권한 없음"
+[ -x "$TARGET_SKILL/scripts/feature-run.sh" ] || fail "신규 설치: 러너 누락/실행권한 없음"
+[ -f "$TARGET_SKILL/schemas/worker-result.schema.json" ] || fail "신규 설치: 워커 결과 스키마 누락"
 [ -x "$TARGET/feature-live" ] || fail "신규 설치: feature-live 누락"
 [ -x "$TARGET/.claude/hooks/inject_conventions.sh" ] || fail "신규 설치: conventions 훅 누락/실행권한 없음"
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"

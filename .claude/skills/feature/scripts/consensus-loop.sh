@@ -120,7 +120,7 @@ for round in $(seq 1 $((MAX_SPEC_ROUNDS + 1))); do
   designer_prompt=$(REVIEW_FILE="$review" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
   "$CLAUDE_BIN" -p $session_args --model "$DESIGNER_MODEL" --effort "$DESIGNER_EFFORT" \
-    "${designer_rule_args[@]}" \
+    ${designer_rule_args[@]+"${designer_rule_args[@]}"} \
     --permission-mode acceptEdits --output-format json \
     "$designer_prompt" \
     > "$designer_result" || { echo "[FAIL] claude 실행 실패 (모델 '$DESIGNER_MODEL' 확인)"; exit 1; }

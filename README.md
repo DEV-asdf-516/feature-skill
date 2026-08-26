@@ -22,13 +22,14 @@ Claude Code용 **다중 에이전트 합의 파이프라인 스킬**.
 
 ```mermaid
 flowchart TD
-    P0["Phase 0 · 오케스트레이터\n요구 기록(request.md) + 설계 초안(design.md)\n모호하면 사용자에게 질문"] --> P1
-    P1["Phase 1 · 설계 합의\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
-    P15["Phase 1.5 · 구현 문서\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
-    P2["Phase 2 · 구현\n워커가 두 문서대로 타이핑\n(기법 선택 권한 없음, 테스트 우선)"] --> P3
-    P3["Phase 3 · 리뷰 수렴\n리뷰어 읽기 전용 리뷰 → 수정자가 이슈 수정\nAPPROVE + 이슈 0건까지"] --> P4
-    P4["Phase 4 · 최종 테스트\n오케스트레이터가 TEST_CMD/LINT_CMD 전체 실행"] -->|통과| DONE["보고 (커밋은 사용자 지시 시\n수정자에게 위임)"]
-    P4 -->|실패| P2R["워커 재수정 → Phase 3 재승인\n(MAX_TEST_RETRIES 회)"] --> P3
+    P0["Phase 0 · 오케스트레이터\nfeature-run.sh --new → 요구 기록(request.md)\n+ 설계 초안(design.md). 모호하면 사용자에게 질문"] --> P1
+    P1["설계 합의 (러너)\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
+    P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
+    P2["구현 (러너)\n워커: REQUIRED는 그대로, DELEGATED는 제약 안에서\n결과는 JSON(DONE/UNDECIDED)"] --> P3
+    P3["리뷰 수렴 (러너)\n리뷰어 읽기 전용 리뷰 → 수정자가 이슈 수정\nAPPROVE + 이슈 0건까지"] --> P4
+    P4["최종 검증 (러너)\n승인 지문 → TEST_CMD/LINT_CMD → 지문 재확인"] -->|통과| DONE["DONE → 오케스트레이터 보고\n(커밋은 사용자 지시 시 수정자에게 위임)"]
+    P4 -->|실패| P2R["워커 1회 수정 → 재리뷰\n(MAX_TEST_RETRIES 회)"] --> P3
+    P2 -.UNDECIDED.-> ESC
     P1 -.교착/라운드 초과.-> ESC["사용자 에스컬레이션"]
     P15 -.-> ESC
     P3 -.-> ESC
@@ -39,11 +40,26 @@ flowchart TD
 
 - `design.md`: **왜·무엇을** 만드는지(요구 수준). 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
 - `implementation.md`: **무엇을** 코드로 바꾸는지(도메인 지식). 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
-- `approach.md`: **어떻게** 구현하는지(CS 지식). 함수별 기법·구조·금지 방식 + 근거. 근거는 기존 프로젝트 패턴 최우선(파일·심볼 인용), 없을 때만 그 문제 유형에 가장 적합한 표준 기법과 선택 이유
+- `approach.md`: **어떻게** 구현하는지(CS 지식), 구현 **결정** 단위로 REQUIRED/DELEGATED 표시. 함수별 기법·구조·금지 방식 + 근거. 근거는 기존 프로젝트 패턴 최우선(파일·심볼 인용), 없을 때만 그 문제 유형에 가장 적합한 표준 기법과 선택 이유
 
 "무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 approach.md 를 그대로 옮기는 타이피스트로 두고 기법 결정은 전부 Phase 1.5에서 끝낸다.
 설계가 먼저 굳어야 구현 문서 재작성 낭비가 없다. 구현 문서 검증 단계에서 설계 변경이 필요해지면
 검증자·디자이너가 임의로 바꾸지 못하고 "설계 재합의 필요"로 REJECT 기록을 남긴다.
+
+## 러너 — `scripts/feature-run.sh`
+
+오케스트레이터(LLM)는 문서 작성과 사용자 질문만 하고, 결정론적 제어는 러너가 맡는다.
+`preflight → design → impl → worker → review → verify → done`을 연결하고, 판단이 필요한 상태에서만 종료 코드로 돌아온다.
+
+| exit | status | reason |
+|---|---|---|
+| 0 | `DONE` | 승인 + 전체 테스트 통과 |
+| 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`: 오케스트레이터가 문서를 쓸 차례 |
+| 2 | `NEED_USER` | `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` |
+| 1 | `ENV_ERROR` | CLI·환경 오류 |
+
+재실행은 항상 같은 명령. `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물(합의 PASS 파일, `worker-result.json`, `approved.fingerprint`)과 교차 확인해 재개 지점을 고른다.
+러너는 agent 가 아니다 — 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰), (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이고, 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구를 넣지 않는 것이 설계 의도다.
 
 ## 신뢰성 장치
 
@@ -153,7 +169,8 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | 파일 | 내용 |
 |---|---|
 | `request.md` | 요구 원문 + 해석 범위 + 제외 사항 |
-| `design.md` / `implementation.md` / `approach.md` | 합의된 설계 / 구현 문서(무엇) / 구현 방식 문서(어떻게) |
+| `design.md` / `implementation.md` / `approach.md` | 합의된 설계 / 구현 문서(무엇) / 구현 방식 문서(어떻게, REQUIRED/DELEGATED) |
+| `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests`) |
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / 토큰·비용 누적 / 실시간 로그 |

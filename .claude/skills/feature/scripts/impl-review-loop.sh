@@ -67,12 +67,12 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
 
   review_session=$(claude_session_args reviewer)
   "$CLAUDE_BIN" -p $review_session --model "$REVIEWER_MODEL" --effort "$REVIEWER_EFFORT" \
-    "${review_rule_args[@]}" \
+    ${review_rule_args[@]+"${review_rule_args[@]}"} \
     --tools "Read,Grep,Glob" \
     --disallowedTools "Bash,Edit,Write,NotebookEdit" \
     --json-schema "$(cat "$SCHEMA_FILE")" --output-format json \
-    "$(DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
-      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR}')" \
+    "$(DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" WORKER_RESULT="$WORK_DIR/worker-result.json" \
+      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT}')" \
     > "$review.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$REVIEWER_MODEL' 확인)"; exit 1; }
   claude_session_commit reviewer
   log_claude_usage "impl-review-a$attempt_tag-round-$tag" "$review.raw"
@@ -113,7 +113,7 @@ for round in $(seq 1 $((MAX_IMPL_ROUNDS + 1))); do
   fix_result="$ATTEMPT_DIR/fixer-round-$tag.raw"
   fix_session=$(claude_session_args fixer)
   "$CLAUDE_BIN" -p $fix_session --model "$FIXER_MODEL" --effort "$FIXER_EFFORT" --permission-mode acceptEdits \
-    "${review_rule_args[@]}" \
+    ${review_rule_args[@]+"${review_rule_args[@]}"} \
     --allowedTools "Bash" --output-format json \
     "$(REVIEW_FILE="$review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" \
       render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD}')" \
