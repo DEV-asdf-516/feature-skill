@@ -17,7 +17,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 ## Phase 0 — 초기화 (오케스트레이터 직접)
 
-0. 새 피처 시작이면 `.agent-work/` 안의 이전 산출물 전부(`request.md`, `design.md`, `implementation.md`, `decisions.md`, `.session-*`, `reviews/`, `state.json`, `usage.jsonl` 등 — `archive/` 자신만 제외)를 삭제하지 말고 `.agent-work/archive/<이전-피처명-또는-날짜>/`로 `mv`(rm 금지 — 삭제는 사용자에게 요청). `.session-*`이 남으면 이전 피처 문맥이 섞이고, 명세·결정 기록은 덮어써져 유실된다. 같은 피처의 계속(Phase 4 재진입 등)이면 그대로 둔다 — 세션 이어가기가 캐시 절감의 핵심.
+0. 새 피처 시작이면 `.agent-work/` 안의 이전 산출물 전부(`request.md`, `design.md`, `implementation.md`, `approach.md`, `decisions.md`, `.session-*`, `reviews/`, `state.json`, `usage.jsonl` 등 — `archive/` 자신만 제외)를 삭제하지 말고 `.agent-work/archive/<이전-피처명-또는-날짜>/`로 `mv`(rm 금지 — 삭제는 사용자에게 요청). `.session-*`이 남으면 이전 피처 문맥이 섞이고, 명세·결정 기록은 덮어써져 유실된다. 같은 피처의 계속(Phase 4 재진입 등)이면 그대로 둔다 — 세션 이어가기가 캐시 절감의 핵심.
 1. 빈 `.agent-work/decisions.md` 생성 — 이후 모든 기록은 append만, 재초기화 금지.
 2. 사용자 요구를 `.agent-work/request.md`에 기록(원문 + 해석한 범위 + 명시적 제외). 사용자가 스펙 폴더(예: `<skill_dir>/specs/feature_<번호>/`)에 브레인스토밍·기획 문서·이미지를 넣어뒀으면 전부 읽어 함께 반영한다. **모호하면 추측 대신 사용자에게 질문해 답을 받은 뒤 기록.**
 3. `.agent-work/design.md` 초안 작성. 포함: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준(무엇이 통과해야 완료인지), 비범위(non-goals). 갈리는 설계 판단은 임의로 정하지 말고 사용자에게 옵션을 제시해 결정받는다. 질문과 답은 `decisions.md`에 `- [USER-QUESTION] <질문> → <답>` 형식으로 기록 — 검증자 이슈 판정(ACCEPT/REJECT)과 사용자 결정을 구분 추적하기 위함.
@@ -42,20 +42,26 @@ bash <skill_dir>/scripts/consensus-loop.sh design
 
 검증자(codex, read-only)가 `reviews/validator-design-round-NN.json`에 BLOCK/PASS 판정을 남기고, 디자이너(비대화형 하위 실행)가 이슈별 ACCEPT/REJECT 후 `design.md` 갱신. 검증자 지적이라도 DB 제약·기존 처리로 이미 커버되는 중복 방어 요구나 논리적으로 상충하는 트집은 근거를 남기고 REJECT 한다(구현 문서 라운드도 동일). PASS + blocking 0건까지 반복. 종료 코드 2(교착/라운드 초과)면 **다음 단계 진행 금지** — 남은 쟁점만 사용자에게 보고하고 멈춘다.
 
-## Phase 1.5 — 구현 문서 작성·합의
+## Phase 1.5 — 구현 문서 작성·합의 (무엇 / 어떻게 분리)
 
-1. 합의된 `design.md` 기반으로 오케스트레이터가 `.agent-work/implementation.md`(워커·리뷰어용)를 직접 작성. 포함: 변경·생성 파일 목록과 순서, 클래스/함수 수준 계획, 작성할 테스트 목록, 완료 판정 기준. 설계 합의를 재해석·번복하지 않는다.
-2. 같은 루프로 합의:
+구현 문서는 **두 파일**이다. 워커는 타이피스트일 뿐이므로 "생각"이 필요한 결정은 여기서 전부 끝낸다.
+
+1. `.agent-work/implementation.md` — **무엇을** 구현하는가(도메인·요구 지식). 합의된 `design.md` 기반으로 오케스트레이터가 직접 작성. 포함: 변경·생성 파일 목록과 순서, 클래스/함수 수준 계획(시그니처·입출력 계약), 작성할 테스트 목록, 완료 판정 기준. 설계 합의를 재해석·번복하지 않는다.
+2. `.agent-work/approach.md` — **어떻게** 구현하는가(CS·엔지니어링 지식). implementation.md 의 **모든 함수/변경 단위마다** 다음을 적는다. 하나라도 비면 워커가 스스로 고르게 되므로 검증자가 blocking 처리한다.
+   - 기법·구조: 알고리즘, 사용할 표준 라이브러리/기존 유틸, 데이터 구조, 제어 흐름(예: "패턴 매칭 → 정규식 + replace 콜백, 규칙은 상수 테이블로 선언"). 금지 방식이 있으면 명시(예: "수동 인덱스 순회 금지").
+   - 근거 — 우선순위 고정: **① 저장소에 같은 종류의 문제를 푸는 기존 코드가 있으면 그 패턴을 최우선으로 따르고 위치(파일 경로·심볼)를 인용한다** — 반드시 직접 열어 확인한 뒤 적는다. **② 없으면** 탐색 근거("`grep`/검색 결과 해당 패턴 없음")와 함께 그 문제 유형에 가장 적합한 표준 기법을 택하고 선택 이유를 적는다. 기존 패턴과 다른 방식을 일부러 택할 때는 이유를 `decisions.md`에 남긴다.
+   - 재사용: 참조할 기존 유틸·헬퍼·테스트 픽스처.
+3. 같은 루프로 합의(두 문서를 한 타깃으로 검증 — `approach.md`가 없으면 스크립트가 시작을 거부):
 
 ```bash
 bash <skill_dir>/scripts/consensus-loop.sh impl
 ```
 
-검증자가 설계와 모순 없이 구현 가능한지 검토해 `reviews/validator-impl-round-NN.json`에 판정. 종료 코드 2면 Phase 1과 동일하게 사용자 에스컬레이션.
+검증자가 implementation.md 는 설계와의 정합성·구체성을, approach.md 는 함수별 기법 결정 누락·기존 패턴 인용의 실재 여부·(패턴 부재 시) 기법의 적합성을 검토해 `reviews/validator-impl-round-NN.json`에 판정. 검증자는 저장소를 직접 탐색해 문서가 놓친 기존 패턴도 지적한다. 종료 코드 2면 Phase 1과 동일하게 사용자 에스컬레이션.
 
 ## Phase 2 — 구현 (워커, 메인 작성자)
 
-합의된 구현 문서로 워커에게 위임. 가능하면 전용 브랜치에서:
+합의된 두 문서(`implementation.md`·`approach.md`)로 워커에게 위임. 워커는 approach.md 의 기법을 그대로 옮기는 타이피스트이며 기법 선택 권한이 없다 — 문서로 결정할 수 없는 지점은 `[UNDECIDED]`로 보고하게 돼 있으므로, 보고에 `[UNDECIDED]`가 있으면 **합의 루프를 다시 돌리지 말고 각 항목을 그대로 사용자에게 질문**해 답을 받은 뒤 `decisions.md`에 `- [USER-QUESTION]` 형식으로 기록하고, 그 답을 approach.md 에 반영한 다음 워커를 다시 호출한다(재검증 없이 진행). 가능하면 전용 브랜치에서:
 
 ```bash
 source .claude/skills/feature/config.sh
@@ -85,6 +91,7 @@ bash <skill_dir>/scripts/impl-review-loop.sh
 
 ## 강제 규칙 (어길 수 없음)
 
+- **구현 방식(어떻게)은 워커가 정하지 않는다** — 기법·구조·참조 패턴은 Phase 1.5의 `approach.md`에서 오케스트레이터가 결정하고 검증자가 합의한다. 근거 우선순위는 기존 프로젝트 패턴 → (없을 때만) 문제 유형에 가장 적합한 표준 기법. 워커·수정자가 approach.md 와 다른 기법을 쓰면 리뷰어가 문서 위반으로 잡는다.
 - 모호한 요구·갈리는 설계 판단(Phase 0·1)은 추측 금지 — 사용자 질문 후 문서 반영, `decisions.md`에 `- [USER-QUESTION] <질문> → <답>` 기록. 검증자와의 교착도 사용자 판단으로 푼다.
 - 하위 실행은 반드시 `--model`/`-m` 명시. CLI 실패 시 다음 단계 진행 금지.
 - 역할별 모델·effort는 `config.sh` 한 곳에서 관리하고 모든 호출에 명시. `core_rules.md`는 워커에게만 주입. 저장소 루트 `conventions.md`는 선택이며 있으면 디자이너·검증자·워커·리뷰어·수정자 모두에게 주입. 프로젝트 codex hooks(`.codex/hooks.json` + `.codex/hooks/worker_guard.sh`)는 매 툴 호출에 별도 적용.

@@ -24,8 +24,8 @@ Claude Code용 **다중 에이전트 합의 파이프라인 스킬**.
 flowchart TD
     P0["Phase 0 · 오케스트레이터\n요구 기록(request.md) + 설계 초안(design.md)\n모호하면 사용자에게 질문"] --> P1
     P1["Phase 1 · 설계 합의\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
-    P15["Phase 1.5 · 구현 문서\n오케스트레이터가 implementation.md 작성\n→ 검증자와 같은 루프로 합의"] --> P2
-    P2["Phase 2 · 구현\n워커가 구현 문서대로 구현\n(전용 브랜치, 테스트 우선)"] --> P3
+    P15["Phase 1.5 · 구현 문서\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
+    P2["Phase 2 · 구현\n워커가 두 문서대로 타이핑\n(기법 선택 권한 없음, 테스트 우선)"] --> P3
     P3["Phase 3 · 리뷰 수렴\n리뷰어 읽기 전용 리뷰 → 수정자가 이슈 수정\nAPPROVE + 이슈 0건까지"] --> P4
     P4["Phase 4 · 최종 테스트\n오케스트레이터가 TEST_CMD/LINT_CMD 전체 실행"] -->|통과| DONE["보고 (커밋은 사용자 지시 시\n수정자에게 위임)"]
     P4 -->|실패| P2R["워커 재수정 → Phase 3 재승인\n(MAX_TEST_RETRIES 회)"] --> P3
@@ -35,11 +35,13 @@ flowchart TD
     P4 -.재시도 소진.-> ESC
 ```
 
-### 왜 문서가 두 개인가
+### 왜 문서가 세 개인가
 
-- `design.md` — **무엇을** 만드는지: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
-- `implementation.md` — **어떻게** 만드는지: 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
+- `design.md` — **왜·무엇을** 만드는지(요구 수준): 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
+- `implementation.md` — **무엇을** 코드로 바꾸는지(도메인 지식): 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
+- `approach.md` — **어떻게** 구현하는지(CS 지식): 함수별 기법·구조·금지 방식 + 근거. 근거는 **기존 프로젝트 패턴 최우선**(파일·심볼 인용), 없을 때만 그 문제 유형에 가장 적합한 표준 기법과 선택 이유
 
+"무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 가장 직관적인 코드(예: 정규식 대신 for+substring)를 짜고, 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 approach.md 를 그대로 옮기는 타이피스트로 두고, 기법 결정은 전부 Phase 1.5에서 끝낸다.
 설계가 먼저 굳어야 구현 문서 재작성 낭비가 없다. 구현 문서 검증 단계에서 설계 변경이 필요해지면
 검증자·디자이너가 임의로 바꾸지 못하고 "설계 재합의 필요"로 REJECT 기록을 남긴다.
 
@@ -151,7 +153,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | 파일 | 내용 |
 |---|---|
 | `request.md` | 요구 원문 + 해석 범위 + 제외 사항 |
-| `design.md` / `implementation.md` | 합의된 설계 / 구현 문서 |
+| `design.md` / `implementation.md` / `approach.md` | 합의된 설계 / 구현 문서(무엇) / 구현 방식 문서(어떻게) |
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / 토큰·비용 누적 / 실시간 로그 |

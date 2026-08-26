@@ -4,7 +4,7 @@
 # 파일 경로: .claude/skills/feature/scripts/consensus-loop.sh
 # 사용법: consensus-loop.sh [design|impl]  (저장소 루트에서 실행)
 #   design: $WORK_DIR/design.md 합의 (오케스트레이터가 초안을 먼저 작성)
-#   impl  : $WORK_DIR/implementation.md 합의 (design 합의 후 실행)
+#   impl  : $WORK_DIR/implementation.md(무엇) + approach.md(어떻게) 합의 (design 합의 후 실행)
 # 종료 코드: 0=PASS 수렴, 2=라운드 초과/교착, 1=환경 오류
 # 리뷰는 MAX_SPEC_ROUNDS+1 회 — 마지막 수정도 반드시 재검증한다.
 # =============================================================
@@ -47,6 +47,7 @@ done
 [ -f "$TARGET_DOC" ] || { echo "[FAIL] $TARGET_DOC 없음. 오케스트레이터가 초안을 먼저 작성해야 함." >&2; exit 1; }
 if [ "$TARGET" = "impl" ]; then
   [ -f "$WORK_DIR/design.md" ] || { echo "[FAIL] $WORK_DIR/design.md 없음. 설계 합의가 먼저다." >&2; exit 1; }
+  [ -f "$WORK_DIR/approach.md" ] || { echo "[FAIL] $WORK_DIR/approach.md 없음. 구현 문서는 implementation.md(무엇)와 approach.md(어떻게) 두 개가 모두 있어야 한다." >&2; exit 1; }
 fi
 for prompt_file in "$VALIDATOR_PROMPT_FILE" "$DESIGNER_PROMPT_FILE"; do
   [ -f "$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $prompt_file" >&2; exit 1; }
