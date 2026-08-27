@@ -22,7 +22,11 @@ exec </dev/null
 
 # 진행 로그를 $WORK_DIR/live.log 에 실시간 누적 (tail -f 로 관찰 가능)
 mkdir -p "$WORK_DIR"
-exec > >(tee -a "$WORK_DIR/live.log") 2>&1
+# 부모 러너가 이미 live.log를 tee 중이면 중복 기록하지 않는다.
+# 단독 실행할 때만 이 스크립트가 직접 tee를 연다.
+if [ -z "${FEATURE_LIVE_TEE:-}" ]; then
+  exec > >(tee -a "$WORK_DIR/live.log") 2>&1
+fi
 echo "[$(date '+%F %T')] consensus-loop ${1:-design} 시작"
 
 TARGET="${1:-design}"

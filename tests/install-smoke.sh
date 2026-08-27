@@ -155,5 +155,54 @@ printf '{"cwd":"%s","tool_input":{"command":["bash","-lc","git commit -m x"]}}' 
   | bash "$WORKER_GUARD" 2>/dev/null && fail "worker 가드: 워커 커밋이 통과됨"
 echo "[OK] 7. 삭제 가드 (pre_bash_guard / worker_guard)"
 
+# ---------- 8. live.log 아카이브 + 중첩 tee 중복 방지 ----------
+LOG_TARGET="$SCRATCH/logging"
+LOG_SKILL="$LOG_TARGET/.claude/skills/feature"
+git init -q "$LOG_TARGET"
+bash "$SOURCE_ROOT/install.sh" "$LOG_TARGET" >/dev/null
+sed -i.sedbak 's/^CLAUDE_BIN=.*/CLAUDE_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^CODEX_BIN=.*/CODEX_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^TEST_CMD=.*/TEST_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+chmod -x "$LOG_TARGET/feature-live"
+
+mkdir -p "$LOG_TARGET/.agent-work"
+printf '이전 피처 로그\n' > "$LOG_TARGET/.agent-work/live.log"
+printf '이전 산출물\n' > "$LOG_TARGET/.agent-work/previous.txt"
+set +e
+(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh" --new --archive-as live-regression) >/dev/null 2>&1
+new_rc=$?
+set -e
+[ "$new_rc" = 3 ] || fail "live.log 아카이브: 새 피처 초기화 종료 코드가 3이 아님 ($new_rc)"
+[ "$(cat "$LOG_TARGET/.agent-work/archive/live-regression/live.log")" = '이전 피처 로그' ] \
+  || fail "live.log 아카이브: 이전 로그 내용이 보존되지 않음"
+[ -f "$LOG_TARGET/.agent-work/archive/live-regression/previous.txt" ] \
+  || fail "live.log 아카이브: 다른 이전 산출물과 같은 디렉터리에 보관되지 않음"
+grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
+  && fail "live.log 아카이브: 새 로그에 이전 로그가 계속 누적됨"
+
+printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
+mkdir -p "$LOG_TARGET/.agent-work/reviews"
+printf '{"verdict":"PASS","blocking_issues":[],"non_blocking_notes":[]}\n' \
+  > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
+set +e
+(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+resume_rc=$?
+set -e
+[ "$resume_rc" = 3 ] || fail "중첩 tee: 설계 합의 후 구현 문서 대기 종료 코드가 3이 아님 ($resume_rc)"
+consensus_start_count="$(grep -c 'consensus-loop design 시작' "$LOG_TARGET/.agent-work/live.log")"
+[ "$consensus_start_count" = 1 ] \
+  || fail "중첩 tee: consensus-loop 시작 로그가 ${consensus_start_count}회 기록됨 (1회여야 함)"
+
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FEATURE_LIVE_TEE=1 bash "$LOG_SKILL/scripts/impl-review-loop.sh") \
+  >> "$LOG_TARGET/.agent-work/live.log" 2>&1
+set -e
+impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/live.log")"
+[ "$impl_start_count" = 1 ] \
+  || fail "중첩 tee: impl-review-loop 시작 로그가 ${impl_start_count}회 기록됨 (1회여야 함)"
+echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지"
+
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

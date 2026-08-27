@@ -39,7 +39,6 @@ cd "$ROOT"
 
 exec </dev/null
 mkdir -p "$WORK_DIR"
-exec > >(tee -a "$WORK_DIR/live.log") 2>&1
 
 STATE="$WORK_DIR/run-state.json"
 WORKER_RESULT="$WORK_DIR/worker-result.json"
@@ -56,6 +55,18 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# --new에서는 tee가 live.log를 열기 전에 이전 로그를 아카이브한다.
+# 열린 파일을 나중에 mv하면 tee가 아카이브된 inode에 계속 쓰게 된다.
+ARCHIVE_NAME="${ARCHIVE_AS:-$(date '+%Y%m%d-%H%M%S')}"
+if [ "$NEW" = 1 ] && [ -f "$WORK_DIR/live.log" ]; then
+  mkdir -p "$WORK_DIR/archive/$ARCHIVE_NAME"
+  mv "$WORK_DIR/live.log" "$WORK_DIR/archive/$ARCHIVE_NAME/live.log"
+fi
+exec > >(tee -a "$WORK_DIR/live.log") 2>&1
+
+# 하위 루프가 같은 live.log에 tee를 중첩해 로그를 중복 기록하지 않게 한다.
+export FEATURE_LIVE_TEE=1
 
 # ---------- 상태 기록 (임시 파일 + mv 원자 교체) ----------
 # state 는 재개 '힌트'다. 각 stage 진입 시 필요한 산출물 존재·지문을 별도로 확인한다.
@@ -103,7 +114,7 @@ done
 
 if [ "$NEW" = 1 ]; then
   # 이전 산출물은 삭제하지 않고 archive/ 로 이동 (rm 금지)
-  archive_name="${ARCHIVE_AS:-$(date '+%Y%m%d-%H%M%S')}"
+  archive_name="$ARCHIVE_NAME"
   archive_dir="$WORK_DIR/archive/$archive_name"
   moved=0
   for item in "$WORK_DIR"/* "$WORK_DIR"/.session-*; do
