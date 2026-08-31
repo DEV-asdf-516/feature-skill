@@ -129,12 +129,49 @@ if [ "$NEW" = 1 ]; then
 fi
 [ -f "$WORK_DIR/decisions.md" ] || : > "$WORK_DIR/decisions.md"
 
-# 실시간 로그 뷰어 (이미 열려 있으면 생략)
-if [ -x "$ROOT/feature-live" ] && ! pgrep -f "$ROOT/feature-live" >/dev/null 2>&1; then
+# 실시간 로그 뷰어. 저장소별 lock을 먼저 선점해 러너 재실행·동시 실행이
+# 같은 뷰어 터미널을 여러 개 열지 못하게 한다.
+live_pid_active() { # pid-file
+  local pid
+  [ -f "$1" ] || return 1
+  IFS= read -r pid < "$1"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+claim_live_launch_lock() {
+  LIVE_LOCK_DIR="$WORK_DIR/.feature-live.lock"
+  mkdir "$LIVE_LOCK_DIR" 2>/dev/null && return 0
+  if live_pid_active "$LIVE_LOCK_DIR/viewer.pid" \
+     || live_pid_active "$LIVE_LOCK_DIR/launcher.pid"; then
+    return 1
+  fi
+
+  # 강제 종료 등으로 남은 stale lock은 고유 경로로 옮긴 뒤 회수한다.
+  local stale_lock="$LIVE_LOCK_DIR.stale.$$"
+  if mv "$LIVE_LOCK_DIR" "$stale_lock" 2>/dev/null; then
+    rm -rf "$stale_lock"
+  fi
+  mkdir "$LIVE_LOCK_DIR" 2>/dev/null
+}
+
+if [ -x "$ROOT/feature-live" ] && claim_live_launch_lock; then
+  printf '%s\n' "$$" > "$LIVE_LOCK_DIR/launcher.pid"
+  live_launched=0
   case "$(uname)" in
-    Darwin) osascript -e "tell application \"Terminal\" to do script \"$ROOT/feature-live\"" >/dev/null 2>&1 || true;;
-    Linux)  (x-terminal-emulator -e "$ROOT/feature-live" || gnome-terminal -- "$ROOT/feature-live") >/dev/null 2>&1 & ;;
+    Darwin)
+      osascript -e "tell application \"Terminal\" to do script \"$ROOT/feature-live --lock-held\"" \
+        >/dev/null 2>&1 && live_launched=1
+      ;;
+    Linux)
+      (x-terminal-emulator -e "$ROOT/feature-live" --lock-held \
+        || gnome-terminal -- "$ROOT/feature-live" --lock-held) >/dev/null 2>&1 &
+      live_launched=1
+      ;;
   esac
+  if [ "$live_launched" = 0 ]; then
+    rm -f "$LIVE_LOCK_DIR/launcher.pid"
+    rmdir "$LIVE_LOCK_DIR" 2>/dev/null || true
+  fi
 fi
 
 # ---------- 재개 지점 결정: state 힌트 + 산출물 교차 확인 ----------

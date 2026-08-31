@@ -3,10 +3,68 @@
 # tail -f 대체 — 파이프라인 시작 전에 켜도 live.log 생성을 기다렸다가 자동으로 이어붙는다.
 cd "$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")" || exit 1
 LOG_FILE=".agent-work/live.log"
+LOCK_DIR=".agent-work/.feature-live.lock"
+PID_FILE="$LOCK_DIR/viewer.pid"
+LOCK_HELD=0
+[ "${1:-}" = "--lock-held" ] && LOCK_HELD=1
+mkdir -p .agent-work
+
+pid_file_active() {
+  local pid
+  [ -f "$1" ] || return 1
+  IFS= read -r pid < "$1"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+if [ "$LOCK_HELD" = 1 ]; then
+  mkdir -p "$LOCK_DIR"
+  if pid_file_active "$PID_FILE"; then
+    echo "[feature-live] 이미 실행 중입니다."
+    exit 0
+  fi
+elif ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  if pid_file_active "$PID_FILE" || pid_file_active "$LOCK_DIR/launcher.pid"; then
+    echo "[feature-live] 이미 실행 중이거나 시작 중입니다."
+    exit 0
+  fi
+
+  stale_lock="$LOCK_DIR.stale.$$"
+  if mv "$LOCK_DIR" "$stale_lock" 2>/dev/null; then
+    rm -rf "$stale_lock"
+  fi
+  mkdir "$LOCK_DIR" 2>/dev/null || {
+    echo "[feature-live] 다른 뷰어가 동시에 시작됐습니다."
+    exit 0
+  }
+fi
+
+printf '%s\n' "$$" > "$PID_FILE.tmp"
+mv "$PID_FILE.tmp" "$PID_FILE"
+rm -f "$LOCK_DIR/launcher.pid"
+
+TAIL_PID=""
+cleanup() {
+  trap - EXIT HUP INT TERM
+  if [ -n "$TAIL_PID" ] && kill -0 "$TAIL_PID" 2>/dev/null; then
+    kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
+  fi
+  if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE")" = "$$" ]; then
+    rm -f "$PID_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [ ! -f "$LOG_FILE" ]; then
   echo "[feature-live] $LOG_FILE 대기 중... (파이프라인이 시작되면 자동으로 스트리밍됩니다)"
   until [ -f "$LOG_FILE" ]; do sleep 1; done
 fi
 
-exec tail -n 100 -F "$LOG_FILE"
+tail -n 100 -F "$LOG_FILE" &
+TAIL_PID=$!
+wait "$TAIL_PID"

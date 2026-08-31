@@ -204,5 +204,42 @@ impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/l
   || fail "중첩 tee: impl-review-loop 시작 로그가 ${impl_start_count}회 기록됨 (1회여야 함)"
 echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지"
 
+# ---------- 9. feature-live 저장소별 단일 실행 lock ----------
+chmod +x "$LOG_TARGET/feature-live"
+: > "$LOG_TARGET/.agent-work/live.log"
+"$LOG_TARGET/feature-live" >/dev/null 2>&1 &
+viewer_pid=$!
+for _ in $(seq 1 50); do
+  [ -f "$LOG_TARGET/.agent-work/.feature-live.lock/viewer.pid" ] && break
+  sleep 0.02
+done
+[ -f "$LOG_TARGET/.agent-work/.feature-live.lock/viewer.pid" ] \
+  || fail "feature-live lock: viewer.pid가 생성되지 않음"
+[ "$(cat "$LOG_TARGET/.agent-work/.feature-live.lock/viewer.pid")" = "$viewer_pid" ] \
+  || fail "feature-live lock: 실제 뷰어 PID와 기록값이 다름"
+
+duplicate_viewer_output="$("$LOG_TARGET/feature-live")"
+echo "$duplicate_viewer_output" | grep -q '이미 실행 중' \
+  || fail "feature-live lock: 두 번째 실행이 기존 뷰어를 감지하지 못함"
+kill "$viewer_pid"
+wait "$viewer_pid" 2>/dev/null || true
+[ ! -e "$LOG_TARGET/.agent-work/.feature-live.lock" ] \
+  || fail "feature-live lock: 뷰어 종료 후 lock이 정리되지 않음"
+
+mkdir -p "$LOG_TARGET/.agent-work/.feature-live.lock"
+printf '99999999\n' > "$LOG_TARGET/.agent-work/.feature-live.lock/viewer.pid"
+"$LOG_TARGET/feature-live" >/dev/null 2>&1 &
+replacement_viewer_pid=$!
+for _ in $(seq 1 50); do
+  replacement_recorded_pid="$(cat "$LOG_TARGET/.agent-work/.feature-live.lock/viewer.pid" 2>/dev/null || true)"
+  [ "$replacement_recorded_pid" = "$replacement_viewer_pid" ] && break
+  sleep 0.02
+done
+[ "$replacement_recorded_pid" = "$replacement_viewer_pid" ] \
+  || fail "feature-live lock: stale lock을 회수하지 못함"
+kill "$replacement_viewer_pid"
+wait "$replacement_viewer_pid" 2>/dev/null || true
+echo "[OK] 9. feature-live 저장소별 단일 실행 lock"
+
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"
