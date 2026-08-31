@@ -3,8 +3,8 @@
 Claude Code용 **다중 에이전트 합의 파이프라인 스킬**.
 
 복잡한 피처 하나를 역할이 분리된 AI 실행들이 "설계 합의 → 구현 문서 합의 → 구현 → 리뷰 수렴 → 최종 테스트"로
-끝까지 처리한다. 문서는 검증자와 합의될 때까지 구현을 시작하지 않는다. 코드는 리뷰어가 승인할 때까지
-파이프라인이 끝나지 않는다. 막히면 사람에게 올라온다.
+끝까지 처리한다. 문서는 검증자와 합의될 때까지 구현을 시작하지 않는다. 리뷰어가 승인하지 않으면 파이프라인도
+끝나지 않고, 막히면 사람에게 올라온다.
 
 ## 역할
 
@@ -40,7 +40,7 @@ flowchart TD
 
 - `design.md`: **왜·무엇을** 만드는지(요구 수준). 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
 - `implementation.md`: **무엇을** 코드로 바꾸는지(도메인 지식). 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
-- `approach.md`: **어떻게** 구현하는지(CS 지식), 구현 **결정** 단위로 REQUIRED/DELEGATED 표시. 함수별 기법·구조·금지 방식 + 근거. 근거는 기존 프로젝트 패턴 최우선(파일·심볼 인용), 없을 때만 그 문제 유형에 가장 적합한 표준 기법과 선택 이유
+- `approach.md`: **어떻게** 구현하는지(CS 지식), 구현 **결정** 단위로 REQUIRED/DELEGATED 표시. 함수별로 어떤 기법과 구조를 쓰고 무엇을 금지하는지, 그리고 그 근거. 근거는 기존 프로젝트 패턴 최우선(파일·심볼 인용), 없을 때만 그 문제 유형에 가장 적합한 표준 기법을 고르고 왜 골랐는지 밝힌다
 
 "무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 approach.md 를 그대로 옮기는 타이피스트로 두고 기법 결정은 전부 Phase 1.5에서 끝낸다.
 설계가 먼저 굳어야 구현 문서 재작성 낭비가 없다. 구현 문서 검증 단계에서 설계 변경이 필요해지면
@@ -48,8 +48,8 @@ flowchart TD
 
 ## 러너 — `scripts/feature-run.sh`
 
-오케스트레이터(LLM)는 문서 작성과 사용자 질문만 하고, 결정론적 제어는 러너가 맡는다.
-`preflight → design → impl → worker → review → verify → done`을 연결하고, 판단이 필요한 상태에서만 종료 코드로 돌아온다.
+오케스트레이터(LLM)는 문서 작성과 사용자 질문만 하고 결정론적 제어는 러너가 맡는다.
+`preflight → design → impl → worker → review → verify → done`을 연결하고 판단이 필요한 상태에서만 종료 코드로 돌아온다.
 
 | exit | status | reason |
 |---|---|---|
@@ -59,7 +59,7 @@ flowchart TD
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
 재실행은 항상 같은 명령. `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물(합의 PASS 파일, `worker-result.json`, `approved.fingerprint`)과 교차 확인해 재개 지점을 고른다.
-러너는 agent 가 아니다 — 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰), (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이고, 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구를 넣지 않는 것이 설계 의도다.
+러너는 agent 가 아니다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
 
 ## 신뢰성 장치
 
@@ -108,9 +108,9 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 
 ## 요구사항
 
-- [Claude Code](https://claude.com/claude-code) CLI (`claude`) — 로그인 상태
-- OpenAI Codex CLI (`codex`) — 로그인 상태
-- `jq`, `uuidgen`, `envsubst`(gettext) — macOS: `brew install jq gettext`
+- [Claude Code](https://claude.com/claude-code) CLI (`claude`): 로그인 상태
+- OpenAI Codex CLI (`codex`): 로그인 상태
+- `jq`, `uuidgen`, `envsubst`(gettext). macOS: `brew install jq gettext`
 - git 저장소 (브랜치 생성·diff 리뷰·훅 판정에 사용)
 
 ## 설치
@@ -178,11 +178,11 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 
 ## 트러블슈팅
 
-- **`[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요.`** — 설치 2번을 안 한 것. `TEST_CMD`/`LINT_CMD`를 채운다.
-- **`[FAIL] codex 실행 실패 (모델 '...' 확인)`** — codex 계정에서 해당 모델 ID가 유효한지 확인 (`codex -m` 후보 목록).
-- **루프가 exit 2로 멈춤** — 버그가 아니라 설계된 에스컬레이션. `state.json`의 `DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
-- **codex 훅이 안 걸림** — codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
-- **이전 피처 문맥이 섞임** — `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
+- **`[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요.`**: 설치 2번을 안 한 것. `TEST_CMD`/`LINT_CMD`를 채운다.
+- **`[FAIL] codex 실행 실패 (모델 '...' 확인)`**: codex 계정에서 해당 모델 ID가 유효한지 확인 (`codex -m` 후보 목록).
+- **루프가 exit 2로 멈춤**: 버그가 아니라 설계된 에스컬레이션. `state.json`의 `DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
+- **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
+- **이전 피처 문맥이 섞임**: `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
 
 ## Claude Code Agent Teams와의 차이
 
@@ -196,8 +196,7 @@ Claude Code에는 여러 Claude 인스턴스가 협업하는 실험 기능 [Agen
 - **반대로 Agent Teams가 나은 것**: 팀원 간 직접 통신, 공유 작업 리스트·의존성 자동 관리. 독립 작업 여러 개를
   병렬 분업할 때는 Agent Teams가 자연스럽다.
 
-품질 관문이 필요한 피처 하나, 그러니까 설계 합의에서 구현을 거쳐 리뷰 수렴까지 가야 하는 작업이라면
-이 스킬을 쓴다. 독립 작업 여러 개의 병렬 처리는 Agent Teams.
+피처 하나에 품질 관문이 필요한 경우, 설계 합의부터 구현과 리뷰 수렴까지 가야 하는 작업에 이 스킬을 쓴다. 독립 작업 여러 개의 병렬 처리는 Agent Teams.
 
 ## 라이선스
 

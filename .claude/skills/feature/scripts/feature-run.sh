@@ -211,7 +211,8 @@ run_worker() { # prompt-file extra-vars-spec
   mkdir -p "$WORK_DIR/reviews"
   rm -f "$WORKER_RESULT"
   "$CODEX_BIN" exec -m "$WORKER_MODEL" -c "model_reasoning_effort=\"$WORKER_EFFORT\"" --sandbox workspace-write \
-    --output-schema "$WORKER_SCHEMA" -o "$WORKER_RESULT" "$prompt" > "$raw" 2>&1 \
+    --output-schema "$WORKER_SCHEMA" -o "$WORKER_RESULT" "$prompt" 2>&1 \
+    | tee "$raw" \
     || { tail -20 "$raw" >&2; env_error "codex 워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"; }
   jq -e '.status' "$WORKER_RESULT" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $WORKER_RESULT"
   local status; status="$(jq -r '.status' "$WORKER_RESULT")"

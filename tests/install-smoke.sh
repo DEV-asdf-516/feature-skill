@@ -202,7 +202,39 @@ set -e
 impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/live.log")"
 [ "$impl_start_count" = 1 ] \
   || fail "중첩 tee: impl-review-loop 시작 로그가 ${impl_start_count}회 기록됨 (1회여야 함)"
-echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지"
+
+# 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
+FAKE_CODEX="$LOG_TARGET/fake-codex"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -e' \
+  'output_file=""' \
+  'while [ "$#" -gt 0 ]; do' \
+  '  case "$1" in -o) output_file="$2"; shift 2;; *) shift;; esac' \
+  'done' \
+  'printf "WORKER_STREAM_MARKER\\n"' \
+  'printf '\''{"status":"UNDECIDED","undecided":[{"location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
+  > "$FAKE_CODEX"
+chmod +x "$FAKE_CODEX"
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
+printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
+printf '{"verdict":"PASS","blocking_issues":[],"non_blocking_notes":[]}\n' \
+  > "$LOG_TARGET/.agent-work/reviews/validator-impl-round-01.json"
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' \
+  > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+worker_rc=$?
+set -e
+[ "$worker_rc" = 2 ] || fail "워커 스트리밍: UNDECIDED 종료 코드가 2가 아님 ($worker_rc)"
+worker_raw="$(ls "$LOG_TARGET"/.agent-work/reviews/worker-*.log | tail -1)"
+[ "$(grep -c 'WORKER_STREAM_MARKER' "$worker_raw")" = 1 ] \
+  || fail "워커 스트리밍: reviews 원문 로그에 출력이 정확히 1회 보존되지 않음"
+[ "$(grep -c 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log")" = 1 ] \
+  || fail "워커 스트리밍: live.log에 출력이 정확히 1회 전달되지 않음"
+echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 출력 스트리밍"
 
 # ---------- 9. feature-live 저장소별 단일 실행 lock ----------
 chmod +x "$LOG_TARGET/feature-live"
