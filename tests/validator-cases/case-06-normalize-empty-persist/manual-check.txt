@@ -1,0 +1,1 @@
+minimum_contract_needed 가 SQL·어노테이션·클래스 배치 같은 구현 기법이 아니라 최소 불변식만 서술하는지 확인

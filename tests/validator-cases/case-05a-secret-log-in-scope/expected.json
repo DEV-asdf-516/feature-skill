@@ -1,0 +1,12 @@
+{
+  "stage": "design",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category": "CHANGE_INTRODUCES_SECURITY_RISK",
+      "evidence_type": "REACHABLE_FAILURE",
+      "origin": "ROUND_1"
+    }
+  ]
+}

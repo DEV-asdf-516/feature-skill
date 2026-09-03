@@ -1,22 +1,82 @@
 {
   "type": "object",
   "properties": {
-    "verdict": { "type": "string", "enum": ["APPROVE", "REQUEST_CHANGES"] },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "APPROVE",
+        "REQUEST_CHANGES"
+      ]
+    },
     "issues": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "file": { "type": "string", "minLength": 1 },
-          "problem": { "type": "string", "minLength": 1 },
-          "required_change": { "type": "string", "minLength": 1 }
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1
+          },
+          "problem": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required_change": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["id", "file", "problem", "required_change"],
+        "required": [
+          "id",
+          "file",
+          "problem",
+          "required_change"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "decision_points": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "minLength": 1
+          },
+          "contract": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "MATCH",
+              "UNDECLARED_BRANCH",
+              "REDUNDANT",
+              "MISSING_IN_CODE"
+            ]
+          }
+        },
+        "required": [
+          "location",
+          "contract",
+          "result"
+        ],
         "additionalProperties": false
       }
     }
   },
-  "required": ["verdict", "issues"],
+  "required": [
+    "verdict",
+    "issues",
+    "decision_points"
+  ],
   "additionalProperties": false
 }

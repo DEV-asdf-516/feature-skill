@@ -1,17 +1,46 @@
 {
   "type": "object",
   "properties": {
-    "status": { "type": "string", "enum": ["DONE", "UNDECIDED"] },
+    "status": {
+      "type": "string",
+      "enum": [
+        "DONE",
+        "UNDECIDED"
+      ]
+    },
     "undecided": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "location": { "type": "string", "minLength": 1 },
-          "decision_needed": { "type": "string", "minLength": 1 },
-          "options": { "type": "array", "items": { "type": "string" } }
+          "kind": {
+            "type": "string",
+            "enum": [
+              "DOC_GAP",
+              "USER_DECISION"
+            ]
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1
+          },
+          "decision_needed": {
+            "type": "string",
+            "minLength": 1
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
-        "required": ["location", "decision_needed", "options"],
+        "required": [
+          "kind",
+          "location",
+          "decision_needed",
+          "options"
+        ],
         "additionalProperties": false
       }
     },
@@ -20,11 +49,24 @@
       "items": {
         "type": "object",
         "properties": {
-          "location": { "type": "string", "minLength": 1 },
-          "technique": { "type": "string", "minLength": 1 },
-          "basis": { "type": "string", "minLength": 1 }
+          "location": {
+            "type": "string",
+            "minLength": 1
+          },
+          "technique": {
+            "type": "string",
+            "minLength": 1
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1
+          }
         },
-        "required": ["location", "technique", "basis"],
+        "required": [
+          "location",
+          "technique",
+          "basis"
+        ],
         "additionalProperties": false
       }
     },
@@ -33,14 +75,32 @@
       "items": {
         "type": "object",
         "properties": {
-          "name": { "type": "string", "minLength": 1 },
-          "result": { "type": "string", "enum": ["PASS", "FAIL", "NOT_RUN"] }
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "PASS",
+              "FAIL",
+              "NOT_RUN"
+            ]
+          }
         },
-        "required": ["name", "result"],
+        "required": [
+          "name",
+          "result"
+        ],
         "additionalProperties": false
       }
     }
   },
-  "required": ["status", "undecided", "delegated_choices", "tests"],
+  "required": [
+    "status",
+    "undecided",
+    "delegated_choices",
+    "tests"
+  ],
   "additionalProperties": false
 }

@@ -1,0 +1,12 @@
+{
+  "stage": "design",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "ASK_USER",
+      "category": "POLICY_UNDECIDED",
+      "evidence_type": "UNDECIDED_CHOICE",
+      "origin": "ROUND_1"
+    }
+  ]
+}

@@ -20,7 +20,7 @@
 #
 # 종료 코드 / run-state.json status:
 #   0 DONE        완료
-#   2 NEED_USER   사용자 판단 필요 (reason: DEADLOCK | MAX_ROUNDS | UNDECIDED |
+#   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED)
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING)
 #   1 ENV_ERROR   환경·CLI 오류
@@ -187,7 +187,8 @@ fi
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
 last_pass() { # 검증자 라운드 파일 중 마지막이 PASS 인가
   local last; last="$(ls "$WORK_DIR"/reviews/validator-"$1"-round-*.json 2>/dev/null | sort | tail -1)"
-  [ -n "$last" ] && jq -e '.verdict=="PASS" and (.blocking_issues|length)==0' "$last" >/dev/null 2>&1
+  # schema_version 이 현재 계약(VALIDATOR_CONTRACT_VERSION)과 다른 이전 PASS 는 무효 — 검증 라운드를 새 기준으로 다시 돈다 (--new 불필요)
+  [ -n "$last" ] && jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" '.schema_version==$v and .verdict=="PASS" and (.blocking_issues|length)==0' "$last" >/dev/null 2>&1
 }
 [ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
 case "$STAGE" in
@@ -205,8 +206,8 @@ log "시작 stage: $STAGE (test_retries=$TEST_RETRIES)"
 run_worker() { # prompt-file extra-vars-spec
   local prompt_file="$1"; shift
   local prompt
-  prompt="$(WORKER_RULES="$(load_worker_rules)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
-    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG}')"
+  prompt="$(WORKER_RULES="$(load_worker_rules)" REFERENCE_CODE="$(load_reference_code)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
+    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG}')"
   local raw="$WORK_DIR/reviews/worker-$(date '+%Y%m%d-%H%M%S').log"
   mkdir -p "$WORK_DIR/reviews"
   rm -f "$WORKER_RESULT"
@@ -223,7 +224,14 @@ run_worker() { # prompt-file extra-vars-spec
   log "워커 status: $status / undecided: $n / delegated_choices: $(jq '.delegated_choices|length' "$WORKER_RESULT")"
   jq -r '.undecided[]? | "  [UNDECIDED] \(.location): \(.decision_needed)"' "$WORKER_RESULT"
   if [ "$status" = UNDECIDED ]; then
-    stop_need_user UNDECIDED "$WORKER_RESULT 의 undecided 항목을 사용자에게 질문 → decisions.md [USER-QUESTION] 기록 → approach.md 반영 후 재실행"
+    # 문서 누락(DOC_GAP)은 오케스트레이터가 approach.md 를 보강할 일이고, 제품 정책(USER_DECISION)만 사용자에게 간다.
+    local user_n; user_n="$(jq '[.undecided[] | select(.kind=="USER_DECISION")] | length' "$WORKER_RESULT")"
+    if [ "$user_n" -gt 0 ]; then
+      stop_need_user UNDECIDED "$WORKER_RESULT 의 USER_DECISION 항목을 사용자에게 질문 → decisions.md [USER-QUESTION] 기록 → approach.md 반영 후 재실행 (DOC_GAP 항목은 오케스트레이터가 함께 보강)"
+    fi
+    # stage 힌트를 impl 로 되돌려 재실행 시 보강된 approach.md 가 검증자 재합의를 거치게 한다
+    STAGE=impl
+    stop_need_docs APPROACH_GAP "$WORKER_RESULT 의 DOC_GAP 항목대로 approach.md 를 보강한 뒤 재실행 (검증자 재합의 후 워커 재개)"
   fi
 }
 
@@ -236,7 +244,7 @@ while :; do
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" design; rc=$?; set -e
       case $rc in
         0) STAGE=impl;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 실패 — 마지막 reviews/validator-design-*.json 의 쟁점을 사용자에게 보고";;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-design-*.json 의 쟁점을 사용자에게 보고";;
         *) env_error "consensus-loop design 실패 (exit $rc)";;
       esac;;
 
@@ -246,7 +254,7 @@ while :; do
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
       case $rc in
         0) STAGE=worker;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 실패 — 마지막 reviews/validator-impl-*.json 의 쟁점을 사용자에게 보고";;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-impl-*.json 의 쟁점을 사용자에게 보고";;
         *) env_error "consensus-loop impl 실패 (exit $rc)";;
       esac;;
 

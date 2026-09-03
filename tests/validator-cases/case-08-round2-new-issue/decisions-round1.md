@@ -1,0 +1,1 @@
+- [round 1] B-01 ACCEPT: 사용자 명시 요구. approach.md 결정 2 를 MaskingUtil.maskPhone 재사용으로 수정.

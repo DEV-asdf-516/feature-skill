@@ -1,22 +1,150 @@
 {
   "type": "object",
   "properties": {
-    "verdict": { "type": "string", "enum": ["PASS", "BLOCK"] },
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        3
+      ]
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "BLOCK"
+      ]
+    },
     "blocking_issues": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "problem": { "type": "string", "minLength": 1 },
-          "required_change": { "type": "string", "minLength": 1 }
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "REVISE_DOC",
+              "ASK_USER"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "REQUIREMENT_MISSING",
+              "REQUIREMENT_CONTRADICTION",
+              "CHANGE_INTRODUCES_SECURITY_RISK",
+              "CHANGE_INTRODUCES_DATA_RISK",
+              "IMPLEMENTATION_IMPOSSIBLE",
+              "POLICY_UNDECIDED"
+            ]
+          },
+          "change_relation": {
+            "type": "string",
+            "enum": [
+              "INTRODUCED_BY_FEATURE",
+              "ACTIVATED_BY_FEATURE",
+              "REQUIRED_TO_IMPLEMENT"
+            ]
+          },
+          "evidence_type": {
+            "type": "string",
+            "enum": [
+              "DIRECT_MISMATCH",
+              "REACHABLE_FAILURE",
+              "UNDECIDED_CHOICE"
+            ]
+          },
+          "basis_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "conflict_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "code_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "reachable_scenario": {
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          },
+          "why_blocks_now": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minimum_contract_needed": {
+            "type": "string"
+          },
+          "user_question": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "ROUND_1",
+              "UNRESOLVED_PREVIOUS",
+              "REVISION_REGRESSION",
+              "NEWLY_EXPOSED_BY_REVISION"
+            ]
+          },
+          "previous_issue_id": {
+            "type": "string"
+          },
+          "revision_ref": {
+            "type": "string"
+          }
         },
-        "required": ["id", "problem", "required_change"],
+        "required": [
+          "id",
+          "action",
+          "category",
+          "change_relation",
+          "evidence_type",
+          "basis_refs",
+          "conflict_refs",
+          "code_refs",
+          "reachable_scenario",
+          "impact",
+          "why_blocks_now",
+          "minimum_contract_needed",
+          "user_question",
+          "options",
+          "origin",
+          "previous_issue_id",
+          "revision_ref"
+        ],
         "additionalProperties": false
       }
-    },
-    "non_blocking_notes": { "type": "array", "items": { "type": "string" } }
+    }
   },
-  "required": ["verdict", "blocking_issues", "non_blocking_notes"],
+  "required": [
+    "schema_version",
+    "verdict",
+    "blocking_issues"
+  ],
   "additionalProperties": false
 }

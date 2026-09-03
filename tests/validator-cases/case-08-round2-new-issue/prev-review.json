@@ -1,0 +1,29 @@
+{
+  "schema_version": 3,
+  "verdict": "BLOCK",
+  "blocking_issues": [
+    {
+      "id": "B-01",
+      "action": "REVISE_DOC",
+      "category": "REQUIREMENT_CONTRADICTION",
+      "change_relation": "INTRODUCED_BY_FEATURE",
+      "evidence_type": "DIRECT_MISMATCH",
+      "basis_refs": [
+        "request.md:L5"
+      ],
+      "conflict_refs": [
+        "approach.md:L5"
+      ],
+      "code_refs": [],
+      "reachable_scenario": "",
+      "impact": "사용자가 명시한 MaskingUtil.maskPhone 재사용 요구와 다른 마스킹 구현이 들어간다",
+      "why_blocks_now": "사용자 명시 요구이며 워커가 기존 패턴으로 단일하게 결정할 수 없다",
+      "minimum_contract_needed": "전화번호 마스킹은 기존 MaskingUtil.maskPhone 을 재사용한다는 결정을 approach.md 에 명시",
+      "user_question": "",
+      "options": [],
+      "origin": "ROUND_1",
+      "previous_issue_id": "",
+      "revision_ref": ""
+    }
+  ]
+}

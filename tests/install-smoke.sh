@@ -46,7 +46,7 @@ sed -i.sedbak 's/^WORKER_EFFORT=.*/WORKER_EFFORT="high"/' "$TARGET_SKILL/config.
 sed -i.sedbak 's/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT="low"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^FIXER_EFFORT=.*/FIXER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
 role_efforts="$(bash -c 'source "$1"; printf "%s|%s|%s|%s|%s" "$DESIGNER_EFFORT" "$VALIDATOR_EFFORT" "$WORKER_EFFORT" "$REVIEWER_EFFORT" "$FIXER_EFFORT"' _ "$TARGET_SKILL/config.sh")"
-[ "$role_efforts" = "medium|high|high|low|high" ] || fail "역할별 effort: config 값이 독립적으로 적용되지 않음 ($role_efforts)"
+[ "$role_efforts" = "medium|medium|high|low|high" ] || fail "역할별 effort: config 값이 독립적으로 적용되지 않음 ($role_efforts)"
 conventions_without_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
 [ -z "$conventions_without_file" ] || fail "규칙 병합: conventions.md가 없는데 내용이 생성됨"
 worker_rules_without_conventions="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/config.sh")"
@@ -183,7 +183,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"verdict":"PASS","blocking_issues":[],"non_blocking_notes":[]}\n' \
+printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' \
   > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
 set +e
 (cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
@@ -213,27 +213,36 @@ printf '%s\n' \
   '  case "$1" in -o) output_file="$2"; shift 2;; *) shift;; esac' \
   'done' \
   'printf "WORKER_STREAM_MARKER\\n"' \
-  'printf '\''{"status":"UNDECIDED","undecided":[{"location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
+  'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
   > "$FAKE_CODEX"
 chmod +x "$FAKE_CODEX"
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
 printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
-printf '{"verdict":"PASS","blocking_issues":[],"non_blocking_notes":[]}\n' \
+printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' \
   > "$LOG_TARGET/.agent-work/reviews/validator-impl-round-01.json"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' \
   > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"
 set +e
-(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 worker_rc=$?
 set -e
-[ "$worker_rc" = 2 ] || fail "워커 스트리밍: UNDECIDED 종료 코드가 2가 아님 ($worker_rc)"
+[ "$worker_rc" = 2 ] || fail "워커 스트리밍: USER_DECISION 종료 코드가 2가 아님 ($worker_rc)"
 worker_raw="$(ls "$LOG_TARGET"/.agent-work/reviews/worker-*.log | tail -1)"
 [ "$(grep -c 'WORKER_STREAM_MARKER' "$worker_raw")" = 1 ] \
   || fail "워커 스트리밍: reviews 원문 로그에 출력이 정확히 1회 보존되지 않음"
 [ "$(grep -c 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log")" = 1 ] \
   || fail "워커 스트리밍: live.log에 출력이 정확히 1회 전달되지 않음"
+# DOC_GAP 만 있으면 사용자에게 가지 않고 NEED_DOCS(exit 3), 재실행 시 검증자 재합의(stage=impl)
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=DOC_GAP bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+docgap_rc=$?
+set -e
+[ "$docgap_rc" = 3 ] || fail "DOC_GAP: 종료 코드가 3(NEED_DOCS)이 아님 ($docgap_rc)"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = APPROACH_GAP ] || fail "DOC_GAP: reason 이 APPROACH_GAP 이 아님"
+[ "$(jq -r '.stage' "$LOG_TARGET/.agent-work/run-state.json")" = impl ] || fail "DOC_GAP: 재개 stage 가 impl 이 아님"
 echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 출력 스트리밍"
 
 # ---------- 9. feature-live 저장소별 단일 실행 lock ----------

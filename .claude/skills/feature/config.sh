@@ -12,7 +12,7 @@
 DESIGNER_MODEL="claude-fable-5"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
 DESIGNER_EFFORT="medium"
 VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
-VALIDATOR_EFFORT="high"
+VALIDATOR_EFFORT="medium"   # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
 WORKER_EFFORT="max"
 REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
@@ -24,6 +24,11 @@ FIXER_EFFORT="medium"
 # Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
 CLAUDE_BIN="claude"
 CODEX_BIN="codex"
+
+# --- 검증자 계약 버전 ---
+# 검증자 프롬프트·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
+# 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
+VALIDATOR_CONTRACT_VERSION=3
 
 # --- 수렴/안전 한도 ---
 MAX_SPEC_ROUNDS=2        # 명세 합의 최대 라운드
@@ -37,6 +42,8 @@ WORK_DIR=".agent-work"
 # 예: Gradle "./gradlew test" / pytest "venv/bin/pytest tests -q" / npm "npm test"
 TEST_CMD="CHANGE_ME"
 LINT_CMD="CHANGE_ME"
+# 복잡도·중복·dead code 같은 정적 분석은 LINT_CMD 안에 프로젝트 도구로 구성한다(eslint/sonar, radon, detekt, clippy, knip, jscpd…).
+# 스킬은 언어 독립이므로 자체 코드 검사를 갖지 않는다. 커버리지 % 임계치도 두지 않는다 — 숫자 채우기용 테스트를 유발한다.
 
 # --- 역할별 규칙 파일 ---
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -68,6 +75,29 @@ load_worker_rules() {
     printf '\n\n[PROJECT CONVENTIONS]\n'
     cat "$CONVENTIONS_FILE"
   fi
+}
+
+# approach.md 가 백틱으로 인용한 참조 구현 `path:L40-L68` 의 해당 줄 범위만 워커 프롬프트에 붙인다.
+# "가서 읽어라"는 codex 비대화형 실행에서 자주 무시되므로 러너가 결정론적으로 눈앞에 둔다.
+# 심볼 탐색은 언어 종속이라 하지 않는다 — 줄 범위가 없는 인용은 붙이지 않는다(검증자가 범위를 요구한다).
+# 참조당 REF_MAX_LINES 줄, 총 REF_MAX_REFS 개까지.
+REF_MAX_REFS="${REF_MAX_REFS:-8}"
+REF_MAX_LINES="${REF_MAX_LINES:-100}"
+load_reference_code() {
+  local approach="$WORK_DIR/approach.md" count=0 ref path from to
+  [ -f "$approach" ] || return 0
+  grep -oE '`[A-Za-z0-9_./-]+:L[0-9]+-L[0-9]+`' "$approach" | tr -d '`' | sort -u \
+    | while IFS= read -r ref; do
+        path="${ref%%:L*}"; from="${ref##*:L}"; from="${from%%-L*}"; to="${ref##*-L}"
+        [ -f "$path" ] || continue
+        [ "$count" -ge "$REF_MAX_REFS" ] && { printf '\n[REFERENCE CODE 생략: 참조 %d개 초과]\n' "$REF_MAX_REFS"; break; }
+        [ "$count" -eq 0 ] && printf '[REFERENCE CODE — approach.md 가 인용한 기존 코드. 이 스타일·유틸·명명을 그대로 재사용하라]\n'
+        count=$((count + 1))
+        if [ $((to - from + 1)) -gt "$REF_MAX_LINES" ]; then to=$((from + REF_MAX_LINES - 1)); fi
+        printf '\n--- %s:L%d-L%d ---\n' "$path" "$from" "$to"
+        sed -n "${from},${to}p" "$path"
+      done
+  return 0
 }
 
 # 역할별 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
