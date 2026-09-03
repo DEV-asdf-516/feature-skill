@@ -2,3 +2,4 @@
 .claude/settings.local.json
 .claude/ALLOW_COMMIT
 _workspace/
+.claude/ALLOW_REAL_LLM_REGRESSION

@@ -1,0 +1,25 @@
+{
+  "schema_version": 6,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "id": "R-01",
+      "action": "FIX_CODE",
+      "category": "CONTRACT_VIOLATION",
+      "evidence_type": "DIRECT_MISMATCH",
+      "basis_refs": [
+        "approach.md:L4-L5"
+      ],
+      "code_refs": [
+        "src/ClientService.java:L13-L14"
+      ],
+      "reachable_scenario": "",
+      "impact": "",
+      "why_blocks_now": "REQUIRED 결정과 다른 재구현이며 마스킹 규칙 변경 시 두 곳이 갈라진다",
+      "required_outcome": "전화번호 마스킹이 approach.md 결정 2 가 지정한 MaskingUtil.maskPhone 을 거친다",
+      "origin": "ROUND_1",
+      "previous_issue_id": "",
+      "fix_ref": ""
+    }
+  ]
+}

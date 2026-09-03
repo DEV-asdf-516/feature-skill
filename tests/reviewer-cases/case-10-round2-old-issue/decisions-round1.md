@@ -1,0 +1,1 @@
+- [fix round 1] R-01 ACCEPT: src/ClientService.java:L13-L15 분기 제거

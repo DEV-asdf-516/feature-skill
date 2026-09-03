@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "ClientCache.evict 는 잘못된 키 타입으로 절대 제거하지 않는 기존 결함이지만 diff 밖이고 이번 변경이 활성화하지 않는다."
+}

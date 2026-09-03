@@ -1,0 +1,14 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": [
+        "REDUNDANT_CONTROL_FLOW",
+        "UNDECLARED_BEHAVIOR",
+        "CONTRACT_VIOLATION"
+      ]
+    }
+  ]
+}

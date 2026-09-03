@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "implementation.md 에 이름이 없는 추가 테스트지만 design.md 의 마스킹 계약을 black-box 로 검증한다."
+}

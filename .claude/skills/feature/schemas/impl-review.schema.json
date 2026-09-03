@@ -1,6 +1,12 @@
 {
   "type": "object",
   "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [
+        6
+      ]
+    },
     "verdict": {
       "type": "string",
       "enum": [
@@ -17,66 +23,102 @@
             "type": "string",
             "minLength": 1
           },
-          "file": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "FIX_CODE",
+              "DOC_GAP"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "CONTRACT_VIOLATION",
+              "UNDECLARED_BEHAVIOR",
+              "REACHABLE_BUG",
+              "SECURITY_OR_DATA_RISK",
+              "REDUNDANT_CONTROL_FLOW",
+              "REDUNDANT_CODE",
+              "TEST_CONTRACT_GAP",
+              "OUT_OF_SCOPE_CHANGE"
+            ]
+          },
+          "evidence_type": {
+            "type": "string",
+            "enum": [
+              "DIRECT_MISMATCH",
+              "REACHABLE_FAILURE",
+              "SEMANTIC_REDUNDANCY"
+            ]
+          },
+          "basis_refs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "code_refs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "reachable_scenario": {
+            "type": "string"
+          },
+          "impact": {
+            "type": "string"
+          },
+          "why_blocks_now": {
             "type": "string",
             "minLength": 1
           },
-          "problem": {
+          "required_outcome": {
             "type": "string",
             "minLength": 1
           },
-          "required_change": {
+          "origin": {
             "type": "string",
-            "minLength": 1
+            "enum": [
+              "ROUND_1",
+              "UNRESOLVED_PREVIOUS",
+              "FIX_REGRESSION",
+              "NEWLY_EXPOSED_BY_FIX"
+            ]
+          },
+          "previous_issue_id": {
+            "type": "string"
+          },
+          "fix_ref": {
+            "type": "string"
           }
         },
         "required": [
           "id",
-          "file",
-          "problem",
-          "required_change"
-        ],
-        "additionalProperties": false
-      }
-    },
-    "decision_points": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "location": {
-            "type": "string",
-            "minLength": 1
-          },
-          "contract": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "result": {
-            "type": "string",
-            "enum": [
-              "MATCH",
-              "UNDECLARED_BRANCH",
-              "REDUNDANT",
-              "MISSING_IN_CODE"
-            ]
-          }
-        },
-        "required": [
-          "location",
-          "contract",
-          "result"
+          "action",
+          "category",
+          "evidence_type",
+          "basis_refs",
+          "code_refs",
+          "reachable_scenario",
+          "impact",
+          "why_blocks_now",
+          "required_outcome",
+          "origin",
+          "previous_issue_id",
+          "fix_ref"
         ],
         "additionalProperties": false
       }
     }
   },
   "required": [
+    "schema_version",
     "verdict",
-    "issues",
-    "decision_points"
+    "issues"
   ],
   "additionalProperties": false
 }

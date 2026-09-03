@@ -1,0 +1,11 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category": "REDUNDANT_CODE",
+      "evidence_type": "SEMANTIC_REDUNDANCY"
+    }
+  ]
+}

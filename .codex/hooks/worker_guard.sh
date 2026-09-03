@@ -20,6 +20,12 @@ if echo "$TOOL_INPUT_TEXT" | grep -qE 'git\s+(commit|push)'; then
   exit 2
 fi
 
+# 워커 index 조작 금지 — staged/unstaged 상태는 사용자의 것. 리뷰·원복은 작업 트리(worker-baseline.tree) 기준으로만 이뤄진다.
+if echo "$TOOL_INPUT_TEXT" | grep -qE 'git\s+(add|reset|stash)([[:space:]"]|$)|git\s+restore\s+.*--staged'; then
+  echo "차단: 워커는 git index 를 조작할 수 없습니다(git add/reset/stash/restore --staged). 파일 내용만 수정하세요." >&2
+  exit 2
+fi
+
 # 워커 파일 삭제 금지 (.agent-work·임시 경로 제외) — 삭제가 필요하면 사유를 보고하고 중단
 if echo "$TOOL_INPUT_TEXT" | grep -qE '(^|[;&|[:space:]"])(rm|unlink)[[:space:]]|git[[:space:]]+rm[[:space:]]|-delete([[:space:]"]|$)'; then
   if ! echo "$TOOL_INPUT_TEXT" | grep -qE '(rm|unlink)[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*("?\.agent-work/|"?/tmp/|"?/private/tmp/)'; then

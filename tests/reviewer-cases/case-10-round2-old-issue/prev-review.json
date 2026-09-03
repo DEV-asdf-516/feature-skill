@@ -1,0 +1,26 @@
+{
+  "schema_version": 6,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "id": "R-01",
+      "action": "FIX_CODE",
+      "category": "UNDECLARED_BEHAVIOR",
+      "evidence_type": "DIRECT_MISMATCH",
+      "basis_refs": [
+        "approach.md:L9-L13",
+        "design.md:L6"
+      ],
+      "code_refs": [
+        "src/ClientService.java:L13-L15"
+      ],
+      "reachable_scenario": "",
+      "impact": "",
+      "why_blocks_now": "제어 흐름 절에 열거되지 않은 결정점이며 design 이 phone 을 항상 존재한다고 정했다",
+      "required_outcome": "ClientService.summary 에 문서에 없는 phone null 방어 분기가 없다",
+      "origin": "ROUND_1",
+      "previous_issue_id": "",
+      "fix_ref": ""
+    }
+  ]
+}

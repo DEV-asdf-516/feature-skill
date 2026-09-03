@@ -13,7 +13,8 @@
 #   design : consensus-loop.sh design
 #   impl   : consensus-loop.sh impl        (implementation.md + approach.md 필요)
 #   worker : codex 워커 실행, 결과 JSON(status DONE|UNDECIDED)
-#   review : impl-review-loop.sh
+#   review : impl-review-loop.sh (리뷰어 게이트 → FIX_CODE 만 수정자 → 종결 검토)
+#            DOC_GAP → impl(문서 보강), DEADLOCK/MAX_ROUNDS → 사용자
 #   verify : 승인 지문 → TEST_CMD → LINT_CMD → 지문 재확인
 #            실패 → worker-fix(최대 MAX_TEST_RETRIES) → review → verify
 #            지문 STALE → review (연속 2회면 사용자 반환)
@@ -211,10 +212,23 @@ run_worker() { # prompt-file extra-vars-spec
   local raw="$WORK_DIR/reviews/worker-$(date '+%Y%m%d-%H%M%S').log"
   mkdir -p "$WORK_DIR/reviews"
   rm -f "$WORKER_RESULT"
+  local index_before index_after worker_rc
+  index_before="$(compute_index_fingerprint)" || env_error "워커 호출 전 git index 지문 계산 실패"
+  set +e
   "$CODEX_BIN" exec -m "$WORKER_MODEL" -c "model_reasoning_effort=\"$WORKER_EFFORT\"" --sandbox workspace-write \
     --output-schema "$WORKER_SCHEMA" -o "$WORKER_RESULT" "$prompt" 2>&1 \
-    | tee "$raw" \
-    || { tail -20 "$raw" >&2; env_error "codex 워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"; }
+    | tee "$raw"
+  worker_rc=$?
+  set -e
+  # 사후 조건을 CLI 성공 여부보다 먼저 본다 — 워커는 작업 트리만 바꿀 수 있고, index 가 바뀌었으면
+  # (worker_guard 정규식을 우회한 git add 등) 실패한 실행이라도 복구하지 않고 그 사실부터 보고한다
+  index_after="$(compute_index_fingerprint)" || env_error "워커 호출 후 git index 지문 계산 실패"
+  [ "$index_after" = "$index_before" ] \
+    || env_error "워커가 git index 를 변경함 — 자동 복구하지 않음. git status 로 확인 후 재실행"
+  if [ "$worker_rc" -ne 0 ]; then
+    tail -20 "$raw" >&2
+    env_error "codex 워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
+  fi
   jq -e '.status' "$WORKER_RESULT" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $WORKER_RESULT"
   local status; status="$(jq -r '.status' "$WORKER_RESULT")"
   local n; n="$(jq '.undecided|length' "$WORKER_RESULT")"
@@ -262,6 +276,13 @@ while :; do
       if [ -n "$BRANCH" ] && [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
         git rev-parse --verify -q "$BRANCH" >/dev/null && git checkout "$BRANCH" || git checkout -b "$BRANCH"
       fi
+      # 워커 진입 직전 작업 트리를 기준선으로 한 번만 기록한다(같은 피처 동안 재사용, --new 가 아카이브).
+      # 리뷰 diff 와 범위 밖 변경 원복은 HEAD 가 아니라 이 기준선 대비다 — 피처 이전의 미커밋 변경을 이번 작업으로 오인하지 않는다.
+      if [ ! -f "$WORK_DIR/worker-baseline.tree" ]; then
+        snapshot_worktree_tree > "$WORK_DIR/worker-baseline.tree.tmp" && mv "$WORK_DIR/worker-baseline.tree.tmp" "$WORK_DIR/worker-baseline.tree" \
+          || env_error "워커 진입 기준선 tree 기록 실패"
+        log "워커 진입 기준선 tree: $(cat "$WORK_DIR/worker-baseline.tree")"
+      fi
       run_worker worker-implement.md
       STAGE=review;;
 
@@ -269,7 +290,11 @@ while :; do
       set +e; bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
       case $rc in
         0) STAGE=verify;;
-        2) stop_need_user MAX_ROUNDS "구현 리뷰 미승인 — 마지막 reviews/impl-attempt-*/reviewer-*.json 의 이슈를 사용자에게 보고";;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 리뷰 중단 — state.json.review 의 남은 이슈를 사용자에게 보고";;
+        3)
+          # 리뷰어 DOC_GAP: 코드가 아니라 approach.md 가 비어 있다. 워커 DOC_GAP 과 같은 경로로 문서 단계 재진입.
+          STAGE=impl
+          stop_need_docs APPROACH_GAP "$(jq -r '.review' "$WORK_DIR/state.json") 의 DOC_GAP 이슈(required_outcome)대로 approach.md 를 보강한 뒤 재실행 (검증자 재합의 후 워커 재개)";;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
 

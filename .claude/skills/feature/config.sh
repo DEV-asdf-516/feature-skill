@@ -9,10 +9,10 @@
 
 # --- 역할별 모델 + reasoning effort ---
 # 모델별 지원 effort가 다르므로 역할마다 함께 설정한다. 실제 허용 여부는 각 CLI가 검증한다.
-DESIGNER_MODEL="claude-fable-5"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
-DESIGNER_EFFORT="medium"
+DESIGNER_MODEL="claude-fable-5.1"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
+DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
-VALIDATOR_EFFORT="medium"   # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
+VALIDATOR_EFFORT="high"   # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
 WORKER_EFFORT="max"
 REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
@@ -30,9 +30,14 @@ CODEX_BIN="codex"
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
 VALIDATOR_CONTRACT_VERSION=3
 
+# --- 리뷰어 계약 버전 ---
+# 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
+# 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
+REVIEWER_CONTRACT_VERSION=6
+
 # --- 수렴/안전 한도 ---
-MAX_SPEC_ROUNDS=2        # 명세 합의 최대 라운드
-MAX_IMPL_ROUNDS=2        # 구현 리뷰 최대 라운드
+MAX_SPEC_ROUNDS=1        # 명세 합의 최대 라운드
+MAX_IMPL_ROUNDS=1        # 구현 리뷰-수정 라운드 (리뷰는 +1회 — 마지막 수정도 종결 검토). 1 = Reviewer 2 + Fixer 1, 첫 수정으로 안 풀리면 사용자에게
 MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 워커 재수정 허용 횟수
 
 # --- 산출물 디렉터리 (저장소 루트 기준 상대 경로) ---
@@ -91,13 +96,32 @@ load_reference_code() {
         path="${ref%%:L*}"; from="${ref##*:L}"; from="${from%%-L*}"; to="${ref##*-L}"
         [ -f "$path" ] || continue
         [ "$count" -ge "$REF_MAX_REFS" ] && { printf '\n[REFERENCE CODE 생략: 참조 %d개 초과]\n' "$REF_MAX_REFS"; break; }
-        [ "$count" -eq 0 ] && printf '[REFERENCE CODE — approach.md 가 인용한 기존 코드. 이 스타일·유틸·명명을 그대로 재사용하라]\n'
+        [ "$count" -eq 0 ] && printf '[REFERENCE CODE — approach.md 가 인용한 기존 코드. REQUIRED 동작·구조·재사용 계약 확인용]\n'
         count=$((count + 1))
         if [ $((to - from + 1)) -gt "$REF_MAX_LINES" ]; then to=$((from + REF_MAX_LINES - 1)); fi
         printf '\n--- %s:L%d-L%d ---\n' "$path" "$from" "$to"
         sed -n "${from},${to}p" "$path"
       done
   return 0
+}
+
+# 작업 트리(WORK_DIR 제외, gitignore 적용)를 git tree 객체로 기록해 SHA 를 출력한다.
+# 커밋·실제 index 를 건드리지 않고(임시 index) untracked 신규 파일까지 담는다.
+# 용도: 워커 진입 직전 기준선(worker-baseline.tree — 이번 작업이 만든 변경만 리뷰·원복 대상으로 삼는다),
+#       리뷰 라운드별 스냅샷(수정자가 실제로 바꾼 diff).
+snapshot_worktree_tree() {
+  local idx; idx="$(cd "$WORK_DIR" && pwd)/.snapshot-index"
+  rm -f "$idx"
+  if git rev-parse --verify -q HEAD >/dev/null; then
+    GIT_INDEX_FILE="$idx" git read-tree HEAD || return 1
+  else
+    GIT_INDEX_FILE="$idx" git read-tree --empty || return 1   # 커밋이 없는 저장소: 빈 tree 에서 시작
+  fi
+  # pathspec 으로 WORK_DIR 를 빼면 gitignore 된 경우 git 이 "ignored path" 힌트와 함께 실패한다 — 전부 담은 뒤 index 에서만 뺀다
+  GIT_INDEX_FILE="$idx" git add -A >/dev/null || return 1
+  GIT_INDEX_FILE="$idx" git rm -r -q --cached --ignore-unmatch -- "$WORK_DIR" >/dev/null || return 1
+  GIT_INDEX_FILE="$idx" git write-tree || return 1
+  rm -f "$idx"
 }
 
 # 역할별 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
@@ -130,6 +154,13 @@ sha256_stdin() {
   else
     shasum -a 256 | awk '{print $1}'
   fi
+}
+
+# git index 지문. 워커·수정자 호출 전후로 비교해 staged/unstaged 상태가 바뀌었으면 자동 복구 없이 중단한다
+# (사용자의 staged 상태를 파이프라인이 해석하지 않는다). 정규식 훅이 놓치는 index 명령까지 결과 기준으로 잡는다.
+compute_index_fingerprint() {
+  # -v: assume-unchanged(소문자 태그)·skip-worktree(S) 같은 index 플래그까지 지문에 포함 — 변경 파일을 status 에서 숨기는 우회를 막는다
+  git ls-files --stage -v -z | sha256_stdin
 }
 
 # 작업 트리 지문: tracked diff + status(-uall) + untracked 파일 '내용'까지 해시.

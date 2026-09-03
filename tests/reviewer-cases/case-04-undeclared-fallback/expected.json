@@ -1,0 +1,14 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": [
+        "UNDECLARED_BEHAVIOR",
+        "CONTRACT_VIOLATION"
+      ],
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ]
+}

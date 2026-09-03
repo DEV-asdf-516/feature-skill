@@ -5,6 +5,7 @@
 입력은 `tests/validator-cases/case-*/`에 고정돼 있다(request·design·(impl 사례는 implementation·approach)·필요한 `src/`·`expected.json`). 사람이 매번 문서를 새로 쓰지 않으므로, 결과 차이는 프롬프트·스키마 변경 때문이다. 픽스처 문서에 기대 답("러너 관할" 같은 힌트)을 적지 않는다.
 
 ```bash
+touch .claude/ALLOW_REAL_LLM_REGRESSION                  # 유료 실행 1회 승인 (사용자 지시 후에만)
 bash tests/validator-regression.sh                       # 전 사례
 bash tests/validator-regression.sh case-07-policy-undecided
 bash tests/validator-regression.sh compare <validator-*-round-NN.json> <expected.json>

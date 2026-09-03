@@ -39,6 +39,17 @@ if [ "${1:-}" = compare ]; then
   exit 0
 fi
 
+# ---------- 유료 실행 승인 게이트 ----------
+# 이 스크립트는 실제 LLM CLI 를 부르고 비용이 든다. 사용자가 명시적으로 승인한 실행만 허용한다:
+# 사용자 지시 후 `touch .claude/ALLOW_REAL_LLM_REGRESSION` (1회용 — 실행 시 소모). 오케스트레이터가 지시 없이 만들면 안 된다.
+APPROVAL_FILE="$SOURCE_ROOT/.claude/ALLOW_REAL_LLM_REGRESSION"
+if [ ! -f "$APPROVAL_FILE" ]; then
+  echo "[BLOCK] 이 회귀는 실제 claude/codex 호출과 비용이 발생합니다. 사용자 승인 후 1회용 허용 파일을 만든 뒤 다시 실행: touch $APPROVAL_FILE" >&2
+  exit 3
+fi
+mkdir -p "$SOURCE_ROOT/.agent-work"
+mv "$APPROVAL_FILE" "$SOURCE_ROOT/.agent-work/ALLOW_REAL_LLM_REGRESSION.used.$(date +%s)"   # 한 번 쓴 승인은 재사용하지 않는다
+
 # 대입문만 검사 — config.sh 의 가드 코드 자체에 CHANGE_ME 문자열이 있으므로 전체 grep 은 항상 걸린다
 if grep -Eq '^[[:space:]]*(VALIDATOR_MODEL|VALIDATOR_EFFORT|CODEX_BIN)=.*CHANGE_ME' "$SRC_CONFIG"; then
   echo "[FAIL] config.sh 의 검증자 설정(VALIDATOR_MODEL 등) CHANGE_ME 를 먼저 채우세요." >&2; exit 1

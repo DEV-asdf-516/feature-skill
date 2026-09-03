@@ -1,0 +1,6 @@
+{
+  "round": 2,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "Round 1 리뷰(prev-review.json)는 null fallback 만 지적했고 수정자가 제거했다. ClientController.summary 의 alias 변수(body)는 Round 1 부터 있었고 수정 diff 밖이다 — Round 2 에서 새로 제기하면 종결 검토 회귀."
+}

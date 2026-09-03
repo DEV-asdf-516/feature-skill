@@ -1,0 +1,13 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": [
+        "CONTRACT_VIOLATION",
+        "REDUNDANT_CODE"
+      ]
+    }
+  ]
+}

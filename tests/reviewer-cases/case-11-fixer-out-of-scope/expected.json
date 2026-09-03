@@ -1,0 +1,14 @@
+{
+  "round": 2,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "category": "OUT_OF_SCOPE_CHANGE",
+      "origin_any_of": [
+        "FIX_REGRESSION",
+        "NEWLY_EXPOSED_BY_FIX"
+      ]
+    }
+  ],
+  "note": "수정자가 R-01 을 고치면서 request.md 제외 대상인 MaskingUtil.java 까지 바꿨다."
+}

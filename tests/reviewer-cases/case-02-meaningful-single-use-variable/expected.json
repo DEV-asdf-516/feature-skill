@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "maskedPhone 은 한 번 쓰이지만 approach.md 주 경로의 도메인 개념을 이름 붙인 변수다."
+}
