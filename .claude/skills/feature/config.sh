@@ -9,7 +9,7 @@
 
 # --- 역할별 모델 + reasoning effort ---
 # 모델별 지원 effort가 다르므로 역할마다 함께 설정한다. 실제 허용 여부는 각 CLI가 검증한다.
-DESIGNER_MODEL="claude-fable-5.1"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
+DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
 DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
 VALIDATOR_EFFORT="high"   # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high

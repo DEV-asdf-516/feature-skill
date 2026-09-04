@@ -136,6 +136,9 @@ chmod +x "$TARGET_ROOT/feature-live"
 echo "[OK] 갱신: $TARGET_ROOT/feature-live"
 
 if ! grep -qE '^\.agent-work(/|/\*)?$' "$TARGET_ROOT/.gitignore" 2>/dev/null; then
+  if [ -s "$TARGET_ROOT/.gitignore" ] && [ "$(tail -c 1 "$TARGET_ROOT/.gitignore" | wc -l | tr -d ' ')" -eq 0 ]; then
+    printf '\n' >> "$TARGET_ROOT/.gitignore"
+  fi
   printf '.agent-work/\n' >> "$TARGET_ROOT/.gitignore"
   echo "[OK] .gitignore 에 .agent-work/ 추가"
 fi

@@ -137,7 +137,13 @@ echo "[OK] 5c. 레거시 core rules 훅 교체 안내"
 # ---------- 6. .gitignore 중복 방지 ----------
 duplicate_count="$(grep -c '^\.agent-work/$' "$TARGET/.gitignore")"
 [ "$duplicate_count" = "1" ] || fail ".gitignore: .agent-work/ 항목 ${duplicate_count}개 (1개여야 함)"
-echo "[OK] 6. .gitignore 중복 방지"
+NO_NEWLINE_TARGET="$SCRATCH/no-newline-gitignore"
+git init -q "$NO_NEWLINE_TARGET"
+printf 'docs/' > "$NO_NEWLINE_TARGET/.gitignore"
+bash "$SOURCE_ROOT/install.sh" "$NO_NEWLINE_TARGET" >/dev/null
+[ "$(sed -n '1p' "$NO_NEWLINE_TARGET/.gitignore")" = 'docs/' ] || fail ".gitignore: 기존 마지막 줄이 변경됨"
+[ "$(sed -n '2p' "$NO_NEWLINE_TARGET/.gitignore")" = '.agent-work/' ] || fail ".gitignore: 줄바꿈 없이 항목이 이어 붙음"
+echo "[OK] 6. .gitignore 중복·줄바꿈 보존"
 
 # ---------- 7. 삭제 가드 동작 검증 (pre_bash_guard / worker_guard) ----------
 BASH_GUARD="$TARGET/.claude/hooks/pre_bash_guard.sh"
