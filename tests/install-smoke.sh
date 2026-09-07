@@ -14,7 +14,7 @@ fail() { echo "[FAIL] $1" >&2; exit 1; }
 fake_consensus_pass() { # target-root design|impl
   local root="$1" t="$2"
   mkdir -p "$root/.agent-work/reviews"
-  printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
+  printf '{"schema_version":7,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
   (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
     || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
 }
@@ -87,6 +87,20 @@ echo "$orchestrator_rules" | grep -q '프로젝트 컨벤션' || fail "오케스
 echo "$orchestrator_rules" | grep -q '커스텀 규칙' && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-implement.md" || fail "규칙 전달: 워커 프롬프트 누락"
 grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
+# 검증자 프로필 오버레이: 세 프로필 파일이 설치되고, 모델별 기본 매핑·명시 프로필·none·오타 실패가 동작하는지
+for ov in compact guided conservative; do
+  [ -f "$TARGET_SKILL/prompts/validator-overlays/$ov.md" ] || fail "검증자 오버레이 미설치: $ov.md"
+done
+overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=""; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+echo "$overlay_sol" | grep -q '^\[VALIDATOR PROFILE: compact\]$' || fail "검증자 프로필: sol 기본값이 compact 가 아님"
+overlay_explicit="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=guided; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+echo "$overlay_explicit" | grep -q '^\[VALIDATOR PROFILE: guided\]$' || fail "검증자 프로필: 명시 VALIDATOR_PROFILE 이 모델 기본값을 덮지 않음"
+overlay_none="$(bash -c 'source "$1"; VALIDATOR_PROFILE=none; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+[ -z "$overlay_none" ] || fail "검증자 프로필: none 인데 오버레이가 출력됨"
+bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay' _ "$TARGET_SKILL/config.sh" >/dev/null 2>&1 \
+  && fail "검증자 프로필: 없는 프로필이 조용히 생략됨"
+grep -Fq 'VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: consensus-loop 오버레이 로딩 누락"
+grep -Fq '"$VALIDATOR_OVERLAY"' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: 오버레이가 검증자 프롬프트에 붙지 않음"
 grep -Fq -- '--append-system-prompt "$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
   || fail "규칙 전달: 리뷰어/수정자 system prompt 누락"
 grep -Fq '.blocking_issues[]?' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 상세 blocking 이슈 출력 누락"
@@ -219,7 +233,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' \
+printf '{"schema_version":7,"verdict":"PASS","blocking_issues":[]}\n' \
   > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
 set +e
 (cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1

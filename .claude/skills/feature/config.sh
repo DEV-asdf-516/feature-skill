@@ -13,6 +13,7 @@ DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자
 DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
+VALIDATOR_PROFILE=""      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 빈 값 = 모델별 기본값(validator_profile 헬퍼). compact | guided | conservative | none
 WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
 WORKER_EFFORT="max"
 REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
@@ -26,9 +27,9 @@ CLAUDE_BIN="claude"
 CODEX_BIN="codex"
 
 # --- 검증자 계약 버전 ---
-# 검증자 프롬프트·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
+# 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=3
+VALIDATOR_CONTRACT_VERSION=7
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -79,6 +80,30 @@ PONYTAIL_LEVEL="full"   # lite | full | ultra — ponytail 강도 (WORKER_SKILLS
 # 사용: VAR1=... VAR2=... render_prompt <템플릿 파일> '${VAR1} ${VAR2}'
 render_prompt() {
   envsubst "$2" < "$1"
+}
+
+# 검증자 판정 전략 프로필. VALIDATOR_PROFILE 이 비어 있으면 VALIDATOR_MODEL 로 기본값을 고른다.
+# 프로필은 모델 ID 가 아니라 전략 이름(compact/guided/conservative)이라, 모델이 바뀌어도 여기 매핑 한 줄만 고친다.
+# 공통 계약(관할·탐색 범위·BLOCK/ASK_USER 입장 조건·스키마)은 validator-review-*.md 한 곳에만 있고 오버레이는 "그 계약을 어떤 순서로 판정할지"만 담는다.
+validator_profile() {
+  if [ -n "${VALIDATOR_PROFILE:-}" ]; then printf '%s' "$VALIDATOR_PROFILE"; return 0; fi
+  case "${VALIDATOR_MODEL:-}" in
+    gpt-5.6-sol)   printf 'compact' ;;
+    gpt-5.6-astra) printf 'guided' ;;
+    *)             printf 'conservative' ;;
+  esac
+}
+
+# 오버레이 본문을 [VALIDATOR PROFILE: <이름>] 블록으로 출력한다. 검증자 task prompt 뒤에 붙인다(system prompt 가 아니다 — 정체성이 아니라 실행 힌트).
+# 프로필 none 이면 아무것도 출력하지 않는다. 이름이 있는데 파일이 없으면 조용히 생략하지 않고 실패한다(오타로 전략이 빠진 채 유료 호출을 막는다).
+load_validator_overlay() {
+  local profile file
+  profile="$(validator_profile)"
+  [ "$profile" = none ] && return 0
+  file="$FEATURE_SKILL_DIR/prompts/validator-overlays/$profile.md"
+  [ -f "$file" ] || { echo "[FAIL] 검증자 프로필 '$profile' 의 오버레이 없음: $file — config.sh VALIDATOR_PROFILE 또는 validator_profile 매핑 확인" >&2; return 1; }
+  printf '\n\n[VALIDATOR PROFILE: %s]\n' "$profile"
+  cat "$file"
 }
 
 # 프로젝트 conventions는 모든 역할에 전달하되 없으면 아무것도 출력하지 않는다.

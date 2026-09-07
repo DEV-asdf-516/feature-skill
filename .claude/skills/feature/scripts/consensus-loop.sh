@@ -59,6 +59,9 @@ fi
 for prompt_file in "$VALIDATOR_PROMPT_FILE" "$DESIGNER_PROMPT_FILE"; do
   [ -f "$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $prompt_file" >&2; exit 1; }
 done
+# 검증자 오버레이(판정 전략)는 유료 호출 전에 한 번만 확정한다 — 프로필 이름이 있는데 파일이 없으면 여기서 중단.
+VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1
+echo "검증자: $VALIDATOR_MODEL / effort=$VALIDATOR_EFFORT / profile=$(validator_profile)"
 mkdir -p "$WORK_DIR/reviews"
 touch "$WORK_DIR/decisions.md"
 
@@ -175,8 +178,9 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   fi
 
   # ---------- 검증자(codex) 검토: 읽기 전용, 스키마 강제 JSON ----------
+  # 공통 계약(validator-review-*.md) 뒤에 프로필 오버레이를 붙인다. 오버레이는 envsubst 를 거치지 않는다(치환 변수 없음).
   validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" \
-    render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT}')
+    render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT}')"$VALIDATOR_OVERLAY"
   "$CODEX_BIN" exec -m "$VALIDATOR_MODEL" -c "model_reasoning_effort=\"$VALIDATOR_EFFORT\"" --sandbox read-only \
     --output-schema "$SCHEMA_FILE" -o "$review" \
     "$validator_prompt" \
