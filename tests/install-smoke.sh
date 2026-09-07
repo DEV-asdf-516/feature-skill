@@ -14,7 +14,7 @@ fail() { echo "[FAIL] $1" >&2; exit 1; }
 fake_consensus_pass() { # target-root design|impl
   local root="$1" t="$2"
   mkdir -p "$root/.agent-work/reviews"
-  printf '{"schema_version":7,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
+  printf '{"schema_version":8,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
   (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
     || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
 }
@@ -233,7 +233,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"schema_version":7,"verdict":"PASS","blocking_issues":[]}\n' \
+printf '{"schema_version":8,"verdict":"PASS","blocking_issues":[]}\n' \
   > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
 set +e
 (cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1

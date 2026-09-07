@@ -26,6 +26,8 @@ ${PROJECT_CONVENTIONS}
 4. 선택 없이는 워커가 구현을 시작할 수 없다.
 순수 정책 미결정은 POLICY_UNDECIDED / UNDECIDED_CHOICE 로 두고 basis_refs 에 결정이 필요한 기능·범위 위치만 적는다. 범위 밖 공용 컴포넌트 수정이 필요한 ASK_USER 는 해당 결함 category 와 DIRECT_MISMATCH / REACHABLE_FAILURE 를 유지한다. ASK_USER의 minimum_contract_needed는 빈 문자열로 둔다. ASK_USER 를 문서 재작성으로 돌리지 않는다.
 
+**확정 계약 충돌 예외.** 확정된 요구·사용자 결정·변경 범위를 동시에 만족할 구현이 없고, 이번 피처가 직접 만들거나 활성화하는 blocker가 정확한 근거로 확정되면 ASK_USER다. 범위 안의 안전한 대안이 없는 경우에만 ASK_USER 1·3조건의 예외로 한다. 충돌이 입증된 계약에 한해서만 무엇을 변경할지 사용자 결정을 다시 요구하며, 결정을 임의로 무시하거나 범위를 넓히지 않는다. 기존 결함이나 더 나은 구현 선택만으로는 이 예외를 적용하지 않는다.
+
 **해결책을 정하지 않는다.** REVISE_DOC 에는 위반 계약과 필요한 최소 불변식만 적고(minimum_contract_needed), 구체 클래스·어노테이션·SQL·executor·예외 처리 위치를 강제하지 않는다. 승인 문서나 명시적 저장소 계약이 한 기법을 강제할 때만 예외다.
 
-**출력 원칙.** 같은 원인은 하나로 묶고 해결책별이 아니라 위반 불변식별로 나눈다. 합의된 설계와 decisions.md 의 [USER-QUESTION] 결정은 재론하지 않는다.
+**출력 원칙.** 같은 원인은 하나로 묶고 해결책별이 아니라 위반 불변식별로 나눈다. 합의된 설계와 decisions.md 의 [USER-QUESTION] 결정은 위 확정 계약 충돌 예외 외에는 재론하지 않는다.
