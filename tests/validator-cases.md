@@ -1,6 +1,6 @@
 # 검증자 판정 감도 회귀 세트
 
-스모크 테스트는 러너·스키마 연결만 확인한다. 검증자 프롬프트(`prompts/validator-review-*.md`), `schemas/spec-review.schema.json`, 또는 `consensus-loop.sh`의 연계 검사를 바꿨을 때는 이 세트를 **같은 모델·effort**(`config.sh`의 `VALIDATOR_MODEL`/`VALIDATOR_EFFORT`)로 돌린다. 매 설치 때 돌릴 필요는 없다. 실제 검증자 호출이 사례당 1회 발생한다(case-08 포함).
+스모크 테스트는 러너·스키마 연결만 확인한다. 검증자 프롬프트(`prompts/validator-review-*.md`, 오버레이 `prompts/validator-overlays/*.md`), `schemas/spec-review.schema.json`, 또는 `consensus-loop.sh`의 연계 검사를 바꿨을 때는 이 세트를 **같은 모델·effort**(`config.sh`의 `VALIDATOR_MODEL`/`VALIDATOR_EFFORT`)로 돌린다. 매 설치 때 돌릴 필요는 없다. 실제 검증자 호출이 사례당 1회 발생한다(case-08 포함).
 
 입력은 `tests/validator-cases/case-*/`에 고정돼 있다(request·design·(impl 사례는 implementation·approach)·필요한 `src/`·`expected.json`). 사람이 매번 문서를 새로 쓰지 않으므로, 결과 차이는 프롬프트·스키마 변경 때문이다. 픽스처 문서에 기대 답("러너 관할" 같은 힌트)을 적지 않는다.
 
@@ -13,7 +13,7 @@ bash tests/validator-regression.sh compare <validator-*-round-NN.json> <expected
 
 ## 실행 전제
 
-- `VALIDATOR_MODEL`, `VALIDATOR_EFFORT`, `CODEX_BIN`은 실제 값이어야 한다. 사전 검사가 이 세 대입문의 `CHANGE_ME`만 본다.
+- `VALIDATOR_MODEL`, `VALIDATOR_EFFORT`, `CODEX_BIN`은 실제 값이어야 한다. 회귀는 `config.sh`의 `VALIDATOR_PROFILE`(비어 있으면 모델별 기본 프로필)이 고른 오버레이를 그대로 쓴다 — 프로필을 바꿨으면 그 프로필로 다시 돌린다. 사전 검사가 이 세 대입문의 `CHANGE_ME`만 본다.
 - `TEST_CMD`와 `LINT_CMD`는 스크립트가 설치된 복사본에서 `true`로 대체하므로 원본 config.sh에 `CHANGE_ME`로 남아 있어도 된다.
 - 복사본은 공유 config.sh의 가드와 consensus-loop의 사전 점검을 그대로 거친다. 나머지 역할의 모델·effort와 `CLAUDE_BIN`도 유효한 값이어야 한다(가짜 디자이너를 쓰는 case-08 외에는 claude가 호출되지 않지만, 설치된 `claude` 실행 파일은 있어야 한다).
 
