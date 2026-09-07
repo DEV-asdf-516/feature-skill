@@ -3,10 +3,12 @@
 # feature 파이프라인 러너 — 교통정리기 (agent 가 아니다)
 # 파일 경로: .claude/skills/feature/scripts/feature-run.sh
 # 사용법 (저장소 루트에서):
-#   feature-run.sh [--new [--archive-as <이름>]] [--branch <이름>]
+#   feature-run.sh [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>]
+#     --worktree: 피처 전용 git worktree 에서 실행(권장). 없으면 --branch 로 생성. 다른 세션의 미커밋 변경과 물리적으로 분리.
 #     --new     : 이전 피처 산출물을 archive/ 로 mv 하고 처음부터 시작
 #     --branch  : 워커 진입 전 해당 브랜치가 없으면 생성·체크아웃
-#   인자 없이 다시 실행하면 run-state.json 의 stage 에서 재개한다.
+#   인자 없이 다시 실행하면 run-state.json 의 stage 에서 재개한다. 합의·리뷰 루프는 자체 체크포인트
+#   (consensus-<target>.json, review-impl.json)로 round/substep 까지 이어가며, stage 결정은 consensus_pass_current 로 교차 확인한다.
 #
 # 상태 전이 (결정론적 제어만 담당):
 #   preflight → design → impl → worker → review → verify → done
@@ -22,8 +24,9 @@
 # 종료 코드 / run-state.json status:
 #   0 DONE        완료
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED |
-#                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED)
-#   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING)
+#                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
+#                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED)
+#   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING | APPROACH_GAP)
 #   1 ENV_ERROR   환경·CLI 오류
 #
 # 자동 복구 금지: 여기서 허용하는 자동 루프는 성공 조건이 기계적으로 명확한
@@ -36,6 +39,41 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 ROOT="$(git rev-parse --show-toplevel)"
+
+# ---------- 인자 ----------
+NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --new) NEW=1;;
+    --archive-as) ARCHIVE_AS="$2"; shift;;
+    --branch) BRANCH="$2"; shift;;
+    --worktree) WORKTREE="$2"; shift;;
+    *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
+  esac
+  shift
+done
+
+# ---------- 피처 전용 git worktree (권장 모드) ----------
+# 같은 working tree 를 다른 세션과 공유하면 git 은 변경 소유자를 기록하지 않으므로 워커·수정자·리뷰·승인이
+# 다른 세션의 미커밋 변경을 "이번 작업"으로 오인할 수 있다. 디렉터리를 분리하면 물리적으로 존재하지 않는다.
+# --worktree <dir> : 없으면 `git worktree add <dir> -b <branch> HEAD` 로 만들고(--branch 필수), 있으면 그대로 쓴다.
+# 이후 모든 단계(산출물 .agent-work 포함)는 그 디렉터리에서 돈다. 완료 후 main 반영은 사용자가 병합 단계에서 한다.
+if [ -n "$WORKTREE" ]; then
+  if [ ! -d "$WORKTREE" ]; then
+    [ -n "$BRANCH" ] || { echo "[FAIL] --worktree 로 새 worktree 를 만들려면 --branch <이름> 이 필요" >&2; exit 1; }
+    if git -C "$ROOT" rev-parse --verify -q "$BRANCH" >/dev/null; then
+      git -C "$ROOT" worktree add "$WORKTREE" "$BRANCH" || { echo "[FAIL] git worktree add 실패" >&2; exit 1; }
+    else
+      git -C "$ROOT" worktree add -b "$BRANCH" "$WORKTREE" HEAD || { echo "[FAIL] git worktree add 실패" >&2; exit 1; }
+    fi
+    echo "[feature-run] 피처 worktree 생성: $WORKTREE (branch $BRANCH)"
+  fi
+  wt_root="$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null)" || { echo "[FAIL] $WORKTREE 는 git worktree 가 아님" >&2; exit 1; }
+  [ "$(git -C "$wt_root" rev-parse --git-common-dir)" != "$(git -C "$wt_root" rev-parse --git-dir)" ] \
+    || [ "$wt_root" != "$ROOT" ] || { echo "[FAIL] --worktree 가 현재 main working tree 를 가리킴 — 분리된 디렉터리여야 한다" >&2; exit 1; }
+  ROOT="$wt_root"
+  [ -d "$ROOT/.codex" ] || echo "[WARN] $ROOT/.codex 없음 — codex 훅(worker_guard)이 이 worktree 에 적용되지 않는다. .codex 를 커밋하거나 복사하라." >&2
+fi
 cd "$ROOT"
 
 exec </dev/null
@@ -44,18 +82,6 @@ mkdir -p "$WORK_DIR"
 STATE="$WORK_DIR/run-state.json"
 WORKER_RESULT="$WORK_DIR/worker-result.json"
 WORKER_SCHEMA="$SKILL_DIR/schemas/worker-result.schema.json"
-
-# ---------- 인자 ----------
-NEW=0; ARCHIVE_AS=""; BRANCH=""
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --new) NEW=1;;
-    --archive-as) ARCHIVE_AS="$2"; shift;;
-    --branch) BRANCH="$2"; shift;;
-    *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
-  esac
-  shift
-done
 
 # --new에서는 tee가 live.log를 열기 전에 이전 로그를 아카이브한다.
 # 열린 파일을 나중에 mv하면 tee가 아카이브된 inode에 계속 쓰게 된다.
@@ -185,46 +211,94 @@ if [ -f "$STATE" ]; then
   [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; exit 0; }
   case "$hinted" in preflight|"") STAGE=design;; *) STAGE="$hinted";; esac
 fi
+# 활성 기준선 가드는 stage 와 관계없이 파이프라인 전체를 막는다 — 특히 verify 단계의 worker-fix 가 기준선을 바꿔 멈춘 뒤
+# verify 로 재진입하는 경로: exact files 범위에서는 범위 밖 변경·기준선 변경이 승인 지문에 안 잡혀 리뷰 루프·run_worker 를 거치지 않고
+# 테스트만 통과하면 DONE 이 된다. run_worker 안의 검사는 이 전역 검사 뒤 다른 세션이 기준선을 바꾸는 경우를 호출 직전에 다시 막는다.
+require_baseline_guard_resolved \
+  || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음 (stage $STAGE 재개 전 전역 검사)"
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
-last_pass() { # 검증자 라운드 파일 중 마지막이 PASS 인가
-  local last; last="$(ls "$WORK_DIR"/reviews/validator-"$1"-round-*.json 2>/dev/null | sort | tail -1)"
-  # schema_version 이 현재 계약(VALIDATOR_CONTRACT_VERSION)과 다른 이전 PASS 는 무효 — 검증 라운드를 새 기준으로 다시 돈다 (--new 불필요)
-  [ -n "$last" ] && jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" '.schema_version==$v and .verdict=="PASS" and (.blocking_issues|length)==0' "$last" >/dev/null 2>&1
-}
+# 합의 PASS 판정은 config.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
+# 현재 입력 지문(request/design/impl docs + [USER-QUESTION])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
+# 파일명 정렬로 마지막 라운드 파일을 고르지 않는다 — 과거 round-02 PASS 가 새 round-01 BLOCK 을 가리고,
+# 문서를 고친 뒤 재실행해도 합의 루프를 건너뛰는 경로가 있었다.
 [ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
 case "$STAGE" in
+  impl|worker|review|verify|done)
+    consensus_pass_current design || { log "design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터"; STAGE=design; };;
+esac
+case "$STAGE" in
   worker|review|verify|done)
-    last_pass impl || STAGE=impl;;
+    consensus_pass_current impl || { log "impl 합의 PASS 가 현재 입력에 대해 유효하지 않음 — impl 부터"; STAGE=impl; };;
 esac
 case "$STAGE" in
   review|verify|done)
     { [ -f "$WORKER_RESULT" ] && jq -e '.status=="DONE"' "$WORKER_RESULT" >/dev/null 2>&1; } || STAGE=worker;;
 esac
-[ "$STAGE" = verify ] && { [ -f "$WORK_DIR/approved.fingerprint" ] || STAGE=review; }
+# verify 로 바로 가려면 approved.fingerprint 파일 존재만으론 부족하다 — 리뷰 체크포인트가 현재 계약·현재 작업 트리의
+# 실제 APPROVE 리뷰를 가리켜야 한다(config.sh impl_approval_current). 아니면 리뷰 루프가 스스로 재개 지점을 고른다.
+if [ "$STAGE" = verify ] && ! impl_approval_current; then
+  log "구현 승인이 현재 작업 트리·계약에 대해 유효하지 않음 — review 부터"; STAGE=review
+fi
 log "시작 stage: $STAGE (test_retries=$TEST_RETRIES)"
 
 # ---------- 워커 호출 ----------
 run_worker() { # prompt-file extra-vars-spec
   local prompt_file="$1"; shift
-  local prompt
-  prompt="$(WORKER_RULES="$(load_worker_rules)" REFERENCE_CODE="$(load_reference_code)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
-    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG}')"
+  local prompt worker_rules
+  # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
+  require_baseline_guard_resolved \
+    || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음"
+  # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다
+  worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
+  prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$(load_reference_code)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
+    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG}')" \
+    || env_error "워커 프롬프트 렌더링 실패"
   local raw="$WORK_DIR/reviews/worker-$(date '+%Y%m%d-%H%M%S').log"
   mkdir -p "$WORK_DIR/reviews"
   rm -f "$WORKER_RESULT"
-  local index_before index_after worker_rc
+  local index_before index_after worker_rc before_tree after_tree violations scope_hash_before scope_hash_after baseline_before baseline_after
   index_before="$(compute_index_fingerprint)" || env_error "워커 호출 전 git index 지문 계산 실패"
+  scope_hash_before="$(feature_scope_hash)"
+  # 소유권 기준선은 호출 전에 확정해 사후 판정에 그대로 넘긴다 — 파일은 워커가 쓸 수 있는 .agent-work 안에 있다
+  baseline_before="$(read_worker_baseline_tree)" || env_error "worker-baseline.tree 가 유효한 tree 를 가리키지 않음"
+  [ -n "$baseline_before" ] || log "[WARN] worker-baseline.tree 없음 — new_file_roots 아래는 신규 생성(A)만 허용하는 규칙으로 검사"
+  before_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 전 tree 스냅샷 실패"
+  printf '%s\n' "$before_tree" > "$WORK_DIR/worker-before.tree"
   set +e
   "$CODEX_BIN" exec -m "$WORKER_MODEL" -c "model_reasoning_effort=\"$WORKER_EFFORT\"" --sandbox workspace-write \
     --output-schema "$WORKER_SCHEMA" -o "$WORKER_RESULT" "$prompt" 2>&1 \
     | tee "$raw"
   worker_rc=$?
   set -e
+  # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료하면 가드가 남지 않아
+  # 사용자가 보고된 문제만 고치고 재실행할 때 변조된 기준선이 새 기준선으로 읽힌다. 종료 우선순위(index → manifest → 기준선)는 그대로.
+  local baseline_changed=0
+  baseline_after=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_after="$(cat "$WORK_DIR/worker-baseline.tree")"
+  if [ "$baseline_after" != "$baseline_before" ]; then
+    record_baseline_guard "$baseline_before" "$baseline_after" worker || env_error "worker-baseline 가드 기록 실패"
+    baseline_changed=1
+  fi
   # 사후 조건을 CLI 성공 여부보다 먼저 본다 — 워커는 작업 트리만 바꿀 수 있고, index 가 바뀌었으면
   # (worker_guard 정규식을 우회한 git add 등) 실패한 실행이라도 복구하지 않고 그 사실부터 보고한다
   index_after="$(compute_index_fingerprint)" || env_error "워커 호출 후 git index 지문 계산 실패"
   [ "$index_after" = "$index_before" ] \
     || env_error "워커가 git index 를 변경함 — 자동 복구하지 않음. git status 로 확인 후 재실행"
+  # manifest 불변 검사: 워커가 원본이나 lock 을 고쳐 범위를 넓히면 write-set 검사가 무력화된다 — CLI 성공 여부보다 먼저 본다
+  scope_hash_after="$(feature_scope_hash)"
+  [ "$scope_hash_after" = "$scope_hash_before" ] \
+    || stop_need_user SCOPE_MANIFEST_CHANGED "워커 호출 중 feature-scope.json 또는 feature-scope.lock.json 이 바뀜 — 자동 복구하지 않음. 원본과 lock 을 확인하고, 의도한 범위 변경이면 lock 을 지운 뒤 재실행(impl 재합의)"
+  # write-set 검사: 호출 전후 tree 사이 변경이 feature-scope.json 범위를 벗어나면 자동 원복 없이 보존하고 중단.
+  # (같은 working tree 의 다른 세션 변경도 여기 잡힐 수 있다 — 그래서 원복하지 않고 사람이 본다)
+  after_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 후 tree 스냅샷 실패"
+  printf '%s\n' "$after_tree" > "$WORK_DIR/worker-after.tree"
+  # 기준선 불변 검사: 워커가 worker-baseline.tree 를 바꾸면(예: 빈 tree) roots 아래 기존 파일이 전부 '피처가 만든 것'으로 보인다 (가드는 위에서 이미 기록)
+  [ "$baseline_changed" -eq 0 ] \
+    || stop_need_user SCOPE_BASELINE_CHANGED "워커 호출 중 worker-baseline.tree 가 변경됨(전: ${baseline_before:-없음} / 후: ${baseline_after:-없음}) — 자동 복구하지 않음. 파일을 원래 값으로 되돌리고 워커 변경을 확인한 뒤 재실행"
+  violations="$(feature_scope_violations "$before_tree" "$after_tree" "$baseline_before")"
+  if [ -n "$violations" ]; then
+    log "[SCOPE_VIOLATION] 워커 호출 중 범위 밖 경로 변경 — 자동 원복하지 않음:"; printf '  %s\n' $violations
+    stop_need_user SCOPE_VIOLATION "feature-scope.json 범위 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)). 워커 과잉 변경이면 범위를 넓히거나 되돌릴지 사용자가 결정, 다른 세션 변경이면 보존. 자동 원복 금지"
+  fi
   if [ "$worker_rc" -ne 0 ]; then
     tail -20 "$raw" >&2
     env_error "codex 워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
@@ -276,8 +350,22 @@ while :; do
       if [ -n "$BRANCH" ] && [ "$(git rev-parse --abbrev-ref HEAD)" != "$BRANCH" ]; then
         git rev-parse --verify -q "$BRANCH" >/dev/null && git checkout "$BRANCH" || git checkout -b "$BRANCH"
       fi
+      # 피처 범위 manifest 는 워커 진입 전에 있어야 한다 — write-set 검사·리뷰 diff·승인 지문의 기준.
+      feature_scope_present || stop_need_docs SCOPE_MISSING "implementation.md 의 변경·생성 파일 목록을 $FEATURE_SCOPE_FILE ({version:1, files:[...], new_file_roots:[...]}) 로 작성 후 재실행"
+      feature_scope_valid_file "$FEATURE_SCOPE_FILE" || env_error "feature-scope.json 형식 오류 — version $FEATURE_SCOPE_VERSION, files/new_file_roots 중 하나 이상, canonical 상대 경로(선행 ./ · 후행 / · '..' 금지)"
+      # 원본을 lock 사본으로 확정한다. 이미 lock 이 있는데 원본과 다르면 사용자가 범위를 바꾼 것 — 어느 쪽이 맞는지 파이프라인이 정하지 않는다.
+      # set -e 아래에서는 `f; rc=$?` 가 f 실패 시 바로 종료한다 — if/else 로 받아야 stop_need_user 에 도달한다
+      if lock_feature_scope; then :; else
+        lock_rc=$?
+        case "$lock_rc" in
+          2) stop_need_user SCOPE_MANIFEST_CHANGED "feature-scope.json 이 워커 진입 시 확정한 feature-scope.lock.json 과 다름. 의도한 범위 변경이면 lock 을 지우고 재실행(impl 재합의 후 새 lock 확정), 아니면 원본을 lock 과 같게 되돌린 뒤 재실행";;
+          *) env_error "feature-scope.lock.json 생성 또는 확인 실패";;
+        esac
+      fi
+      [ -f "$FEATURE_SCOPE_LOCK" ] && log "피처 범위 lock: $FEATURE_SCOPE_LOCK ($(jq -c '{files:(.files|length), roots:((.new_file_roots // [])|length)}' "$FEATURE_SCOPE_LOCK"))"
       # 워커 진입 직전 작업 트리를 기준선으로 한 번만 기록한다(같은 피처 동안 재사용, --new 가 아카이브).
-      # 리뷰 diff 와 범위 밖 변경 원복은 HEAD 가 아니라 이 기준선 대비다 — 피처 이전의 미커밋 변경을 이번 작업으로 오인하지 않는다.
+      # 리뷰 diff 는 HEAD 가 아니라 이 기준선 대비다 — 피처 이전의 미커밋 변경을 이번 작업으로 오인하지 않는다.
+      # 이 기준선은 '시점'의 증거이지 변경 '소유자'의 증거가 아니다 — 기준선 이후 변경을 근거로 원복하지 않는다(범위 밖 변경은 보존 후 중단).
       if [ ! -f "$WORK_DIR/worker-baseline.tree" ]; then
         snapshot_worktree_tree > "$WORK_DIR/worker-baseline.tree.tmp" && mv "$WORK_DIR/worker-baseline.tree.tmp" "$WORK_DIR/worker-baseline.tree" \
           || env_error "워커 진입 기준선 tree 기록 실패"

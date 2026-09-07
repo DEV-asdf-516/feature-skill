@@ -12,7 +12,7 @@
 DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
 DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
-VALIDATOR_EFFORT="high"   # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
+VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
 WORKER_EFFORT="max"
 REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
@@ -35,6 +35,13 @@ VALIDATOR_CONTRACT_VERSION=3
 # 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
 REVIEWER_CONTRACT_VERSION=6
 
+# --- 체크포인트 포맷 버전 ---
+# consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
+# 로더는 버전이 다르면 저장된 지문을 해석하지 않고 안전하게 처음(Round 1 / 새 attempt)으로 돌아간다 —
+# 다른 의미의 지문을 비교해 "부분 실행"으로 오판하고 단계를 건너뛰는 것을 막는다.
+CONSENSUS_CHECKPOINT_VERSION=2
+REVIEW_CHECKPOINT_VERSION=2
+
 # --- 수렴/안전 한도 ---
 MAX_SPEC_ROUNDS=1        # 명세 합의 최대 라운드
 MAX_IMPL_ROUNDS=1        # 구현 리뷰-수정 라운드 (리뷰는 +1회 — 마지막 수정도 종결 검토). 1 = Reviewer 2 + Fixer 1, 첫 수정으로 안 풀리면 사용자에게
@@ -52,8 +59,17 @@ LINT_CMD="CHANGE_ME"
 
 # --- 역할별 규칙 파일 ---
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+FEATURE_SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md" # 워커 전용 필수 규칙
 CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md" # 선택 파일: 없으면 조용히 생략
+
+# --- 워커에 주입하는 외부 스킬 ---
+# 이름 목록. 탐색 순서: $PROJECT_ROOT/.claude/skills/<이름>/SKILL.md → .agents/skills/<이름>/SKILL.md (npx skills add 로 설치한 것)
+# → 이 스킬 안의 worker-skills/<이름>/SKILL.md (vendored 사본 — install.sh 가 함께 복사하므로 설치 대상에서도 항상 있다).
+# frontmatter 를 뗀 본문을 [WORKER SKILL: <이름>] 블록으로 core rules 뒤에 붙인다. 워커는 codex 라 Claude 스킬 로더가 없다.
+# 목록에 있는데 어디에도 없으면 필수 동작 누락이므로 조용히 진행하지 않고 실패한다.
+WORKER_SKILLS=("ponytail")
+PONYTAIL_LEVEL="full"   # lite | full | ultra — ponytail 강도 (WORKER_SKILLS 에 ponytail 이 있을 때만)
 
 # =============================================================
 # 헬퍼
@@ -80,6 +96,37 @@ load_worker_rules() {
     printf '\n\n[PROJECT CONVENTIONS]\n'
     cat "$CONVENTIONS_FILE"
   fi
+  load_worker_skills
+}
+
+# WORKER_SKILLS 의 SKILL.md 본문(frontmatter 제외)을 워커 프롬프트에 붙인다.
+# 파이프라인 계약과의 우선순위를 함께 명시한다 — 스킬은 '어떻게'(DELEGATED 결정)에만 적용되고,
+# 문서가 정한 동작·REQUIRED 결정·테스트 목록은 스킬의 YAGNI 로 빼지 못한다.
+worker_skill_file() { # name → 경로 (없으면 빈 출력)
+  local d
+  for d in "$PROJECT_ROOT/.claude/skills/$1" "$PROJECT_ROOT/.agents/skills/$1" "$FEATURE_SKILL_DIR/worker-skills/$1"; do
+    [ -f "$d/SKILL.md" ] && { printf '%s' "$d/SKILL.md"; return 0; }
+  done
+  return 1
+}
+strip_frontmatter() { awk 'NR==1 && $0=="---" {infm=1; next} infm && $0=="---" {infm=0; next} !infm' "$1"; }
+load_worker_skills() {
+  local name file
+  [ "${#WORKER_SKILLS[@]}" -gt 0 ] || return 0
+  for name in "${WORKER_SKILLS[@]}"; do
+    file="$(worker_skill_file "$name")" || { echo "[FAIL] 필수 워커 스킬 '$name' 없음 — .claude/skills/, .agents/skills/, feature/worker-skills/ 어디에도 SKILL.md 가 없다. npx skills add 로 설치하거나 config.sh WORKER_SKILLS 에서 제거" >&2; return 1; }
+    printf '\n\n[WORKER SKILL: %s]\n' "$name"
+    strip_frontmatter "$file"
+    if [ "$name" = ponytail ]; then
+      printf '\n[WORKER SKILL: ponytail — 이 파이프라인에서의 적용 범위]\n'
+      printf -- '- 강도: %s.\n' "$PONYTAIL_LEVEL"
+      printf -- '- 사다리는 approach.md 의 DELEGATED 결정과 로컬 구현 방식에만 적용한다. request.md·design.md·implementation.md 가 정한 동작, approach.md 의 REQUIRED 결정, implementation.md 가 요구한 테스트는 YAGNI 로 빼거나 축소하지 않는다 — "이 요구가 필요한가"는 여기서 다시 묻지 않는다(문서 합의에서 이미 정해졌다).\n'
+      printf -- '- 요구 자체가 과하다고 판단되면 구현을 줄이지 말고 결과 JSON 의 delegated_choices 나 undecided(DOC_GAP) 로 보고한다. "lazy 버전을 먼저 내고 질문한다" 는 여기서는 UNDECIDED 로 돌려보내는 것이다.\n'
+      printf -- '- "skipped: X, add when Y" 는 코드 주석·산문이 아니라 delegated_choices 항목으로 남긴다. ponytail: 주석은 approach.md 가 허용한 범위에서만.\n'
+      printf -- '- 테스트: implementation.md 의 테스트 목록이 우선이며 그 외 자체 검사는 추가하지 않는다(리뷰어가 문서 밖 테스트를 TEST_CONTRACT_GAP 으로 보지 않더라도 커버리지용 테스트는 금지).\n'
+      printf -- '- 파일 삭제 금지·범위 밖 변경 금지·index 조작 금지는 스킬보다 우선한다("Deletion over addition" 은 파일 내 코드 제거에만 해당).\n'
+    fi
+  done
 }
 
 # approach.md 가 백틱으로 인용한 참조 구현 `path:L40-L68` 의 해당 줄 범위만 워커 프롬프트에 붙인다.
@@ -187,6 +234,273 @@ compute_worktree_fingerprint() {
   } | sha256_stdin
 }
 
+# ---------- 피처 범위 manifest (feature-scope.json) ----------
+# 오케스트레이터가 implementation.md 와 함께 쓴다: {"version":1,"files":[...],"new_file_roots":[...]}.
+#   files          : 이번 피처가 변경·생성하는 정확한 경로(저장소 루트 기준)
+#   new_file_roots : 정확한 파일명을 미리 정할 수 없는 생성 경로의 디렉터리 접두(마이그레이션 등). 최소한으로.
+# 용도 — 같은 working tree 를 다른 세션과 공유할 때 "이번 피처의 변경"을 시점이 아니라 범위로 정의한다.
+#   worker-baseline.tree 는 시점 기준선이지 변경 소유권의 증거가 아니다.
+#   (1) 워커·수정자 호출 전후 write-set 이 범위를 벗어나면 자동 원복 없이 보존하고 중단
+#   (2) 리뷰 diff 를 범위 경로로 한정 — 다른 세션의 변경이 "이번 작업"으로 리뷰어에게 가지 않는다
+#   (3) 승인 지문을 범위 파일로 계산 — 다른 세션이 범위 밖 파일을 바꿔도 승인이 무효화되지 않는다
+FEATURE_SCOPE_FILE="$WORK_DIR/feature-scope.json"          # 오케스트레이터가 쓰는 원본
+FEATURE_SCOPE_LOCK="$WORK_DIR/feature-scope.lock.json"     # 워커 진입 전에 확정한 불변 사본 — 검사·diff·지문은 전부 이것을 쓴다
+FEATURE_SCOPE_VERSION=1
+# manifest 는 '검사 기준'이면서 워커·수정자가 쓸 수 있는 .agent-work 안에 있다(작업 트리 스냅샷은 WORK_DIR 를 제외하므로
+# manifest 변경은 write-set diff 에 보이지 않는다). 그래서 원본을 직접 쓰지 않고 lock 사본을 기준으로 삼고, 호출 전후
+# 원본·lock 해시를 대조해 달라졌으면 SCOPE_MANIFEST_CHANGED 로 자동 복구 없이 중단한다.
+feature_scope_present() { [ -f "$FEATURE_SCOPE_FILE" ]; }
+feature_scope_file() { if [ -f "$FEATURE_SCOPE_LOCK" ]; then printf '%s' "$FEATURE_SCOPE_LOCK"; else printf '%s' "$FEATURE_SCOPE_FILE"; fi; }
+# 원본 + lock 의 내용 해시 (없는 쪽은 MISSING). 워커·수정자 호출 전후로 비교한다.
+feature_scope_hash() {
+  {
+    for f in "$FEATURE_SCOPE_FILE" "$FEATURE_SCOPE_LOCK"; do
+      printf '%s\0' "$f"; if [ -f "$f" ]; then cat "$f"; else printf 'MISSING'; fi; printf '\0'
+    done
+  } | sha256_stdin
+}
+# lock 확정: 없으면 원본을 복사. 있는데 원본과 다르면 2 (사용자가 범위를 바꿨거나 누군가 원본을 건드림 — 호출자가 중단).
+# 반환: 0 확정/일치, 1 생성 실패, 2 원본≠lock. 호출부는 set -e 아래에서 `if lock_feature_scope; then :; else rc=$?; ...` 형태로 받는다
+# (`f; rc=$?` 는 errexit 가 f 의 실패에서 바로 종료해 rc 줄에 도달하지 못한다).
+lock_feature_scope() {
+  if [ ! -f "$FEATURE_SCOPE_LOCK" ]; then
+    cp "$FEATURE_SCOPE_FILE" "$FEATURE_SCOPE_LOCK" || return 1
+    return 0
+  fi
+  cmp -s "$FEATURE_SCOPE_FILE" "$FEATURE_SCOPE_LOCK" && return 0
+  return 2
+}
+# 경로는 canonical 이어야 한다 — git 이 돌려주는 변경 경로(선행 ./ 없음, 후행 / 없음)와 문자열로 비교하기 때문.
+#   files          : 저장소 상대, 선행 "./" 금지, 후행 "/" 금지, 빈·"."·".." 세그먼트 금지. 이 경로는 생성·수정·삭제 전부 허용.
+#   new_file_roots : 같은 규칙이되 후행 "/" 는 하나 허용(비교 전에 제거). 이 아래는 **기준선 tree 에 없던 파일의 생성·후속 수정(A/M)만** 허용 —
+#                    기존 파일의 수정·삭제·타입 변경은 범위 위반이다(정확한 파일명을 미리 알 수 없는 '생성' 경로라는 정의 그대로).
+#   files 와 new_file_roots 중 하나 이상에 항목이 있어야 한다 (마이그레이션만 만드는 피처는 roots 만으로 표현)
+feature_scope_valid_file() { # manifest-path
+  [ -f "$1" ] && jq -e --argjson v "$FEATURE_SCOPE_VERSION" '
+    def canonical: type=="string" and length>0 and (startswith("/")|not) and (startswith("./")|not)
+      and (split("/") | all(.[]; . != "" and . != "." and . != ".."));
+    .version==$v and (.files|type=="array") and ((.new_file_roots // [])|type=="array")
+    and ((.files|length) + ((.new_file_roots // [])|length)) > 0
+    and all(.files[]; canonical)
+    and all((.new_file_roots // [])[]; type=="string" and (sub("/$"; "") | canonical))' \
+    "$1" >/dev/null 2>&1
+}
+feature_scope_valid() { feature_scope_valid_file "$(feature_scope_file)"; }
+feature_scope_pathspecs() { # git pathspec 목록 (files + roots), 한 줄 하나
+  jq -r '.files[], ((.new_file_roots // [])[] | sub("/+$"; "") + "/")' "$(feature_scope_file)"
+}
+path_in_exact_feature_files() { # path → 0 이면 files 에 정확히 있음
+  jq -e --arg p "$1" '(.files|index($p))!=null' "$(feature_scope_file)" >/dev/null 2>&1
+}
+path_in_new_file_roots() { # path → 0 이면 어떤 root 아래
+  jq -e --arg p "$1" 'any((.new_file_roots // [])[]; . as $r | ($p|startswith(($r|sub("/+$"; "")) + "/")))' "$(feature_scope_file)" >/dev/null 2>&1
+}
+path_in_feature_scope() { path_in_exact_feature_files "$1" || path_in_new_file_roots "$1"; }
+# 두 tree 사이 변경 중 범위 밖인 것을 출력 (없으면 빈 출력, 반환 0). 호출자가 비어 있지 않으면 중단한다.
+#   files 경로: A/M/D/T 전부 허용. 그 밖(범위 밖): 전부 위반.
+#   roots 아래: 소유 분류는 이번 호출의 A/M 이 아니라 **워커 진입 기준선 tree 에 있었는가**로 정한다.
+#     기준선에 있던 파일 → M/D/T 전부 위반 (이 피처 것이 아니다)
+#     기준선에 없던 파일(이 피처가 만든 것) → A/M 허용, D/T 위반 (파일 삭제 금지 계약을 결과 기준으로도 지킨다)
+#     그래야 첫 워커 호출이 만든 파일을 다음 라운드의 수정자·worker-fix 가 다시 고칠 수 있다(호출 직전 tree 대비 M 이지만 피처가 만든 파일).
+#   기준선 tree 는 **호출자가 호출 전에 읽어 인자로 넘긴다** — 이 함수는 worker-baseline.tree 파일을 다시 읽지 않는다.
+#   그 파일은 에이전트가 쓸 수 있는 .agent-work 안에 있어서, 호출 후에 읽으면 워커가 빈 tree 로 바꿔 기존 파일 보호를 무력화할 수 있다.
+#   호출자는 호출 전후 파일 내용이 같은지도 검사한다(SCOPE_BASELINE_CHANGED). 기준선 인자가 비어 있으면(구버전 산출물·단독 실행)
+#   호출 전후 status A 만 허용하는 보수적 규칙으로 돌아간다.
+path_owned_by_baseline() { # baseline-tree path → 0 이면 워커 진입 전부터 존재
+  [ -n "$1" ] || return 1
+  git ls-tree "$1" -- ":(literal)$2" 2>/dev/null | grep -q .
+}
+# worker-baseline.tree 를 읽어 검증된 tree 해시를 출력. 파일이 없으면 빈 출력(반환 0), 있는데 유효한 tree 가 아니면 반환 1.
+read_worker_baseline_tree() {
+  local t
+  [ -f "$WORK_DIR/worker-baseline.tree" ] || return 0
+  t="$(cat "$WORK_DIR/worker-baseline.tree")"
+  git cat-file -e "$t^{tree}" 2>/dev/null || { echo "[FAIL] worker-baseline.tree 가 유효한 tree 를 가리키지 않음: $t" >&2; return 1; }
+  printf '%s' "$t"
+}
+# 기준선 변조 가드: SCOPE_BASELINE_CHANGED 로 중단한 뒤 사용자가 worker-baseline.tree 를 원래 값으로 되돌리기 전에는
+# 다음 실행이 변조된 값을 새 기준선으로 읽어 들이면 안 된다(그러면 첫 실행이 잡은 우회가 재실행에서 성립한다).
+# 자동 원복은 하지 않고, 중단 당시의 기대값을 이 파일에 남겨 복구 전 재실행을 모델 호출 0회로 다시 막는다.
+BASELINE_GUARD="$WORK_DIR/worker-baseline.guard.json"
+record_baseline_guard() { # expected observed actor
+  jq -n --arg expected "$1" --arg observed "$2" --arg actor "$3" \
+    '{active:true, expected:$expected, observed:$observed, actor:$actor}' > "$BASELINE_GUARD.tmp" && mv "$BASELINE_GUARD.tmp" "$BASELINE_GUARD"
+}
+# 활성 가드가 있으면 현재 worker-baseline.tree 가 기대값과 같아야 통과(가드를 비활성화). 다르면 1 — 호출자가 모델 호출 없이 중단.
+require_baseline_guard_resolved() {
+  local expected current=""
+  [ -f "$BASELINE_GUARD" ] || return 0
+  jq -e '.active == true' "$BASELINE_GUARD" >/dev/null 2>&1 || return 0
+  expected="$(jq -r '.expected' "$BASELINE_GUARD")"
+  [ -f "$WORK_DIR/worker-baseline.tree" ] && current="$(cat "$WORK_DIR/worker-baseline.tree")"
+  if [ "$current" != "$expected" ]; then
+    echo "[STOP] worker-baseline.tree 가 아직 변조 전 값으로 복구되지 않음 — 기대: ${expected:-없음} / 현재: ${current:-없음}. 자동 복구하지 않음." >&2
+    return 1
+  fi
+  jq '.active = false' "$BASELINE_GUARD" > "$BASELINE_GUARD.tmp" && mv "$BASELINE_GUARD.tmp" "$BASELINE_GUARD"
+}
+feature_scope_violations() { # before-tree after-tree [ownership-baseline-tree]
+  # --no-renames: rename 을 삭제+추가로 분해한다. 아니면 범위 밖 파일을 범위 안 경로로 옮겼을 때 목적지만 보여
+  # 출발지(범위 밖 파일의 삭제)가 검사를 통과한다. 리뷰용 diff 는 rename 형태를 유지해도 되지만 위반 검사는 고정.
+  local before="$1" after="$2" baseline="${3:-}" status changed
+  git diff --no-renames --name-status -z "$before" "$after" -- | while IFS= read -r -d '' status && IFS= read -r -d '' changed; do
+    [ -z "$changed" ] && continue
+    path_in_exact_feature_files "$changed" && continue
+    if path_in_new_file_roots "$changed"; then
+      if [ -n "$baseline" ]; then
+        if ! path_owned_by_baseline "$baseline" "$changed"; then
+          case "$status" in A|M) continue;; esac
+        fi
+      elif [ "$status" = A ]; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$changed"
+  done
+}
+# 범위 지문: 현재 작업 트리의 git tree 객체에서 범위 경로의 엔트리(모드·유형·blob·경로)를 해시한다.
+# 내용뿐 아니라 실행 권한·symlink 목적지·생성/삭제까지 잡히고, snapshot_worktree_tree 와 같은 기준(untracked 포함, WORK_DIR 제외)이다.
+# manifest(lock) 자체도 포함한다 — 범위 정의가 바뀌면 이전 승인은 다른 범위에 대한 것이다.
+# roots 아래는 신규 파일만 피처 변경이므로, 워커 진입 기준선(worker-baseline.tree)에 이미 있던 엔트리는 제외한다(기준선이 없으면 전부 포함).
+compute_feature_fingerprint() {
+  local tree path root baseline=""
+  tree="$(snapshot_worktree_tree)" || return 1
+  [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline="$(cat "$WORK_DIR/worker-baseline.tree")"
+  {
+    printf 'feature-scope\0'; cat "$(feature_scope_file)"; printf '\0'
+    while IFS= read -r path; do
+      git ls-tree -r -z "$tree" -- ":(literal)$path"
+    done < <(jq -r '.files[]' "$(feature_scope_file)")
+    while IFS= read -r root; do
+      root="${root%/}"
+      if [ -n "$baseline" ]; then
+        # 기준선에 있던 경로는 제외 (경로 기준 차집합)
+        git ls-tree -r "$tree" -- ":(literal)$root/" \
+          | awk -v base="$(git ls-tree -r --name-only "$baseline" -- ":(literal)$root/" | tr '\n' '\001')" \
+              'BEGIN{n=split(base,a,"\001"); for(i=1;i<=n;i++) if(a[i]!="") seen[a[i]]=1} {p=$0; sub(/^[^\t]*\t/,"",p); if(!(p in seen)) print}'
+      else
+        git ls-tree -r "$tree" -- ":(literal)$root/"
+      fi
+    done < <(jq -r '(.new_file_roots // [])[]' "$(feature_scope_file)")
+  } | sha256_stdin
+}
+# 승인·리뷰 입력 지문. manifest 가 없으면(구버전 산출물) 작업 트리 전체 지문으로 호환한다.
+# manifest 가 '있는데' 잘못된 경우는 조용히 전체 지문으로 돌아가지 않는다 — 범위 격리가 소리 없이 풀리기 때문에 실패시킨다.
+# lock 이 있으면 원본과 같아야 한다 — 이 불변식을 여기 두어 러너 verify·리뷰 루프·승인 재사용·커밋 직전 검사가 전부 같은 조건을 본다
+# (lock 만 해시하면 승인 뒤 원본만 바뀌어도 통과해 버린다).
+compute_approval_fingerprint() {
+  if [ -f "$FEATURE_SCOPE_LOCK" ]; then
+    [ -f "$FEATURE_SCOPE_FILE" ] || { echo "[FAIL] feature-scope.json 은 없고 lock 만 존재함" >&2; return 1; }
+    cmp -s "$FEATURE_SCOPE_FILE" "$FEATURE_SCOPE_LOCK" || { echo "[SCOPE_MANIFEST_CHANGED] feature-scope.json 과 feature-scope.lock.json 이 다름 — 승인·지문 계산 불가" >&2; return 1; }
+    feature_scope_valid_file "$FEATURE_SCOPE_LOCK" || { echo "[FAIL] 유효하지 않은 feature-scope.lock.json" >&2; return 1; }
+  fi
+  if feature_scope_present; then
+    feature_scope_valid_file "$FEATURE_SCOPE_FILE" || { echo "[FAIL] 유효하지 않은 feature-scope.json — version $FEATURE_SCOPE_VERSION, files/new_file_roots 중 하나 이상, canonical 상대 경로" >&2; return 1; }
+    compute_feature_fingerprint
+  else
+    compute_worktree_fingerprint
+  fi
+}
+
+# 수정자(FIXER_PENDING) 재개용 지문: 승인 지문 + decisions.md. 수정자는 코드를 고치지 않고 decisions.md 에
+# REJECT 만 기록하고 죽을 수 있으므로, 작업 트리 지문만으로는 부분 실행을 감지하지 못한다.
+# APPROVE 캐시는 계속 compute_approval_fingerprint 만 쓴다 — 이후 문서 기록이 승인을 무효화하면 안 된다.
+compute_fixer_resume_fingerprint() {
+  {
+    compute_approval_fingerprint
+    if [ -f "$WORK_DIR/decisions.md" ]; then sha256_stdin < "$WORK_DIR/decisions.md"; else printf 'MISSING\n'; fi
+  } | sha256_stdin
+}
+
+# ---------- 문서 합의 체크포인트 공용 정의 (consensus-loop.sh 와 feature-run.sh 가 같은 것을 써야 한다) ----------
+# 합의 대상 문서 + decisions.md. 스냅샷·문서 diff·변경 파일 계산·재개 지문이 모두 이 목록 하나를 쓴다.
+# (지문에 들어가는 파일과 diff 에 잡히는 파일이 다르면, 변경 감지로 넘어간 다음 라운드에서 검증자가
+#  실제로 바뀐 파일을 revision_ref 로 가리켜도 러너가 "변경 목록에 없음"으로 응답을 거부하게 된다)
+consensus_docs_for() { # design | impl
+  case "$1" in
+    design) printf '%s\n' "$WORK_DIR/design.md" "$WORK_DIR/decisions.md";;
+    impl) printf '%s\n' "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/decisions.md";;
+  esac
+}
+# 지문 세 종류 — 재개 지점은 "누가 무엇을 바꿨는가"에 따라 달라지므로 하나로 합치지 않는다.
+#   editable : 디자이너가 고치는 것(consensus_docs_for = 대상 문서 + decisions.md). DESIGNER_PENDING 에서 달라졌으면 디자이너 부분 실행.
+#   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + [USER-QUESTION]).
+#              달라졌으면 저장된 리뷰 자체가 무효 → Round 1 부터.
+#   pass     : 합의된 입력 전체(upstream + 대상 문서 + [USER-QUESTION]). PASS 가 현재 입력에 대한 것인지.
+_fingerprint_files() { # file... → NUL 구분 내용 스트림
+  for file in "$@"; do
+    [ -f "$file" ] || continue
+    printf '%s\0' "$file"; cat "$file"; printf '\0'
+  done
+}
+_user_decisions() {
+  printf 'decisions:USER-QUESTION\0'
+  if [ -f "$WORK_DIR/decisions.md" ]; then grep -E '^\s*- \[USER-QUESTION\]' "$WORK_DIR/decisions.md" || true; fi
+}
+consensus_editable_fingerprint() { # design | impl
+  { consensus_docs_for "$1" | while IFS= read -r file; do _fingerprint_files "$file"; done; } | sha256_stdin
+}
+consensus_upstream_fingerprint() { # design | impl
+  {
+    case "$1" in
+      design) _fingerprint_files "$WORK_DIR/request.md";;
+      impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
+    esac
+    _user_decisions
+  } | sha256_stdin
+}
+# PASS 지문: 합의된 '입력'이 여전히 같은지 확인하는 용도. request/design(/implementation/approach) 전체와
+# decisions.md 중 사용자 정책 결정([USER-QUESTION]) 줄만 — 이후 수정자·디자이너의 판정 기록이 쌓여도
+# 이전 PASS 가 불필요하게 무효화되지 않게 한다.
+consensus_pass_fingerprint() { # design | impl
+  {
+    case "$1" in
+      design) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
+      impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/feature-scope.json";;
+    esac
+    _user_decisions
+  } | sha256_stdin
+}
+# (impl PASS 지문에 feature-scope.json 원본을 넣는다 — 사용자가 범위를 바꾸면 워커 재진입 전에 impl 재합의를 거치게 한다)
+# 리뷰 JSON 내용 검증 — 체크포인트가 가리키는 파일이 존재한다는 것만으로 PASS/APPROVE 를 복원하지 않는다.
+valid_spec_pass_review() { # review.json
+  [ -f "$1" ] && jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" \
+    '.schema_version==$v and .verdict=="PASS" and (.blocking_issues|length)==0' "$1" >/dev/null 2>&1
+}
+valid_impl_approve_review() { # review.json
+  [ -f "$1" ] && jq -e --argjson v "$REVIEWER_CONTRACT_VERSION" \
+    '.schema_version==$v and .verdict=="APPROVE" and (.issues|length)==0' "$1" >/dev/null 2>&1
+}
+# 현재 입력에 대해 유효한 합의 PASS 가 있는가: 체크포인트가 PASS 이고, 계약 버전·PASS 지문이 현재와 같고,
+# 가리키는 리뷰 파일이 해당 round 의 실제 PASS 리뷰여야 한다. 러너의 stage 결정과 루프의 PASS 재사용이 함께 쓴다.
+consensus_pass_current() { # design | impl
+  local target="$1" checkpoint="$WORK_DIR/consensus-$1.json" review round
+  [ -f "$checkpoint" ] || return 1
+  jq -e --arg t "$target" --argjson v "$VALIDATOR_CONTRACT_VERSION" --argjson cv "$CONSENSUS_CHECKPOINT_VERSION" \
+    '.version==$cv and .target==$t and .contract_version==$v and .next_step=="PASS"' "$checkpoint" >/dev/null 2>&1 || return 1
+  [ "$(jq -r '.input_fingerprint // ""' "$checkpoint")" = "$(consensus_pass_fingerprint "$target")" ] || return 1
+  review="$(jq -r '.review // ""' "$checkpoint")"
+  round="$(jq -r '.round // 0' "$checkpoint")"
+  [ "$review" = "$WORK_DIR/reviews/validator-$target-round-$(printf '%02d' "$round").json" ] || return 1
+  valid_spec_pass_review "$review"
+}
+
+# 현재 작업 트리에 대해 유효한 구현 승인이 있는가: review-impl.json 이 APPROVE 이고 포맷·계약 버전이 맞고,
+# 작업 트리 지문이 같고, 리뷰 경로가 attempt/round 와 일치하며 실제 APPROVE 리뷰이고, approved.fingerprint 도 같은 값이어야 한다.
+# 러너가 verify stage 로 바로 들어가기 전에 쓴다 — approved.fingerprint 파일 존재만으로 리뷰 루프의 검사를 우회하지 않게.
+impl_approval_current() {
+  local checkpoint="$WORK_DIR/review-impl.json" fp review attempt round
+  [ -f "$checkpoint" ] && [ -f "$WORK_DIR/approved.fingerprint" ] || return 1
+  jq -e --argjson v "$REVIEWER_CONTRACT_VERSION" --argjson cv "$REVIEW_CHECKPOINT_VERSION" \
+    '.version==$cv and .contract_version==$v and .next_step=="APPROVE"' "$checkpoint" >/dev/null 2>&1 || return 1
+  fp="$(jq -r '.worktree_fingerprint // ""' "$checkpoint")"
+  [ -n "$fp" ] && [ "$fp" = "$(cat "$WORK_DIR/approved.fingerprint")" ] && [ "$fp" = "$(compute_approval_fingerprint)" ] || return 1
+  review="$(jq -r '.review // ""' "$checkpoint")"
+  attempt="$(jq -r '.attempt // 0' "$checkpoint")"; round="$(jq -r '.round // 0' "$checkpoint")"
+  [ "$review" = "$WORK_DIR/reviews/impl-attempt-$(printf '%02d' "$attempt")/reviewer-round-$(printf '%02d' "$round").json" ] || return 1
+  valid_impl_approve_review "$review"
+}
+
 # 마지막 APPROVE 시점 지문과 현재 작업 트리를 비교. 다르면 승인 무효(APPROVAL_STALE).
 # Phase 4 진입 직전과 커밋 위임 직전, 두 지점에서 반드시 호출한다.
 verify_approved_fingerprint() {
@@ -194,7 +508,7 @@ verify_approved_fingerprint() {
   [ -f "$fingerprint_file" ] || { echo "[FAIL] 승인 지문 없음: $fingerprint_file — Phase 3 승인이 선행돼야 함." >&2; return 1; }
   local approved_hash current_hash
   approved_hash="$(cat "$fingerprint_file")"
-  current_hash="$(compute_worktree_fingerprint)"
+  current_hash="$(compute_approval_fingerprint)"
   if [ "$approved_hash" != "$current_hash" ]; then
     echo "[APPROVAL_STALE] 마지막 APPROVE 이후 코드가 변경됨. Phase 3 재리뷰 없이는 진행 금지." >&2
     return 1

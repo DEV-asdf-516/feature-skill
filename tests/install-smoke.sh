@@ -9,6 +9,20 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 fail() { echo "[FAIL] $1" >&2; exit 1; }
+# 합의 PASS 픽스처: 러너의 stage 결정은 파일명이 아니라 consensus-<target>.json 체크포인트(+입력 지문·리뷰 내용)를 본다.
+# 가짜 PASS 리뷰 파일을 두고 합의 루프를 한 번 돌려 체크포인트를 만든다 (대상 config 의 CODEX_BIN 이 "true" 여야 한다 — 리뷰 파일을 덮어쓰지 않도록).
+fake_consensus_pass() { # target-root design|impl
+  local root="$1" t="$2"
+  mkdir -p "$root/.agent-work/reviews"
+  printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
+  (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
+    || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
+}
+# 피처 범위 manifest 픽스처 (워커 진입에 필수)
+fake_scope() { # target-root file...
+  local root="$1"; shift
+  printf '%s\n' "$@" | jq -R . | jq -sc '{version:1, files:., new_file_roots:[]}' > "$root/.agent-work/feature-scope.json"
+}
 
 TARGET="$SCRATCH/target"
 TARGET_SKILL="$TARGET/.claude/skills/feature"
@@ -24,7 +38,14 @@ bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"
 jq -e '.hooks.UserPromptSubmit and .hooks.PreToolUse' "$TARGET/.claude/settings.json" >/dev/null \
   || fail "신규 설치: settings.json hooks 누락"
-echo "[OK] 1. 신규 설치"
+[ -f "$TARGET_SKILL/worker-skills/ponytail/SKILL.md" ] || fail "신규 설치: worker-skills/ponytail 누락"
+# config.sh 의 CHANGE_ME 가드를 지나려면 값을 채운 사본으로 source 한다 (대상 config.sh 는 건드리지 않는다)
+# 사본은 대상 config.sh 옆에 둔다 — PROJECT_ROOT 가 파일 위치 기준이라 다른 곳에서 source 하면 대상 프로젝트를 못 찾는다
+sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" > "$TARGET_SKILL/.config.smoke.sh"
+worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/.config.smoke.sh")" || fail "신규 설치: load_worker_rules 실패"
+rm -f "$TARGET_SKILL/.config.smoke.sh"
+echo "$worker_rules" | grep -q '\[WORKER SKILL: ponytail\]' || fail "신규 설치: ponytail 이 워커 프롬프트에 주입되지 않음"
+echo "[OK] 1. 신규 설치 (+ ponytail 워커 주입)"
 
 # ---------- 2. 재실행 멱등성 ----------
 rerun_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET")"
@@ -219,6 +240,11 @@ impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/l
   || fail "중첩 tee: impl-review-loop 시작 로그가 ${impl_start_count}회 기록됨 (1회여야 함)"
 
 # 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
+printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
+printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
+fake_scope "$LOG_TARGET" src/x.txt            # impl PASS 지문에 manifest 가 들어가므로 합의보다 먼저 둔다
+fake_consensus_pass "$LOG_TARGET" impl        # CODEX_BIN 이 아직 "true" 인 동안 체크포인트를 만든다
+# 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
 FAKE_CODEX="$LOG_TARGET/fake-codex"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -228,14 +254,12 @@ printf '%s\n' \
   '  case "$1" in -o) output_file="$2"; shift 2;; *) shift;; esac' \
   'done' \
   'printf "WORKER_STREAM_MARKER\\n"' \
+  'if [ "${FAKE_TAMPER_BASELINE:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/existing-under-root.txt; fi' \
+  'if [ "${FAKE_TAMPER_BOTH:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; for m in .agent-work/feature-scope.json .agent-work/feature-scope.lock.json; do jq -c ".files += [\"src/z.txt\"]" "$m" > "$m.tmp" && mv "$m.tmp" "$m"; done; echo tampered-both >> src/existing-under-root.txt; fi' \
   'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
   > "$FAKE_CODEX"
 chmod +x "$FAKE_CODEX"
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
-printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
-printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
-printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' \
-  > "$LOG_TARGET/.agent-work/reviews/validator-impl-round-01.json"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' \
   > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"
@@ -260,7 +284,111 @@ set -e
 [ "$docgap_rc" = 3 ] || fail "DOC_GAP: 종료 코드가 3(NEED_DOCS)이 아님 ($docgap_rc)"
 [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = APPROACH_GAP ] || fail "DOC_GAP: reason 이 APPROACH_GAP 이 아님"
 [ "$(jq -r '.stage' "$LOG_TARGET/.agent-work/run-state.json")" = impl ] || fail "DOC_GAP: 재개 stage 가 impl 이 아님"
-echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 출력 스트리밍"
+# 필수 워커 스킬 누락 → run_worker 가 실제로 중단하고(exit 1) 가짜 codex 를 부르지 않는다 (load_worker_rules 단독 호출로는 잡히지 않는 경로)
+sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=("missing-skill")/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+missing_skill_rc=$?
+set -e
+[ "$missing_skill_rc" = 1 ] || fail "필수 워커 스킬 누락: 러너 종료 코드가 1 이 아님 ($missing_skill_rc)"
+grep -q "필수 워커 스킬 'missing-skill' 없음" "$LOG_TARGET/.agent-work/live.log" || fail "필수 워커 스킬 누락: 실패 사유가 기록되지 않음"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "필수 워커 스킬 누락: 워커(codex)가 호출됨"
+sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=("ponytail")/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+# worker 단계 진입 시 원본 != lock → exit 2, run-state NEED_USER/SCOPE_MANIFEST_CHANGED, codex 호출 0 (set -e 아래 stop_need_user 도달 확인)
+[ -f "$LOG_TARGET/.agent-work/feature-scope.lock.json" ] || fail "scope lock: 러너가 feature-scope.lock.json 을 확정하지 않음"
+cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.json.orig"
+jq -c '.files += ["src/y.txt"]' "$LOG_TARGET/.agent-work/feature-scope.json.orig" > "$LOG_TARGET/.agent-work/feature-scope.json"
+# 원본 manifest 는 impl PASS 지문에 포함되므로 러너는 먼저 impl 재합의로 돌아간다(설계된 흐름). 사용자가 재합의를 마친 뒤
+# lock 을 지우지 않고 재실행한 상황을 만들기 위해 impl 체크포인트를 다시 만든다 (그동안만 CODEX_BIN=true).
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+fake_consensus_pass "$LOG_TARGET" impl
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+lock_mismatch_rc=$?
+set -e
+[ "$lock_mismatch_rc" = 2 ] || fail "scope lock 불일치: 러너 종료 코드가 2 가 아님 ($lock_mismatch_rc)"
+[ "$(jq -r '.status' "$LOG_TARGET/.agent-work/run-state.json")" = NEED_USER ] || fail "scope lock 불일치: run-state status 가 NEED_USER 가 아님 ($(jq -r '.status' "$LOG_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_MANIFEST_CHANGED ] || fail "scope lock 불일치: reason 이 SCOPE_MANIFEST_CHANGED 가 아님"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "scope lock 불일치: 워커(codex)가 호출됨"
+cp "$LOG_TARGET/.agent-work/feature-scope.json.orig" "$LOG_TARGET/.agent-work/feature-scope.json"
+# 워커가 worker-baseline.tree 를 빈 tree 로 바꾸고 new_file_roots 아래 기존 파일을 수정 → SCOPE_BASELINE_CHANGED, review 미진입, 원복 없음
+# 준비: 기준선에 있는 root 아래 파일을 커밋하고, roots 가 있는 manifest 로 원본·lock 을 맞춘 뒤 impl 체크포인트를 다시 만든다
+mkdir -p "$LOG_TARGET/src" && echo "existing" > "$LOG_TARGET/src/existing-under-root.txt"
+(cd "$LOG_TARGET" && git add src/existing-under-root.txt && git -c user.email=smoke@test -c user.name=smoke commit -qm "existing under root")
+jq -c '.new_file_roots = ["src/"]' "$LOG_TARGET/.agent-work/feature-scope.json.orig" > "$LOG_TARGET/.agent-work/feature-scope.json"
+cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.lock.json"
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+fake_consensus_pass "$LOG_TARGET" impl
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+(cd "$LOG_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree > .agent-work/worker-baseline.tree')   # 기준선에 existing-under-root.txt 포함
+cp "$LOG_TARGET/.agent-work/worker-baseline.tree" "$LOG_TARGET/.agent-work/worker-baseline.tree.keep"
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_TAMPER_BASELINE=1 FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+tamper_rc=$?
+set -e
+[ "$tamper_rc" = 2 ] || fail "기준선 조작: 러너 종료 코드가 2 가 아님 ($tamper_rc)"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "기준선 조작: reason 이 SCOPE_BASELINE_CHANGED 가 아님 ($(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.stage' "$LOG_TARGET/.agent-work/run-state.json")" = worker ] || fail "기준선 조작: review 단계로 진입함"
+[ "$(tail -1 "$LOG_TARGET/src/existing-under-root.txt")" = tampered ] || fail "기준선 조작: 워커의 기존 파일 변경이 원복됨(보존돼야 함)"
+[ "$(cat "$LOG_TARGET/.agent-work/worker-baseline.tree")" = 4b825dc642cb6eb9a060e54bf8d69288fbee4904 ] || fail "기준선 조작: 기준선 파일이 자동 복구됨(복구 금지)"
+[ "$(jq -r .expected "$LOG_TARGET/.agent-work/worker-baseline.guard.json")" = "$(cat "$LOG_TARGET/.agent-work/worker-baseline.tree.keep")" ] || fail "기준선 조작: 가드 기대값이 원래 기준선이 아님"
+# 복구 없이 같은 명령 재실행 → 다시 SCOPE_BASELINE_CHANGED, codex 호출 0회
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+tamper_rerun_rc=$?
+set -e
+[ "$tamper_rerun_rc" = 2 ] || fail "기준선 미복구 재실행: 종료 코드가 2 가 아님 ($tamper_rerun_rc)"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "기준선 미복구 재실행: reason 이 SCOPE_BASELINE_CHANGED 가 아님"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "기준선 미복구 재실행: 워커(codex)가 호출됨"
+# 원래 값으로 복구하면 워커가 재개된다 (가짜 워커는 USER_DECISION 을 내므로 exit 2 / UNDECIDED)
+cp "$LOG_TARGET/.agent-work/worker-baseline.tree.keep" "$LOG_TARGET/.agent-work/worker-baseline.tree"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+restored_rc=$?
+set -e
+[ "$restored_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = UNDECIDED ] || fail "기준선 복구 후: 워커가 재개되지 않음 (rc $restored_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" || fail "기준선 복구 후: 워커(codex)가 호출되지 않음"
+[ "$(jq -r .active "$LOG_TARGET/.agent-work/worker-baseline.guard.json")" = false ] || fail "기준선 복구 후: 가드가 비활성화되지 않음"
+# 복합 변경: 기준선 + manifest(원본·lock) 를 함께 바꾸면 SCOPE_MANIFEST_CHANGED 로 먼저 멈추더라도 가드가 남아야 한다
+cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.json.keep"
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_TAMPER_BOTH=1 FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+both_rc=$?
+set -e
+[ "$both_rc" = 2 ] || fail "복합 변조: 종료 코드가 2 가 아님 ($both_rc)"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_MANIFEST_CHANGED ] || fail "복합 변조: 첫 사유가 SCOPE_MANIFEST_CHANGED 가 아님 ($(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r .active "$LOG_TARGET/.agent-work/worker-baseline.guard.json")" = true ] || fail "복합 변조: manifest 사유로 먼저 멈췄는데 기준선 가드가 기록되지 않음"
+# manifest 만 복구(원본·lock)하고 재실행 → SCOPE_BASELINE_CHANGED, codex 0회
+cp "$LOG_TARGET/.agent-work/feature-scope.json.keep" "$LOG_TARGET/.agent-work/feature-scope.json"
+cp "$LOG_TARGET/.agent-work/feature-scope.json.keep" "$LOG_TARGET/.agent-work/feature-scope.lock.json"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+both_rerun_rc=$?
+set -e
+[ "$both_rerun_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "복합 변조: manifest 만 복구한 재실행이 막히지 않음 (rc $both_rerun_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "복합 변조: 기준선 미복구 재실행에서 워커(codex)가 호출됨"
+# 기준선까지 복구하면 재개
+cp "$LOG_TARGET/.agent-work/worker-baseline.tree.keep" "$LOG_TARGET/.agent-work/worker-baseline.tree"
+: > "$LOG_TARGET/.agent-work/live.log"
+set +e
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+both_restored_rc=$?
+set -e
+[ "$both_restored_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = UNDECIDED ] || fail "복합 변조 복구 후: 워커가 재개되지 않음 (rc $both_restored_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" || fail "복합 변조 복구 후: 워커(codex)가 호출되지 않음"
+echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 출력 스트리밍 + 필수 워커 스킬 누락 시 워커 미실행 + scope lock 불일치 시 NEED_USER + 기준선 조작 시 SCOPE_BASELINE_CHANGED(미복구 재실행 재중단·복구 후 재개·복합 변조 시 가드 보존)"
 
 # ---------- 9. feature-live 저장소별 단일 실행 lock ----------
 chmod +x "$LOG_TARGET/feature-live"
@@ -323,11 +451,15 @@ printf 'user edit before feature\n' > "$REVIEW_TARGET/src/b.txt"
 printf 'changed\n' > "$REVIEW_TARGET/src/a.txt"
 printf 'new\n' > "$REVIEW_TARGET/src/new.txt"
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$REVIEW_TARGET/.agent-work/$doc.md"; done
-printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' > "$REVIEW_TARGET/.agent-work/reviews/validator-impl-round-01.json"
+fake_scope "$REVIEW_TARGET" src/a.txt src/new.txt   # b.txt 는 범위 밖 — 리뷰 diff·승인 지문에서 제외된다 (impl PASS 지문에 포함되므로 합의보다 먼저)
+fake_consensus_pass "$REVIEW_TARGET" design
+fake_consensus_pass "$REVIEW_TARGET" impl
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}\n' > "$REVIEW_TARGET/.agent-work/worker-result.json"
 review_issue='{"id":"R-01","action":"FIX_CODE","category":"CONTRACT_VIOLATION","evidence_type":"DIRECT_MISMATCH","basis_refs":["approach.md:L1"],"code_refs":["src/a.txt:L1-L1"],"reachable_scenario":"","impact":"","why_blocks_now":"x","required_outcome":"y","origin":"ROUND_1","previous_issue_id":"","fix_ref":""}'
 run_review_loop() { # fake-review-json → exit code (stdout 은 run.log)
   printf '%s\n' "$1" > "$REVIEW_SIDE/review.json"
+  # 각 사례는 새 리뷰어 호출을 전제한다 — 직전 사례의 APPROVE 체크포인트가 재사용되지 않게 포맷 버전 불일치로 무효화
+  printf '{"version":0}\n' > "$REVIEW_TARGET/.agent-work/review-impl.json"
   local rc=0   # 함수 안에서 set ±e 를 토글하지 않는다 — 호출자의 errexit 상태를 바꾼다
   (cd "$REVIEW_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review.json" FEATURE_LIVE_TEE=1 bash "$REVIEW_SKILL/scripts/impl-review-loop.sh") > "$REVIEW_SIDE/run.log" 2>&1 || rc=$?
   return $rc
@@ -359,45 +491,45 @@ set -e
 [ "$(jq -r '.stage' "$REVIEW_TARGET/.agent-work/run-state.json")" = impl ] || fail "리뷰어 DOC_GAP: 재개 stage 가 impl 이 아님"
 echo "[OK] 10. 구현 리뷰 루프 계약 연계 검사 (APPROVE / origin / schema_version / 필드 / DOC_GAP)"
 
-# ---------- 11. 범위 밖 변경 원복 — 사용자의 index 상태 보존 (가짜 수정자가 프롬프트가 지시한 명령을 그대로 실행) ----------
-# b.txt: 기준선 이전 사용자 unstaged 변경 → 워커가 추가 변경 → 리뷰어 OUT_OF_SCOPE_CHANGE → 수정자가 기준선으로 원복.
-# 기대: 내용은 기준선(사용자 변경 유지), git status 는 원복 전과 동일(" M", staged 아님).
+# ---------- 11. 범위 밖 변경은 자동 원복하지 않는다 — FOREIGN_WORKTREE_CHANGE 로 보존 후 중단 ----------
+# b.txt: 기준선 이전 사용자 unstaged 변경 + 기준선 이후 (워커 또는 다른 세션의) 추가 변경. 리뷰어가 OUT_OF_SCOPE_CHANGE 를 내면
+# 수정자를 부르지 않고 exit 2 / FOREIGN_WORKTREE_CHANGE. 내용·git status 모두 그대로 (worker-baseline.tree 는 시점 기준선이지 소유권 증거가 아니다).
 printf 'user edit before feature\nworker edit\n' > "$REVIEW_TARGET/src/b.txt"
-baseline_tree="$(cat "$REVIEW_TARGET/.agent-work/worker-baseline.tree")"
 status_before="$(cd "$REVIEW_TARGET" && git status --porcelain=v1 -- src/b.txt)"
-[ "$status_before" = " M src/b.txt" ] || fail "원복 픽스처: b.txt 초기 상태가 unstaged 수정이 아님 ($status_before)"
+[ "$status_before" = " M src/b.txt" ] || fail "원복 금지 픽스처: b.txt 초기 상태가 unstaged 수정이 아님 ($status_before)"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
-  '# 리뷰어 호출: 1회차 REQUEST_CHANGES(OUT_OF_SCOPE_CHANGE), 2회차 APPROVE. 수정자 호출(--permission-mode): 프롬프트가 지시한 원복 명령 실행' \
-  'case " $* " in *" --permission-mode "*) prompt="${@: -1}"; tree="$(printf "%s" "$prompt" | sed -n "s/.*기준 tree = \`\([0-9a-f]*\)\`.*/\1/p")"; git restore --source="$tree" --worktree -- src/b.txt; printf "%s\n" "{\"session_id\":\"fake\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"; exit 0;; esac' \
+  '# 리뷰어 호출: 1회차 FAKE_REVIEW, 2회차 FAKE_REVIEW2. 수정자 호출(--permission-mode): FAKE_FIX_CMD 를 실행하고 호출 사실을 기록' \
+  'case " $* " in *" --permission-mode "*) printf "fixer\n" >> "$FAKE_COUNT.fixer"; eval "${FAKE_FIX_CMD:-true}"; printf "%s\n" "{\"session_id\":\"fake\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"; exit "${FAKE_FIX_RC:-0}";; esac' \
   'n=$(( $(cat "$FAKE_COUNT" 2>/dev/null || echo 0) + 1 )); printf "%s" "$n" > "$FAKE_COUNT"' \
   'f="$FAKE_REVIEW"; [ "$n" -ge 2 ] && f="$FAKE_REVIEW2"' \
   'jq -n -c --slurpfile r "$f" '"'"'{structured_output: $r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'"'" \
   > "$REVIEW_SIDE/fake-claude-fix"
 chmod +x "$REVIEW_SIDE/fake-claude-fix"
-printf '%s\n' "$review_issue" | jq -c '{schema_version:6,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"이번 작업이 src/b.txt 에 만든 변경이 없어진다"}]}' > "$REVIEW_SIDE/review-oos.json"
+printf '%s\n' "$review_issue" | jq -c '{schema_version:6,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"src/b.txt 의 변경이 범위 밖"}]}' > "$REVIEW_SIDE/review-oos.json"
+printf '%s\n' "$review_issue" | jq -c '{schema_version:6,verdict:"REQUEST_CHANGES",issues:[.]}' > "$REVIEW_SIDE/review-fix.json"
 printf '{"schema_version":6,"verdict":"APPROVE","issues":[]}\n' > "$REVIEW_SIDE/review-approve.json"
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-fix\"|; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=1/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 : > "$REVIEW_TARGET/.agent-work/decisions.md"
 set +e
-(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.fix-calls" FAKE_REVIEW="$REVIEW_SIDE/review-oos.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
+(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.oos-calls" FAKE_REVIEW="$REVIEW_SIDE/review-oos.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
   bash "$REVIEW_SKILL/scripts/impl-review-loop.sh") > "$REVIEW_SIDE/run-oos.log" 2>&1
 oos_rc=$?
 set -e
-[ "$oos_rc" = 0 ] || { tail -5 "$REVIEW_SIDE/run-oos.log" >&2; fail "원복 루프: Round 2 APPROVE 로 끝나지 않음 (exit $oos_rc)"; }
-[ "$(cat "$REVIEW_TARGET/src/b.txt")" = "user edit before feature" ] || fail "원복: b.txt 가 기준선 내용(사용자 변경 유지·워커 변경 제거)이 아님"
+[ "$oos_rc" = 2 ] || { tail -5 "$REVIEW_SIDE/run-oos.log" >&2; fail "원복 금지: OUT_OF_SCOPE_CHANGE 가 exit 2 로 끝나지 않음 (exit $oos_rc)"; }
+[ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = FOREIGN_WORKTREE_CHANGE ] || fail "원복 금지: state.json 이 FOREIGN_WORKTREE_CHANGE 가 아님"
+[ ! -f "$REVIEW_SIDE/.oos-calls.fixer" ] || fail "원복 금지: 범위 밖 변경인데 수정자가 호출됨"
+[ "$(cat "$REVIEW_TARGET/src/b.txt")" = "$(printf 'user edit before feature\nworker edit')" ] || fail "원복 금지: b.txt 내용이 바뀜(보존돼야 함)"
 status_after="$(cd "$REVIEW_TARGET" && git status --porcelain=v1 -- src/b.txt)"
-[ "$status_after" = "$status_before" ] || fail "원복: 수정자가 사용자 파일의 staged/unstaged 상태를 변경함 (전 '$status_before' → 후 '$status_after')"
-grep -q 'src/b.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-"*"/fix-diff-round-02.patch" || fail "원복: 수정 diff 에 b.txt 원복이 기록되지 않음"
-echo "[OK] 11. 범위 밖 변경 원복 — 내용은 기준선, index 상태 보존"
+[ "$status_after" = "$status_before" ] || fail "원복 금지: git status 가 바뀜 (전 '$status_before' → 후 '$status_after')"
+grep -q 'src/b.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-"*"/diff-round-01.patch" && fail "원복 금지: 범위 밖 파일(b.txt)이 리뷰 diff 에 포함됨"
+echo "[OK] 11. 범위 밖 변경 → FOREIGN_WORKTREE_CHANGE, 수정자 미호출, 내용·index 보존, diff 범위 한정"
 
 # ---------- 11b. 수정자가 index 를 바꾸면 결과 기준으로 중단 (자동 복구 없음) ----------
-sed 's|git restore --source="$tree" --worktree -- src/b.txt|git add src/b.txt|' "$REVIEW_SIDE/fake-claude-fix" > "$REVIEW_SIDE/fake-claude-stage"
-chmod +x "$REVIEW_SIDE/fake-claude-stage"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-stage\"|" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
+# 수정자 픽스처: FIX_CODE 이슈(a.txt)를 받고 b.txt 를 git add 한다 (index 조작)
 printf 'user edit before feature\nworker edit\n' > "$REVIEW_TARGET/src/b.txt"
 set +e
-(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.stage-calls" FAKE_REVIEW="$REVIEW_SIDE/review-oos.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
+(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.stage-calls" FAKE_FIX_CMD="git add src/b.txt" FAKE_REVIEW="$REVIEW_SIDE/review-fix.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
   bash "$REVIEW_SKILL/scripts/impl-review-loop.sh") > "$REVIEW_SIDE/run-stage.log" 2>&1
 stage_rc=$?
 set -e
@@ -409,13 +541,9 @@ echo "[OK] 11b. 수정자 index 변경 → 결과 기준 중단, 자동 복구 �
 
 # ---------- 11c. index 변경 + CLI 실패 → CLI 실패보다 index 변경이 먼저 보고됨 (수정자 / 워커) ----------
 # 11c-1 수정자: git add 후 exit 7
-sed 's|git add src/b.txt;|git add src/b.txt; exit 7;|' "$REVIEW_SIDE/fake-claude-stage" > "$REVIEW_SIDE/fake-claude-stage-fail"
-grep -q 'exit 7' "$REVIEW_SIDE/fake-claude-stage-fail" || fail "11c 픽스처: 실패하는 가짜 수정자 생성 실패"
-chmod +x "$REVIEW_SIDE/fake-claude-stage-fail"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-stage-fail\"|" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 printf 'user edit before feature\nworker edit\n' > "$REVIEW_TARGET/src/b.txt"
 set +e
-(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.stagefail-calls" FAKE_REVIEW="$REVIEW_SIDE/review-oos.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
+(cd "$REVIEW_TARGET" && FAKE_COUNT="$REVIEW_SIDE/.stagefail-calls" FAKE_FIX_CMD="git add src/b.txt" FAKE_FIX_RC=7 FAKE_REVIEW="$REVIEW_SIDE/review-fix.json" FAKE_REVIEW2="$REVIEW_SIDE/review-approve.json" FEATURE_LIVE_TEE=1 \
   bash "$REVIEW_SKILL/scripts/impl-review-loop.sh") > "$REVIEW_SIDE/run-stagefail.log" 2>&1
 stagefail_rc=$?
 set -e
@@ -431,7 +559,10 @@ mkdir -p "$WIDX_TARGET/src" "$WIDX_TARGET/.agent-work/reviews"
 printf 'base\n' > "$WIDX_TARGET/src/w.txt"
 (cd "$WIDX_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$WIDX_TARGET/.agent-work/$doc.md"; done
-for stage in design impl; do printf '{"schema_version":3,"verdict":"PASS","blocking_issues":[]}\n' > "$WIDX_TARGET/.agent-work/reviews/validator-$stage-round-01.json"; done
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"
+fake_scope "$WIDX_TARGET" src/w.txt
+fake_consensus_pass "$WIDX_TARGET" design
+fake_consensus_pass "$WIDX_TARGET" impl
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
@@ -460,6 +591,71 @@ idx_b="$(cd "$WIDX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; 
 (cd "$WIDX_TARGET" && git update-index --no-assume-unchanged src/w.txt)
 [ "$idx_a" != "$idx_b" ] || fail "index 지문: assume-unchanged 플래그 변경이 지문에 반영되지 않음"
 echo "[OK] 11c. index 변경 + CLI 실패 → index 변경 우선 보고 (수정자·워커), assume-unchanged 감지"
+
+# ---------- 11d. verify 단계 worker-fix 가 기준선을 바꾼 뒤 verify 재진입 — 전역 가드가 DONE 을 막는다 ----------
+# exact files 범위(src/w.txt)만 쓰므로 범위 밖 파일·기준선 변경은 승인 지문에 잡히지 않는다. 가드가 없으면 두 번째 실행에서
+# 테스트만 통과하면 run_worker·리뷰 루프를 거치지 않고 DONE 이 된다.
+VFIX_TARGET="$SCRATCH/verify-fix"; VFIX_SKILL="$VFIX_TARGET/.claude/skills/feature"; VFIX_SIDE="$SCRATCH/verify-fix.side"; mkdir -p "$VFIX_SIDE"
+git init -q "$VFIX_TARGET"; bash "$SOURCE_ROOT/install.sh" "$VFIX_TARGET" >/dev/null; chmod -x "$VFIX_TARGET/feature-live"
+mkdir -p "$VFIX_TARGET/src" "$VFIX_TARGET/.agent-work/reviews"
+printf 'base\n' > "$VFIX_TARGET/src/w.txt"; printf 'other\n' > "$VFIX_TARGET/src/other.txt"
+(cd "$VFIX_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
+for doc in design implementation approach; do printf '# %s\n' "$doc" > "$VFIX_TARGET/.agent-work/$doc.md"; done
+# 테스트 더블: 호출 횟수를 기록하고 flag 파일이 있을 때만 통과
+printf '%s\n' '#!/usr/bin/env bash' 'echo t >> "$VFIX_COUNT"' '[ -f "$VFIX_PASS_FLAG" ]' > "$VFIX_SIDE/test.sh"; chmod +x "$VFIX_SIDE/test.sh"
+# 가짜 codex(worker-fix): 기준선을 빈 tree 로 바꾸고 범위 밖 파일 수정, DONE
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
+  'printf "VFIX_WORKER_MARKER\n"' \
+  'printf "%s\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/other.txt' \
+  'printf '\''{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}'\'' > "$out"' \
+  > "$VFIX_SIDE/fake-codex"
+chmod +x "$VFIX_SIDE/fake-codex"
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s|^TEST_CMD=.*|TEST_CMD=\"VFIX_COUNT=$VFIX_SIDE/test-calls VFIX_PASS_FLAG=$VFIX_SIDE/tests-pass bash $VFIX_SIDE/test.sh\"|; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
+fake_scope "$VFIX_TARGET" src/w.txt
+fake_consensus_pass "$VFIX_TARGET" design
+fake_consensus_pass "$VFIX_TARGET" impl
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$VFIX_SIDE/fake-codex\"|" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
+(cd "$VFIX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
+cp "$VFIX_TARGET/.agent-work/worker-baseline.tree" "$VFIX_SIDE/baseline.keep"
+cp "$VFIX_TARGET/.agent-work/feature-scope.json" "$VFIX_TARGET/.agent-work/feature-scope.lock.json"
+printf 'worker change\n' >> "$VFIX_TARGET/src/w.txt"
+printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}\n' > "$VFIX_TARGET/.agent-work/worker-result.json"
+printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > "$VFIX_TARGET/.agent-work/run-state.json"
+# 1차: 리뷰 APPROVE → verify 테스트 실패 → worker-fix 가 기준선 변조 → SCOPE_BASELINE_CHANGED (stage verify)
+set +e
+(cd "$VFIX_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review-approve.json" bash "$VFIX_SKILL/scripts/feature-run.sh") > "$VFIX_SIDE/run1.log" 2>&1
+vfix_rc1=$?
+set -e
+[ "$vfix_rc1" = 2 ] || { tail -5 "$VFIX_SIDE/run1.log" >&2; fail "verify worker-fix 변조: 1차 종료 코드가 2 가 아님 ($vfix_rc1)"; }
+[ "$(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "verify worker-fix 변조: 1차 reason 이 SCOPE_BASELINE_CHANGED 가 아님 ($(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.stage' "$VFIX_TARGET/.agent-work/run-state.json")" = verify ] || fail "verify worker-fix 변조: 1차 stage 가 verify 가 아님"
+[ "$(jq -r .active "$VFIX_TARGET/.agent-work/worker-baseline.guard.json")" = true ] || fail "verify worker-fix 변조: 가드가 기록되지 않음"
+[ "$(wc -l < "$VFIX_SIDE/test-calls" | tr -d ' ')" = 1 ] || fail "verify worker-fix 변조: 1차 테스트 호출 횟수가 1 이 아님"
+# 2차: 테스트는 통과하도록 바꾸고 기준선은 복구하지 않음 → 전역 가드가 exit 2, 테스트·codex 호출 0회, DONE 아님
+touch "$VFIX_SIDE/tests-pass"
+: > "$VFIX_TARGET/.agent-work/live.log"
+set +e
+(cd "$VFIX_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review-approve.json" bash "$VFIX_SKILL/scripts/feature-run.sh") > "$VFIX_SIDE/run2.log" 2>&1
+vfix_rc2=$?
+set -e
+[ "$vfix_rc2" = 2 ] || { tail -5 "$VFIX_SIDE/run2.log" >&2; fail "verify 재진입: 기준선 미복구인데 종료 코드가 2 가 아님 ($vfix_rc2)"; }
+[ "$(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "verify 재진입: reason 이 SCOPE_BASELINE_CHANGED 가 아님 ($(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.status' "$VFIX_TARGET/.agent-work/run-state.json")" != DONE ] || fail "verify 재진입: 기준선 미복구인데 DONE 이 됨"
+[ "$(wc -l < "$VFIX_SIDE/test-calls" | tr -d ' ')" = 1 ] || fail "verify 재진입: 기준선 미복구인데 테스트가 실행됨"
+grep -q 'VFIX_WORKER_MARKER' "$VFIX_TARGET/.agent-work/live.log" && fail "verify 재진입: 기준선 미복구인데 codex 가 호출됨"
+# 3차: 기준선 복구 → verify 재개, 테스트 통과, DONE, 가드 비활성화
+cp "$VFIX_SIDE/baseline.keep" "$VFIX_TARGET/.agent-work/worker-baseline.tree"
+set +e
+(cd "$VFIX_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review-approve.json" bash "$VFIX_SKILL/scripts/feature-run.sh") > "$VFIX_SIDE/run3.log" 2>&1
+vfix_rc3=$?
+set -e
+[ "$vfix_rc3" = 0 ] && [ "$(jq -r '.status' "$VFIX_TARGET/.agent-work/run-state.json")" = DONE ] || { tail -5 "$VFIX_SIDE/run3.log" >&2; fail "verify 재진입: 기준선 복구 후 DONE 에 이르지 못함 (rc $vfix_rc3, status $(jq -r '.status' "$VFIX_TARGET/.agent-work/run-state.json"))"; }
+[ "$(wc -l < "$VFIX_SIDE/test-calls" | tr -d ' ')" = 2 ] || fail "verify 재진입: 복구 후 테스트가 다시 실행되지 않음"
+[ "$(jq -r .active "$VFIX_TARGET/.agent-work/worker-baseline.guard.json")" = false ] || fail "verify 재진입: 복구 후 가드가 비활성화되지 않음"
+[ "$(tail -1 "$VFIX_TARGET/src/other.txt")" = tampered ] || fail "verify 재진입: 범위 밖 변경이 원복됨(보존돼야 함)"
+echo "[OK] 11d. verify worker-fix 기준선 변조 → 미복구 재진입은 테스트·codex 0회로 재중단, 복구 후에만 DONE"
 
 # ---------- 12. 유료 회귀 승인 게이트 (실제 LLM 호출 없음) ----------
 GATE_SOURCE="$SCRATCH/gate-source"
