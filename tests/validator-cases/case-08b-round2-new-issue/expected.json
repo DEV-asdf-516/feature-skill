@@ -1,0 +1,8 @@
+{
+  "stage": "impl",
+  "round": 2,
+  "requires_case": "case-08a-round1-blockers",
+  "verdict": "PASS",
+  "issues": [],
+  "note": "별도 Round 1 대조는 A+B를 검출해야 한다. 이 종결 검사의 고정 직전 리뷰에는 A만 포함하고 A만 수정한다. 직전 리뷰에 없던 B를 Round 2에서 새로 제기하면 실패다."
+}

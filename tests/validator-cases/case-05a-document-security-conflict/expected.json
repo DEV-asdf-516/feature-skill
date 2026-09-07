@@ -1,0 +1,12 @@
+{
+  "stage": "design",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category": "CHANGE_INTRODUCES_SECURITY_RISK",
+      "evidence_type": "DIRECT_MISMATCH",
+      "origin": "ROUND_1"
+    }
+  ]
+}
