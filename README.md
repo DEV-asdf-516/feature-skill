@@ -8,13 +8,15 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 
 ## 역할
 
-| 역할 | 모델·effort 설정 | CLI | 하는 일 |
+역할은 고정이지만 **어느 CLI 로 돌릴지는 모델 ID 로 정한다**: `claude*` → claude CLI, `gpt-*`/`o*`/`codex*` → codex CLI. 이름으로 정할 수 없는 모델은 `config.sh` 의 `<ROLE>_CLI=claude|codex` 로 명시한다. 아래 CLI 열은 기본 설정 기준이며, 각 역할이 요구하는 실행 형태(읽기 전용+스키마 JSON / 편집)는 두 CLI 의 플래그로 각각 옮겨진다(`config.sh` 의 `run_readonly_json_role` / `run_edit_role`).
+
+| 역할 | 모델·effort 설정 | CLI (기본 설정) | 하는 일 |
 |---|---|---|---|
 | **오케스트레이터·디자이너** | `DESIGNER_MODEL` / `DESIGNER_EFFORT` | claude (대화 세션 + 비대화형 문서 수정) | 요구 해석, 설계 문서·구현 문서 작성/수정, 최종 테스트 |
-| **검증자** | `VALIDATOR_MODEL` / `VALIDATOR_EFFORT` | codex `--sandbox read-only` | 설계·구현 문서에 "지금 구현을 시작하면 안 되는 최소 사유"가 있는지만 판정. 설계 개선자가 아니라 게이트 |
-| **워커** | `WORKER_MODEL` / `WORKER_EFFORT` | codex `--sandbox workspace-write` | 합의된 구현 문서대로 구현. 문서에 없는 동작 분기는 만들지 않고 `DOC_GAP`/`USER_DECISION`으로 되돌린다 |
-| **리뷰어** | `REVIEWER_MODEL` / `REVIEWER_EFFORT` | claude (읽기 전용 비대화형) | 구현 병합 게이트. "지금 verify 로 가면 안 되는 최소 사유"가 있는지만 판정(APPROVE/REQUEST_CHANGES). 코드 개선자가 아니다 |
-| **수정자** | `FIXER_MODEL` / `FIXER_EFFORT` | claude (비대화형) | `FIX_CODE` 이슈의 required_outcome 만 구현. 리뷰어 역할·범위 밖 리팩터링 없음. (사용자 지시 시) 커밋 |
+| **검증자** | `VALIDATOR_MODEL` / `VALIDATOR_EFFORT` | 읽기 전용 (codex `--sandbox read-only` / claude `--tools Read,Grep,Glob`) | 설계·구현 문서에 "지금 구현을 시작하면 안 되는 최소 사유"가 있는지만 판정. 설계 개선자가 아니라 게이트 |
+| **워커** | `WORKER_MODEL` / `WORKER_EFFORT` | 편집 (codex `--sandbox workspace-write` / claude `acceptEdits`) | 합의된 구현 문서대로 구현. 문서에 없는 동작 분기는 만들지 않고 `DOC_GAP`/`USER_DECISION`으로 되돌린다 |
+| **리뷰어** | `REVIEWER_MODEL` / `REVIEWER_EFFORT` | 읽기 전용 (claude / codex 어느 쪽이든) | 구현 병합 게이트. "지금 verify 로 가면 안 되는 최소 사유"가 있는지만 판정(APPROVE/REQUEST_CHANGES). 코드 개선자가 아니다 |
+| **수정자** | `FIXER_MODEL` / `FIXER_EFFORT` | 편집 (claude / codex 어느 쪽이든) | `FIX_CODE` 이슈의 required_outcome 만 구현. 리뷰어 역할·범위 밖 리팩터링 없음. (사용자 지시 시) 커밋 |
 
 제어권은 항상 오케스트레이터 세션 하나에만 있다. 나머지는 전부 비대화형 하위 실행이다.
 
@@ -246,6 +248,7 @@ bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제
 
 - **`[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요.`**: 설치 2번을 안 한 것. `TEST_CMD`/`LINT_CMD`를 채운다.
 - **`[FAIL] codex 실행 실패 (모델 '...' 확인)`**: codex 계정에서 해당 모델 ID가 유효한지 확인 (`codex -m` 후보 목록).
+- **`[FAIL] 모델 '...' 의 CLI 를 이름으로 정하지 못함`**: 모델 ID 가 `claude*`/`gpt-*`/`o*`/`codex*` 어디에도 맞지 않는다. `config.sh` 에 `<ROLE>_CLI=claude|codex` 를 지정한다.
 - **루프가 exit 2로 멈춤**: 버그가 아니라 설계된 에스컬레이션. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 blocker`**: 검증자가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어긴 것. 재실행하면 되고 반복되면 `tests/validator-regression.sh`로 프롬프트 회귀를 본다.
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).

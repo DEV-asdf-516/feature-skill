@@ -9,22 +9,34 @@
 
 # --- 역할별 모델 + reasoning effort ---
 # 모델별 지원 effort가 다르므로 역할마다 함께 설정한다. 실제 허용 여부는 각 CLI가 검증한다.
-DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자 (claude CLI)
+# 어느 CLI 로 돌릴지는 모델 ID 로 정한다(claude* → claude, gpt-*/o*/codex* → codex). 아래 "역할 → CLI 라우팅" 참고.
+DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자
 DESIGNER_EFFORT="low"
-VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자 (codex CLI)
+VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 VALIDATOR_PROFILE=""      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 빈 값 = 모델별 기본값(validator_profile 헬퍼). compact | guided | conservative | none
-WORKER_MODEL="gpt-5.6-luna"       # 구현 담당 (codex CLI)
+WORKER_MODEL="gpt-5.6-luna"       # 구현 담당
 WORKER_EFFORT="max"
-REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당 (claude CLI)
+REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당
 REVIEWER_EFFORT="medium"
-FIXER_MODEL="claude-sonnet-5"     # 리뷰 이슈 수정 담당 (claude CLI)
+FIXER_MODEL="claude-sonnet-5"     # 리뷰 이슈 수정 담당
 FIXER_EFFORT="medium"
 
 # --- CLI 실행 형식 ---
 # Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
 CLAUDE_BIN="claude"
 CODEX_BIN="codex"
+
+# --- 역할 → CLI 라우팅 ---
+# 역할(디자이너/검증자/워커/리뷰어/수정자)은 고정이지만 어느 CLI 로 돌릴지는 모델 ID 로 정한다:
+#   claude*                  → claude CLI (CLAUDE_BIN)
+#   gpt-* | o[0-9]* | codex* → codex CLI (CODEX_BIN)
+# 이름으로 정할 수 없는 모델은 아래에 claude|codex 를 직접 적는다(빈 값 = 모델 이름으로 자동 판정).
+DESIGNER_CLI=""
+VALIDATOR_CLI=""
+WORKER_CLI=""
+REVIEWER_CLI=""
+FIXER_CLI=""
 
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -220,6 +232,118 @@ claude_session_args() {
 claude_session_commit() {
   local id_file="$WORK_DIR/.session-$1"
   if [ -f "$id_file.new" ]; then mv "$id_file.new" "$id_file"; fi
+}
+
+# =============================================================
+# 역할 → CLI 라우팅과 공통 호출 헬퍼
+# 역할별 CLI 를 스크립트에 고정하지 않는다. 모델 ID(또는 <ROLE>_CLI 명시)로 claude/codex 를 고르고,
+# 역할이 요구하는 실행 형태(읽기 전용+스키마 JSON / 편집)를 두 CLI 의 플래그로 각각 옮긴다.
+# =============================================================
+cli_for_model() { # model → claude|codex (이름으로 정할 수 없으면 1)
+  case "$1" in
+    claude*)                 printf 'claude' ;;
+    gpt-*|o[0-9]*|codex*)    printf 'codex' ;;
+    *)                       return 1 ;;
+  esac
+}
+role_model()  { local v="${1}_MODEL";  printf '%s' "${!v}"; }
+role_effort() { local v="${1}_EFFORT"; printf '%s' "${!v}"; }
+role_cli() { # ROLE(DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) → claude|codex
+  local role="$1" override_var="${1}_CLI" override model
+  override="${!override_var:-}"; model="$(role_model "$role")"
+  if [ -n "$override" ]; then
+    case "$override" in
+      claude|codex) printf '%s' "$override"; return 0 ;;
+      *) echo "[FAIL] config.sh $override_var='$override' — claude 또는 codex 만 허용" >&2; return 1 ;;
+    esac
+  fi
+  cli_for_model "$model" \
+    || { echo "[FAIL] 모델 '$model'($role) 의 CLI 를 이름으로 정하지 못함 — config.sh 에 $override_var=claude|codex 를 지정" >&2; return 1; }
+}
+role_bin() { # ROLE → 실행 파일
+  case "$(role_cli "$1")" in claude) printf '%s' "$CLAUDE_BIN" ;; codex) printf '%s' "$CODEX_BIN" ;; *) return 1 ;; esac
+}
+require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실제로 쓰는 CLI 만 설치 확인
+  local item bin
+  for item in "$@"; do
+    case "$item" in
+      DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) bin="$(role_bin "$item")" || return 1 ;;
+      *) bin="$item" ;;
+    esac
+    command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치 (${item})" >&2; return 1; }
+  done
+}
+
+# 읽기 전용·스키마 강제 JSON 역할(검증자·리뷰어).
+#   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.log(stdout/stderr).
+#   conventions: 프롬프트에 이미 들어 있으면 "" 를 넘긴다. claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록으로 붙인다.
+#   claude 는 세션(session_name)을 라운드 간 이어가고 usage 를 기록한다(codex exec 는 무상태 — 사용량은 $out.log 의 "tokens used" 참고).
+run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
+  local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli
+  model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  case "$cli" in
+    codex)
+      [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
+      "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
+        --output-schema "$schema" -o "$out" \
+        "$prompt" > "$out.log" 2>&1 \
+        || { echo "[FAIL] codex 실행 실패 (모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1; }
+      ;;
+    claude)
+      local session_args conv_args=()
+      [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
+      session_args=$(claude_session_args "$session")
+      "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" \
+        ${conv_args[@]+"${conv_args[@]}"} \
+        --tools "Read,Grep,Glob" \
+        --disallowedTools "Bash,Edit,Write,NotebookEdit" \
+        --json-schema "$(cat "$schema")" --output-format json \
+        "$prompt" \
+        > "$out.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$model', $role 확인)" >&2; return 1; }
+      claude_session_commit "$session"
+      log_claude_usage "$label" "$out.raw"
+      jq -e '.structured_output' "$out.raw" > "$out" \
+        || { echo "[FAIL] 응답에 structured_output 없음: $out.raw" >&2; return 1; }
+      ;;
+  esac
+}
+
+# 편집 역할(디자이너·수정자·워커). 원문 출력을 $raw 에 남기고 CLI 종료 코드를 그대로 돌려준다(호출자가 set +e 로 받는다).
+#   schema_file/out_json 이 비어 있지 않으면 스키마 강제 JSON 을 out_json 에 남긴다(워커). claude 는 structured_output 을 추출한다.
+#   conventions 는 run_readonly_json_role 과 같다. 나머지 인자는 claude 에만 붙는 추가 플래그(예: --allowedTools Bash).
+run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions schema_file out_json [claude_extra_args...]
+  local role="$1" session="$2" label="$3" raw="$4" prompt="$5" conv="$6" schema="$7" out="$8"; shift 8
+  local model effort cli rc=0
+  model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  case "$cli" in
+    codex)
+      [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
+      local schema_args=()
+      [ -z "$schema" ] || schema_args=(--output-schema "$schema" -o "$out")
+      "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
+        ${schema_args[@]+"${schema_args[@]}"} "$prompt" 2>&1 \
+        | tee "$raw" || rc=$?
+      ;;
+    claude)
+      local session_args conv_args=() schema_args=()
+      [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
+      [ -z "$schema" ] || schema_args=(--json-schema "$(cat "$schema")")
+      session_args=$(claude_session_args "$session")
+      "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
+        ${conv_args[@]+"${conv_args[@]}"} \
+        ${schema_args[@]+"${schema_args[@]}"} \
+        "$@" --output-format json \
+        "$prompt" \
+        > "$raw" || rc=$?
+      if [ "$rc" -eq 0 ]; then
+        claude_session_commit "$session"
+        log_claude_usage "$label" "$raw"
+        # 스키마 역할이면 structured_output 을 꺼낸다. 없으면 out 은 빈 파일로 남고 호출자의 스키마 검사가 잡는다.
+        [ -z "$schema" ] || jq -e '.structured_output' "$raw" > "$out" 2>/dev/null || rc=1
+      fi
+      ;;
+  esac
+  return "$rc"
 }
 
 # SHA-256 해시 (Linux sha256sum / macOS shasum 겸용)
@@ -572,4 +696,5 @@ for required_value in \
   "$TEST_CMD" "$LINT_CMD"; do
   [ -n "$required_value" ] || { echo "[FAIL] config.sh 역할별 모델/effort 및 프로젝트 명령은 비워둘 수 없습니다." >&2; exit 1; }
 done
+for _role in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do role_cli "$_role" >/dev/null || exit 1; done; unset _role
 [ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] core_rules.md 없음: $CORE_RULES_FILE" >&2; exit 1; }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================
-# 리뷰어 판정 감도 회귀 — 고정 픽스처로 실제 리뷰어(claude, config.sh 의 REVIEWER_MODEL/EFFORT)를 돌린다.
+# 리뷰어 판정 감도 회귀 — 고정 픽스처로 실제 리뷰어(config.sh 의 REVIEWER_MODEL/EFFORT, CLI 는 모델 이름 또는 REVIEWER_CLI 로 라우팅)를 돌린다.
 # 사용법:
 #   bash tests/reviewer-regression.sh                 # 전 사례
 #   bash tests/reviewer-regression.sh case-03-...     # 사례 하나만
@@ -57,16 +57,30 @@ mkdir -p "$SOURCE_ROOT/.agent-work"
 mv "$APPROVAL_FILE" "$SOURCE_ROOT/.agent-work/ALLOW_REAL_LLM_REGRESSION.used.$(date +%s)"   # 한 번 쓴 승인은 재사용하지 않는다
 
 # 대입문만 검사 — config.sh 의 가드 코드 자체에 CHANGE_ME 문자열이 있으므로 전체 grep 은 항상 걸린다
-if grep -Eq '^[[:space:]]*(REVIEWER_MODEL|REVIEWER_EFFORT|CLAUDE_BIN)=.*CHANGE_ME' "$SRC_CONFIG"; then
-  echo "[FAIL] config.sh 의 리뷰어 설정(REVIEWER_MODEL 등) CHANGE_ME 를 먼저 채우세요." >&2; exit 1
+if grep -Eq '^[[:space:]]*(REVIEWER_MODEL|REVIEWER_EFFORT|FIXER_MODEL|FIXER_EFFORT|CLAUDE_BIN|CODEX_BIN)=.*CHANGE_ME' "$SRC_CONFIG"; then
+  echo "[FAIL] config.sh 의 리뷰어/수정자 설정(REVIEWER_MODEL 등) CHANGE_ME 를 먼저 채우세요." >&2; exit 1
 fi
 # config.sh 를 source 하지 않는다 — TEST_CMD 등이 CHANGE_ME 면 가드가 exit 1 하고 set -e 가 조용히 스크립트를 죽인다. 대입문만 읽는다.
-CONFIGURED_CLAUDE_BIN="$(sed -n 's/^CLAUDE_BIN="\{0,1\}\([^"#]*\)"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p' "$SRC_CONFIG" | tail -1 | sed 's/[[:space:]]*$//')"
-[ -n "$CONFIGURED_CLAUDE_BIN" ] || { echo "[FAIL] config.sh 의 CLAUDE_BIN 대입문을 읽지 못함" >&2; exit 1; }
-for bin in "$CONFIGURED_CLAUDE_BIN" jq uuidgen envsubst git; do
+read_assignment() { sed -n "s/^$1=\"\{0,1\}\([^\"#]*\)\"\{0,1\}[[:space:]]*\(#.*\)\{0,1\}$/\1/p" "$SRC_CONFIG" | tail -1 | sed 's/[[:space:]]*$//'; }
+CONFIGURED_CLAUDE_BIN="$(read_assignment CLAUDE_BIN)"; CONFIGURED_CODEX_BIN="$(read_assignment CODEX_BIN)"
+[ -n "$CONFIGURED_CLAUDE_BIN" ] && [ -n "$CONFIGURED_CODEX_BIN" ] || { echo "[FAIL] config.sh 의 CLAUDE_BIN/CODEX_BIN 대입문을 읽지 못함" >&2; exit 1; }
+# 역할 → CLI 는 config.sh 의 role_cli 와 같은 규칙(모델 이름, <ROLE>_CLI 우선)으로 정한다. source 하지 않으므로 여기서 다시 계산한다.
+cli_of() { # ROLE → claude|codex
+  local override model; override="$(read_assignment "${1}_CLI")"; model="$(read_assignment "${1}_MODEL")"
+  case "${override:-}" in claude|codex) printf '%s' "$override"; return 0;; esac
+  case "$model" in claude*) printf 'claude';; gpt-*|o[0-9]*|codex*) printf 'codex';; *) echo "[FAIL] 모델 '$model'($1) 의 CLI 를 정하지 못함 — config.sh ${1}_CLI 지정" >&2; return 1;; esac
+}
+REVIEWER_CLI_KIND="$(cli_of REVIEWER)" || exit 1
+FIXER_CLI_KIND="$(cli_of FIXER)" || exit 1
+needed_bins=(jq uuidgen envsubst git)
+case "$REVIEWER_CLI_KIND$FIXER_CLI_KIND" in *claude*) needed_bins+=("$CONFIGURED_CLAUDE_BIN");; esac
+case "$REVIEWER_CLI_KIND$FIXER_CLI_KIND" in *codex*)  needed_bins+=("$CONFIGURED_CODEX_BIN");; esac
+for bin in "${needed_bins[@]}"; do
   command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치" >&2; exit 1; }
 done
-REAL_CLAUDE="$(command -v "$CONFIGURED_CLAUDE_BIN")"
+REAL_CLAUDE="$(command -v "$CONFIGURED_CLAUDE_BIN" || true)"
+REAL_CODEX="$(command -v "$CONFIGURED_CODEX_BIN" || true)"
+echo "리뷰어 CLI: $REVIEWER_CLI_KIND / 수정자 CLI: $FIXER_CLI_KIND"
 
 # 같은 REVIEWER_REGRESSION_DIR 를 반복 지정해도 이전 실행 산출물이 섞이지 않게 실행마다 하위 디렉터리를 만든다
 if [ -n "${REVIEWER_REGRESSION_DIR:-}" ]; then
@@ -78,37 +92,52 @@ echo "작업 디렉터리: $SCRATCH (결과 JSON·로그 보존)"
 pass=0; fail=0; selected=0; failed_cases=()
 mark_fail() { echo "  [FAIL] $1"; fail=$((fail + 1)); failed_cases+=("$name"); }
 
-# 실제 claude 래퍼: Claude Code 세션 안에서 돌릴 때 중첩 실행 차단 변수를 지운다(밖에서는 무해).
+# 실제 CLI 래퍼: Claude Code 세션 안에서 돌릴 때 중첩 실행 차단 변수를 지운다(밖에서는 무해). codex 도 같은 형태로 감싼다.
 # 호출 카운터와 픽스처는 저장소 밖(target 의 형제 디렉터리)에 둔다 — 저장소 안에 두면 리뷰 중 작업 트리 지문이 바뀐다.
-write_fakes() { # target case_dir round
+# 역할은 CLI 가 아니라 호출 인자 형태로 구분한다: 리뷰어는 스키마 플래그(--json-schema / --output-schema)를 받고 수정자는 받지 않는다.
+# Round 2 사례에서만 첫 리뷰어 호출을 고정 prev-review.json 으로 바꾸고 수정자 호출을 fixed/ 적용으로 바꾼다. 이후 리뷰어는 실제 CLI.
+write_fakes() { # target case_dir round → stdout 두 줄: <claude bin> <codex bin>
   local target="$1" case_dir="$2" round="$3" side="$1.side"
   mkdir -p "$side"
   cat > "$side/real-claude" <<EOF
 #!/usr/bin/env bash
 exec env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION "$REAL_CLAUDE" "\$@"
 EOF
-  cat > "$side/fake-claude" <<EOF
+  cat > "$side/real-codex" <<EOF
 #!/usr/bin/env bash
-# 1번째 호출(리뷰어 Round 1): 고정 prev-review.json 을 structured_output 으로 출력.
-# 2번째 호출(수정자): fixed/ 를 적용하고 decisions 를 기록. 이후: 실제 리뷰어.
-set -euo pipefail
-count_file="$side/.claude-calls"; n=\$(( \$(cat "\$count_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "\$n" > "\$count_file"
-if [ "\$n" -eq 1 ]; then
-  jq -n -c --slurpfile r "$case_dir/prev-review.json" '{structured_output: \$r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'
-  exit 0
-fi
-if [ "\$n" -eq 2 ]; then
-  cp -R "$case_dir/fixed/." "$target/"
-  cat "$case_dir/decisions-round1.md" >> "$target/.agent-work/decisions.md"
-  printf '{"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}\\n'
-  exit 0
-fi
-# 가짜가 받은 --session-id 는 실제 세션을 만들지 않았으므로, 실제 리뷰어의 --resume <id> 를 --session-id <id> 로 바꿔 새로 연다
-args=(); while [ "\$#" -gt 0 ]; do case "\$1" in --resume) args+=(--session-id "\$2"); shift 2;; *) args+=("\$1"); shift;; esac; done
-exec "$side/real-claude" "\${args[@]}"
+exec env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION "$REAL_CODEX" "\$@"
 EOF
-  chmod +x "$side/real-claude" "$side/fake-claude"
-  if [ "$round" = 2 ]; then printf '%s' "$side/fake-claude"; else printf '%s' "$side/real-claude"; fi
+  # 공통 역할 분기 본문. \$1 = claude|codex
+  cat > "$side/fake-common" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+kind="\$1"; shift
+is_reviewer=0; out=""
+for a in "\$@"; do case "\$a" in --json-schema|--output-schema) is_reviewer=1;; esac; done
+if [ "\$is_reviewer" -eq 1 ]; then
+  count_file="$side/.reviewer-calls"; n=\$(( \$(cat "\$count_file" 2>/dev/null || echo 0) + 1 )); printf '%s' "\$n" > "\$count_file"
+  if [ "\$n" -eq 1 ]; then
+    if [ "\$kind" = claude ]; then
+      jq -n -c --slurpfile r "$case_dir/prev-review.json" '{structured_output: \$r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'
+    else
+      while [ "\$#" -gt 0 ]; do case "\$1" in -o) out="\$2"; shift 2;; *) shift;; esac; done
+      cp "$case_dir/prev-review.json" "\$out"
+    fi
+    exit 0
+  fi
+  # 가짜가 받은 --session-id 는 실제 세션을 만들지 않았으므로, 실제 리뷰어의 --resume <id> 를 --session-id <id> 로 바꿔 새로 연다 (claude 만 해당)
+  args=(); while [ "\$#" -gt 0 ]; do case "\$1" in --resume) args+=(--session-id "\$2"); shift 2;; *) args+=("\$1"); shift;; esac; done
+  exec "$side/real-\$kind" "\${args[@]}"
+fi
+# 수정자: fixed/ 를 적용하고 decisions 를 기록
+cp -R "$case_dir/fixed/." "$target/"
+cat "$case_dir/decisions-round1.md" >> "$target/.agent-work/decisions.md"
+[ "\$kind" = codex ] || printf '{"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}\\n'
+EOF
+  printf '#!/usr/bin/env bash\nexec bash "%s/fake-common" claude "$@"\n' "$side" > "$side/fake-claude"
+  printf '#!/usr/bin/env bash\nexec bash "%s/fake-common" codex "$@"\n' "$side" > "$side/fake-codex"
+  chmod +x "$side/real-claude" "$side/real-codex" "$side/fake-claude" "$side/fake-codex"
+  if [ "$round" = 2 ]; then printf '%s\n%s\n' "$side/fake-claude" "$side/fake-codex"; else printf '%s\n%s\n' "$side/real-claude" "$side/real-codex"; fi
 }
 
 for case_dir in "$CASES_DIR"/case-*/; do
@@ -121,9 +150,9 @@ for case_dir in "$CASES_DIR"/case-*/; do
   bash "$SOURCE_ROOT/install.sh" "$target" >/dev/null
   cfg="$target/.claude/skills/feature/config.sh"
   cp "$SRC_CONFIG" "$cfg"   # 실제 모델 설정 그대로
-  claude_bin="$(write_fakes "$target" "$case_dir" "$round")"
+  { read -r claude_bin; read -r codex_bin; } < <(write_fakes "$target" "$case_dir" "$round")
   if [ "$round" = 2 ]; then max_rounds=1; else max_rounds=0; fi   # Round 1 사례는 리뷰 1회, 수정자 없음
-  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=$max_rounds/; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$claude_bin\"|" "$cfg"
+  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=$max_rounds/; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$claude_bin\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$codex_bin\"|" "$cfg"
   rm -f "$cfg.bak"
   cp -R "$case_dir/base/." "$target/"
   (cd "$target" && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture)

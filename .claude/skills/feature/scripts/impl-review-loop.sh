@@ -17,8 +17,6 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 PROJECT_CONVENTIONS="$(load_project_conventions)"
-review_rule_args=()
-[ -z "$PROJECT_CONVENTIONS" ] || review_rule_args=(--append-system-prompt "$PROJECT_CONVENTIONS")
 
 # stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
 # EOF 를 기다리며 무기한 대기한다. 호출부가 어떤 형태로 이 스크립트를 묶어
@@ -34,9 +32,7 @@ if [ -z "${FEATURE_LIVE_TEE:-}" ]; then
 fi
 echo "[$(date '+%F %T')] impl-review-loop 시작"
 
-for bin in "$CLAUDE_BIN" jq uuidgen envsubst git; do
-  command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치. 중단." >&2; exit 1; }
-done
+require_role_bins REVIEWER FIXER jq uuidgen envsubst git || exit 1
 [ -n "${REVIEWER_CONTRACT_VERSION:-}" ] || { echo "[FAIL] config.sh 에 REVIEWER_CONTRACT_VERSION 이 없음 (config.sh.new 참고해 병합)" >&2; exit 1; }
 SCHEMA_FILE="$SKILL_DIR/schemas/impl-review.schema.json"
 [ -f "$SCHEMA_FILE" ] || { echo "[FAIL] 스키마 없음: $SCHEMA_FILE" >&2; exit 1; }
@@ -223,21 +219,14 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
     prev_context="이번은 Round $round(종결 검토)다. 입력: 직전 리뷰 JSON = $prev_review, 수정자의 ACCEPT/REJECT 기록 = $WORK_DIR/decisions.md 의 [fix round $((round - 1))] 줄, 직전 리뷰 이후 수정자가 바꾼 diff = $fix_diff, 현재 전체 diff = $diff_file. 이번 라운드에서 허용되는 issue 는 세 종류뿐이며 origin 으로 표시한다: UNRESOLVED_PREVIOUS(직전 이슈가 미해결, id 와 previous_issue_id 에 같은 id) / FIX_REGRESSION(수정이 새로 만든 직접 회귀, fix_ref 에 수정 diff 안의 위치 '파일:L시작-L끝') / NEWLY_EXPOSED_BY_FIX(직전 라운드에는 볼 수 없었던 문제가 수정으로 처음 드러남, fix_ref 필수). 직전 라운드 당시 이미 볼 수 있었던 별개의 문제는 제기하지 마라. 해결된 이슈는 제외한다. REJECT 된 이슈는 새로운 근거 위치가 없으면 재제기하지 마라."
   fi
 
-  review_session=$(claude_session_args reviewer)
-  "$CLAUDE_BIN" -p $review_session --model "$REVIEWER_MODEL" --effort "$REVIEWER_EFFORT" \
-    ${review_rule_args[@]+"${review_rule_args[@]}"} \
-    --tools "Read,Grep,Glob" \
-    --disallowedTools "Bash,Edit,Write,NotebookEdit" \
-    --json-schema "$(cat "$SCHEMA_FILE")" --output-format json \
-    "$(REFERENCE_CODE="$(load_reference_code)" DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
+  reviewer_prompt="$(REFERENCE_CODE="$(load_reference_code)" DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
        WORKER_RESULT="$WORK_DIR/worker-result.json" PREV_CONTEXT="$prev_context" REVIEWER_CONTRACT_VERSION="$REVIEWER_CONTRACT_VERSION" \
-      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION}')" \
-    > "$review.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$REVIEWER_MODEL' 확인)"; exit 1; }
-  claude_session_commit reviewer
-  log_claude_usage "impl-review-a$attempt_tag-round-$tag" "$review.raw"
-
-  jq -e '.structured_output' "$review.raw" > "$review" \
-    || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review.raw" >&2; exit 1; }
+      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION}')"
+  # 리뷰어 CLI 는 REVIEWER_MODEL 로 라우팅. 결과 JSON 은 $review, 원문은 $review.raw(claude) / $review.log(codex).
+  run_readonly_json_role REVIEWER reviewer "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
+    || exit 1
+  jq -e '.verdict' "$review" >/dev/null 2>&1 \
+    || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
   jq -e --argjson v "$REVIEWER_CONTRACT_VERSION" '.schema_version==$v' "$review" >/dev/null 2>&1 \
     || { echo "[FAIL] 리뷰 schema_version 이 현재 계약($REVIEWER_CONTRACT_VERSION)과 다름: $review" >&2; exit 1; }
   verdict=$(jq -er '.verdict' "$review")
@@ -340,14 +329,11 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   scope_hash_before=$(feature_scope_hash)
   # 소유권 기준선은 시작 시 읽은 BASELINE_TREE 를 쓴다(호출 후 파일을 다시 읽지 않는다). 파일 자체가 바뀌었는지도 본다.
   baseline_file_before=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_before="$(cat "$WORK_DIR/worker-baseline.tree")"
-  fix_session=$(claude_session_args fixer)
+  fixer_prompt="$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" \
+      render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE}')"
   set +e
-  "$CLAUDE_BIN" -p $fix_session --model "$FIXER_MODEL" --effort "$FIXER_EFFORT" --permission-mode acceptEdits \
-    ${review_rule_args[@]+"${review_rule_args[@]}"} \
-    --allowedTools "Bash" --output-format json \
-    "$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" \
-      render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE}')" \
-    > "$fix_result"
+  # 수정자 CLI 는 FIXER_MODEL 로 라우팅(codex 는 --sandbox workspace-write, claude 는 acceptEdits + Bash 허용).
+  run_edit_role FIXER fixer "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
   fixer_rc=$?
   set -e
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료해도 재실행 가드는 남아야 한다
@@ -385,9 +371,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
       stop_with 2 SCOPE_VIOLATION --arg files "$(printf '%s' "$violations" | paste -sd, -)" --arg review "$prev_review" --arg step "fixer round $round"
     fi
   fi
-  [ "$fixer_rc" -eq 0 ] || { echo "[FAIL] claude 실행 실패 (모델 '$FIXER_MODEL' 확인). 재실행 시 attempt $attempt round $round / FIXER_PENDING 부터 재개" >&2; exit 1; }
-  claude_session_commit fixer
-  log_claude_usage "impl-fix-a$attempt_tag-round-$tag" "$fix_result"
+  [ "$fixer_rc" -eq 0 ] || { echo "[FAIL] 수정자 실행 실패 (모델 '$FIXER_MODEL' 확인). 재실행 시 attempt $attempt round $round / FIXER_PENDING 부터 재개" >&2; exit 1; }
   echo "--- 수정자 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'
 
