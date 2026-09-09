@@ -41,19 +41,31 @@ source "$SKILL_DIR/config.sh"
 ROOT="$(git rev-parse --show-toplevel)"
 
 # ---------- 인자 ----------
-NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""
+NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1;;
     --archive-as) ARCHIVE_AS="$2"; shift;;
     --branch) BRANCH="$2"; shift;;
     --worktree) WORKTREE="$2"; shift;;
+    --feature) FEATURE_ID="$2"; shift;;
     *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
   esac
   shift
 done
 
-# ---------- 피처 전용 git worktree (권장 모드) ----------
+# ---------- --feature <id>: 결정론적 전용 worktree 부트스트랩 (기본 모드) ----------
+# branch feature/<id>, 경로 <main root 옆>/<repo>-feature-<id> 를 id 로 정한다. 없으면 원본의 dirty 상태(미커밋 tracked 변경·untracked)를
+# bootstrap 커밋 없이 snapshot tree 로 옮겨 만들고, 있으면 그 worktree 와 그 안의 .agent-work 를 이어서 쓴다. --branch/--worktree 를
+# 같이 주면 그 값이 이름을 대신한다(재실행 때도 같은 인자). 상세는 scripts/feature-worktree.sh.
+FEATURE_WORKTREE_MODE=""; FEATURE_SNAPSHOT_TREE=""
+if [ -n "$FEATURE_ID" ]; then
+  source "$SKILL_DIR/scripts/feature-worktree.sh"
+  feature_worktree_bootstrap "$FEATURE_ID" "$BRANCH" "$WORKTREE" || { echo "[FAIL] 피처 worktree 부트스트랩 실패 (--feature $FEATURE_ID)" >&2; exit 1; }
+  WORKTREE="$FEATURE_ROOT"; BRANCH="$FEATURE_BRANCH"
+fi
+
+# ---------- 피처 전용 git worktree (수동 모드 — --feature 없이 경로·브랜치를 직접 지정) ----------
 # 같은 working tree 를 다른 세션과 공유하면 git 은 변경 소유자를 기록하지 않으므로 워커·수정자·리뷰·승인이
 # 다른 세션의 미커밋 변경을 "이번 작업"으로 오인할 수 있다. 디렉터리를 분리하면 물리적으로 존재하지 않는다.
 # --worktree <dir> : 없으면 `git worktree add <dir> -b <branch> HEAD` 로 만들고(--branch 필수), 있으면 그대로 쓴다.
@@ -71,13 +83,53 @@ if [ -n "$WORKTREE" ]; then
   wt_root="$(git -C "$WORKTREE" rev-parse --show-toplevel 2>/dev/null)" || { echo "[FAIL] $WORKTREE 는 git worktree 가 아님" >&2; exit 1; }
   [ "$(git -C "$wt_root" rev-parse --git-common-dir)" != "$(git -C "$wt_root" rev-parse --git-dir)" ] \
     || [ "$wt_root" != "$ROOT" ] || { echo "[FAIL] --worktree 가 현재 main working tree 를 가리킴 — 분리된 디렉터리여야 한다" >&2; exit 1; }
+  # gitignore 된 안전 게이트 설정(.codex, .claude/settings.json, .claude/hooks)은 --feature 모드와 같이 원본에서 복사한다(실패는 중단)
+  [ -n "$FEATURE_ID" ] || { source "$SKILL_DIR/scripts/feature-worktree.sh"; feature_worktree_copy_gates "$ROOT" "$wt_root" || exit 1; }
   ROOT="$wt_root"
-  [ -d "$ROOT/.codex" ] || echo "[WARN] $ROOT/.codex 없음 — codex 훅(worker_guard)이 이 worktree 에 적용되지 않는다. .codex 를 커밋하거나 복사하라." >&2
 fi
 cd "$ROOT"
 
+# 프로젝트 종속 경로 재바인딩 — 소스는 worktree 로 격리됐는데 규칙 파일·conventions·프로젝트 로컬 워커 스킬을 원본에서 읽으면
+# 원본의 이후 변경이 이 실행에 새어 든다. 실행 엔진 위치(SKILL_DIR/FEATURE_SKILL_DIR)는 그대로 두고 프로젝트 경로만 바꾼다.
+# 하위 루프(consensus/impl-review)는 config.sh 를 따로 source 하므로 환경 변수로 같은 값을 물려준다.
+if [ "$(cd "$PROJECT_ROOT" && pwd -P)" != "$(pwd -P)" ]; then
+  export FEATURE_PROJECT_ROOT="$ROOT"
+  PROJECT_ROOT="$ROOT"
+  CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md"
+  CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md"
+  [ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] worktree 에 core_rules.md 없음: $CORE_RULES_FILE — .claude/hooks 를 커밋하거나 복사하라" >&2; exit 1; }
+  echo "[feature-run] 프로젝트 경로 재바인딩: $PROJECT_ROOT (규칙·conventions·워커 스킬을 이 worktree 에서 읽는다)"
+fi
+
 exec </dev/null
 mkdir -p "$WORK_DIR"
+
+# ---------- 러너 단일 실행 락 (원자적 claim) ----------
+# pid 파일만으로는 "확인 → 기록" 사이에 두 러너가 같은 트리에 들어올 수 있다. mkdir 은 원자적이라 먼저 만든 쪽만 진입한다.
+# 죽은 pid 가 남긴 stale 락은 회수한다. 다른 피처의 부트스트랩도 이 락의 pid 로 이 트리에 러너가 살아 있는지 본다(feature-worktree.sh).
+RUNNER_LOCK_DIR="$WORK_DIR/.runner.lock"
+runner_lock_pid_alive() { # pid-file
+  local pid
+  [ -f "$1" ] || return 1
+  IFS= read -r pid < "$1"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+# claim 은 mkdir + pid 기록까지 한 단위다. 락은 있는데 pid 가 아직 없으면 "다른 러너가 mkdir 직후 pid 를 쓰는 중"일 수 있으므로
+# stale 로 보고 훔치지 않는다(활성 락 탈취 방지가 pid 없이 죽은 극단적 stale 의 자동 회수보다 우선). pid 가 있고 죽었을 때만 회수한다.
+write_runner_lock_pid() { printf '%s\n' "$$" > "$RUNNER_LOCK_DIR/pid" || { rmdir "$RUNNER_LOCK_DIR" 2>/dev/null || true; return 1; }; }
+claim_runner_lock() {
+  if mkdir "$RUNNER_LOCK_DIR" 2>/dev/null; then write_runner_lock_pid; return $?; fi
+  [ -f "$RUNNER_LOCK_DIR/pid" ] || return 1
+  runner_lock_pid_alive "$RUNNER_LOCK_DIR/pid" && return 1
+  local stale="$RUNNER_LOCK_DIR.stale.${BASHPID:-$$}"
+  mv "$RUNNER_LOCK_DIR" "$stale" 2>/dev/null || return 1
+  rm -rf "$stale"
+  mkdir "$RUNNER_LOCK_DIR" 2>/dev/null || return 1
+  write_runner_lock_pid
+}
+claim_runner_lock || { echo "[FAIL] 이 트리($ROOT)에서 러너가 이미 실행 중이거나 시작 중(pid $(cat "$RUNNER_LOCK_DIR/pid" 2>/dev/null || echo '기록 중')) — 같은 트리에서 러너를 두 번 돌리지 않는다. pid 없이 남은 락이 확실히 죽은 것이면 $RUNNER_LOCK_DIR 을 직접 지운다" >&2; exit 1; }
+release_runner_lock() { [ "$(cat "$RUNNER_LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$RUNNER_LOCK_DIR"; return 0; }
 
 STATE="$WORK_DIR/run-state.json"
 WORKER_RESULT="$WORK_DIR/worker-result.json"
@@ -124,7 +176,8 @@ env_error() {
   write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "$*"
   exit 1
 }
-trap 'rc=$?; case $rc in 0|2|3) ;; *) jq -e ".status==\"ENV_ERROR\"" "$STATE" >/dev/null 2>&1 || write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "예기치 않은 종료 (exit $rc)";; esac' EXIT
+trap 'rc=$?; case $rc in 0|2|3) ;; *) jq -e ".status==\"ENV_ERROR\"" "$STATE" >/dev/null 2>&1 || write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "예기치 않은 종료 (exit $rc)";; esac; release_runner_lock' EXIT
+[ -z "$FEATURE_ID" ] || log "피처 worktree: $ROOT (feature $FEATURE_ID, branch $BRANCH, $FEATURE_WORKTREE_MODE${FEATURE_SNAPSHOT_TREE:+, snapshot tree $FEATURE_SNAPSHOT_TREE}) — 문서·산출물은 $ROOT/$WORK_DIR"
 
 # ---------- preflight ----------
 STAGE=preflight
@@ -146,7 +199,7 @@ if [ "$NEW" = 1 ]; then
   moved=0
   for item in "$WORK_DIR"/* "$WORK_DIR"/.session-*; do
     [ -e "$item" ] || continue
-    case "$(basename "$item")" in archive|live.log) continue;; esac
+    case "$(basename "$item")" in archive|live.log|feature.json) continue;; esac   # feature.json 은 worktree 자체의 기록 — 피처 재시작에도 남긴다
     mkdir -p "$archive_dir"; mv "$item" "$archive_dir/"; moved=1
   done
   [ "$moved" = 1 ] && log "이전 산출물 → $archive_dir"
@@ -221,7 +274,7 @@ require_baseline_guard_resolved \
 # 현재 입력 지문(request/design/impl docs + [USER-QUESTION])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
 # 파일명 정렬로 마지막 라운드 파일을 고르지 않는다 — 과거 round-02 PASS 가 새 round-01 BLOCK 을 가리고,
 # 문서를 고친 뒤 재실행해도 합의 루프를 건너뛰는 경로가 있었다.
-[ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
+[ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$ROOT/$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
 case "$STAGE" in
   impl|worker|review|verify|done)
     consensus_pass_current design || { log "design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터"; STAGE=design; };;
@@ -338,7 +391,7 @@ while :; do
 
     impl)
       { [ -f "$WORK_DIR/implementation.md" ] && [ -f "$WORK_DIR/approach.md" ]; } \
-        || stop_need_docs IMPL_DOCS_MISSING "합의된 design.md 기반으로 implementation.md(무엇)·approach.md(어떻게, REQUIRED/DELEGATED) 작성 후 재실행"
+        || stop_need_docs IMPL_DOCS_MISSING "합의된 design.md 기반으로 $ROOT/$WORK_DIR/implementation.md(무엇)·approach.md(어떻게, REQUIRED/DELEGATED) 작성 후 재실행"
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
       case $rc in
         0) STAGE=worker;;

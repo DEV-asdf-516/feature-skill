@@ -124,12 +124,15 @@ flowchart TD
     ├── prompts/                 # 역할별 페르소나 템플릿 (8개, envsubst 변수 치환)
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마
     └── scripts/
-        ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드
+        ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드 (--feature <id> 로 전용 worktree 확정)
+        ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩 — dirty 원본을 snapshot tree 로 materialize, 재실행 재사용
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
         └── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지
 
 tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
+├── smoke-foreign-change.sh      # 범위 밖 변경 원복 금지·범위 가드 회귀 (mock claude)
+├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 13개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
@@ -191,7 +194,13 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 피처: 주문 취소 API 추가하고 재고 원복까지 처리해줘
 ```
 
-진행 상황 관찰은 러너가 시작할 때 `feature-live` 창을 자동으로 연다(같은 저장소에 이미 열려 있으면 lock 으로 감지해 다시 열지 않는다). 수동으로 열려면 별도 터미널에서 절대 경로로 실행한다(`--worktree` 를 쓸 때도 원본 저장소 루트 기준):
+피처는 처음부터 전용 git worktree 에서 돈다. 러너를 `--feature <id>` 로 실행하면 branch `feature/<id>` 와 worktree `../<repo>-feature-<id>` 를 id 로 결정론적으로 정하고, 없으면 원본 working tree 의 현재 상태(미커밋 tracked 변경·untracked 포함, gitignore 파일·`.agent-work` 제외)를 bootstrap 커밋 없이 snapshot tree 로 옮겨 만든다(원본 branch/HEAD/index/working tree 불변, snapshot 도중 원본이 바뀌면 실패). 같은 id 로 다시 실행하면 그 worktree 와 `.agent-work` 를 이어서 쓴다. 서로 다른 피처는 동시에 실행할 수 있고 서로에게도 원본에도 보이지 않는다. 완료 후 merge·commit·worktree 삭제는 자동으로 하지 않는다. 수동 `--worktree <dir> --branch <name>` 도 그대로 쓸 수 있다.
+
+```bash
+bash .claude/skills/feature/scripts/feature-run.sh --feature 018    # → ../<repo>-feature-018, branch feature/018
+```
+
+진행 상황 관찰은 러너가 시작할 때 `feature-live` 창을 자동으로 연다(같은 worktree 에 이미 열려 있으면 lock 으로 감지해 다시 열지 않는다). 수동으로 열려면 별도 터미널에서 절대 경로로 실행한다(피처 worktree 에 `feature-live` 가 없으면 원본 저장소 루트의 파일을 worktree 로 `cd` 한 뒤 실행):
 
 ```bash
 "$(git rev-parse --show-toplevel)/feature-live"
@@ -224,6 +233,8 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 
 ```bash
 bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 없음
+bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
+bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행. LLM 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
