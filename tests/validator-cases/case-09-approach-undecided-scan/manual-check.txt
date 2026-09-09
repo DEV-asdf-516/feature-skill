@@ -1,0 +1,1 @@
+basis_refs/conflict_refs 가 approach.md 결정 2 를 가리키고, impact 에 갈리는 접근법 둘(정규식 한 번 vs 수동 스캔+상태)과 영향 하나가 적혀 있는지, minimum_contract_needed 가 어느 접근법을 고를지 처방하지 않고 '접근법이 REQUIRED 로 정해져야 한다'만 말하는지 확인

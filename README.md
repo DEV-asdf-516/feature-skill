@@ -42,9 +42,9 @@ flowchart TD
 
 - `design.md`: 왜·무엇을 만드는지(요구 수준). 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
 - `implementation.md`: 무엇을 코드로 바꾸는지(도메인 지식). 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
-- `approach.md`: 어떻게 구현하는지(CS 지식), 구현 결정 단위로 REQUIRED/DELEGATED 표시. DELEGATED가 기본값이고 외부 동작·영속 데이터 정합성·보안 경계가 갈리거나 사용자가 방식을 명시한 결정만 REQUIRED다. 근거는 기존 프로젝트 패턴 최우선이며 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용한다. 러너가 그 범위를 워커 프롬프트에 직접 붙인다.
+- `approach.md`: 어떻게 구현하는지(CS 지식), 구현 결정 단위로 REQUIRED/DELEGATED 표시. 판정 기준은 기술 범주가 아니라 **solution shape** 다 — 외부 동작·영속 데이터 정합성·보안 경계가 갈리거나 사용자가 방식을 명시한 결정은 항상 REQUIRED 이고, 그 밖에는 워커가 고르면 해결 전략·주요 흐름·비용 특성·재사용 vs 새 구현·새 구조물 여부·실패 방식이 달라지는 결정(정규식 vs 수동 스캔, 사전 인덱스 vs 반복 탐색, CSS vs JS 상태)이 REQUIRED, 같은 접근법 안의 코드 표현(변수명, 동등한 제어문 형태, 작은 헬퍼 내부, import·포맷)이 DELEGATED 다. 판정 예시와 과잉 설계 안전장치는 `tests/solution-shape-cases.md`. 근거는 기존 프로젝트 패턴 최우선이며 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용한다. 러너가 그 범위를 워커 프롬프트에 직접 붙인다.
 
-"무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 REQUIRED 결정을 그대로 옮기는 타이피스트로 둔다.
+"무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 REQUIRED 결정을 그대로 옮기는 타이피스트로 둔다. 반대로 DELEGATED 를 "외부 동작만 안 바뀌면 전부"로 넓히면 알고리즘·자료구조 선택이 워커에게 넘어가 "정확하고 계약은 지키지만 별로인 구현"이 어느 단계에서도 잡히지 않는다. 그래서 "무슨 방식으로 풀 것인가"는 오케스트레이터가, "그 방식을 이 코드베이스 문법으로 어떻게 적을 것인가"만 워커가 소유한다.
 
 ### 동작 분기 계약
 
@@ -95,7 +95,7 @@ flowchart TD
 - **ASK_USER 분리**: 문서 재작성으로 풀리지 않는 문제(허용 범위 밖 공용 컴포넌트 수정, 제품 정책 선택)는 디자이너를 거치지 않고 `user_question`·`options`를 그대로 사용자에게 전달한다.
 - **디자이너는 처방을 복사하지 않는다**: blocking issue를 5단계(요구 근거, 이번 변경 관련, 도달 가능한 경로, 지금 결정 필요, 불변식만 요구)로 판정해 REJECT하고 ACCEPT해도 위반된 불변식만 문서에 반영한다.
 - **검증 계약 버전**: 검증자 프롬프트·스키마·러너 검사 중 하나라도 바꾸면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 다른 버전의 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
-- **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건(이번 diff 가 만든 문제, 여덟 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 수정, 기존 결함·장래 개선이 아님, 정확한 위치)을 모두 만족할 때만 등록된다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 러너가 워커 진입 직전에 기록한 기준선 tree(`worker-baseline.tree`) 대비이므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않고, 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
+- **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건(이번 diff 가 만든 문제, 아홉 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 해결(`UNDECIDED_APPROACH` 는 동작이 맞아도 예외), 기존 결함·장래 개선이 아님, 정확한 위치)을 모두 만족할 때만 등록된다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 러너가 워커 진입 직전에 기록한 기준선 tree(`worker-baseline.tree`) 대비이므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않고, 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
 - **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어 프롬프트·스키마·루프 검사가 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을 올린다.
 - **수정자는 수정자다**: `FIX_CODE` 이슈의 required_outcome 만 구현하고 새 문제를 찾거나 무관한 리팩터링을 하지 않는다. 잘못된 이슈는 코드 대신 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다. `OUT_OF_SCOPE_CHANGE` 는 이번 작업이 바꾼 범위 밖 기존 파일을 워커 진입 기준선 tree 로 `git restore --worktree` 로만 원복한다 — HEAD 원복·index 변경 금지, 기준선이 없으면 DEFER 로 보고만 한다. 워커·수정자는 git index 조작(add/reset/stash/restore --staged)이 금지된다 — codex 훅의 정규식에 더해 러너·루프가 호출 전후 index 지문(`git ls-files --stage`)을 비교해 바뀌었으면 자동 복구 없이 중단한다(결과 기준 차단). 관련 테스트만 필터로 돌리고 전체 스위트는 verify 단계가 한 번 돌린다.
 - **승인 독립성**: 리뷰 세션(`reviewer`)과 수정 세션(`fixer`)은 절대 합치지 않는다.
@@ -107,7 +107,7 @@ flowchart TD
 - **토큰 절약**: 역할별 세션 재사용(`--session-id`/`--resume`)으로 라운드 간 저장소 재탐색을 없애고
   프롬프트 캐시를 살린다. 사용량은 `usage.jsonl`에 라운드별 누적.
 - **역할별 규칙 전달**: 필수 `core_rules.md`는 워커에게만 주입하고 선택 `conventions.md`는 디자이너·검증자·워커·리뷰어·수정자 모두에게 주입.
-- **실시간 관찰**: 두 루프의 판정, 상세 이슈, 참고사항, 디자이너 반영 결정을 `.agent-work/live.log`에 누적. `./feature-live` 로 스트리밍 관찰.
+- **실시간 관찰**: 두 루프의 판정, 상세 이슈, 참고사항, 디자이너 반영 결정을 `.agent-work/live.log`에 누적. 러너가 `feature-live` 뷰어 창을 스스로 열며(이미 열려 있으면 `.agent-work/.feature-live.lock/viewer.pid` 로 감지해 다시 열지 않음), 오케스트레이터는 직접 실행하지 않는다. 수동 관찰은 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"`.
 
 ## 구조
 
@@ -131,17 +131,18 @@ flowchart TD
 tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
-├── validator-cases/             # 고정 픽스처 9개 (문서·src·expected.json)
+├── validator-cases/             # 고정 픽스처 13개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
 ├── reviewer-cases.md            # 리뷰어 판정 감도 회귀 세트 설명
-├── reviewer-cases/              # 고정 픽스처 11개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
-└── reviewer-regression.sh       # 실제 리뷰어 모델로 회귀 실행 (리뷰어 프롬프트·스키마 변경 시)
+├── reviewer-cases/              # 고정 픽스처 12개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
+├── reviewer-regression.sh       # 실제 리뷰어 모델로 회귀 실행 (리뷰어 프롬프트·스키마 변경 시)
+└── solution-shape-cases.md      # REQUIRED/DELEGATED 판정 사례 10개 — 과잉 설계·과잉 위임 양쪽 경계
 
 .codex/
 ├── hooks.json                   # codex PreToolUse 훅 등록 (프로젝트 레벨)
 └── hooks/worker_guard.sh        # 워커 가드: commit/push 차단 (프로젝트별 보호는 직접 추가)
 
-feature-live                     # 실시간 로그 뷰어 (./feature-live — tail -f 대체)
+feature-live                     # 실시간 로그 뷰어 (러너가 자동으로 연다 — tail -f 대체, 수동 실행은 절대 경로)
 conventions.md                   # 선택: 모든 역할에 추가 주입할 프로젝트 규범
 ```
 
@@ -190,10 +191,10 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 피처: 주문 취소 API 추가하고 재고 원복까지 처리해줘
 ```
 
-진행 상황 관찰 (별도 터미널, 저장소 루트에서):
+진행 상황 관찰은 러너가 시작할 때 `feature-live` 창을 자동으로 연다(같은 저장소에 이미 열려 있으면 lock 으로 감지해 다시 열지 않는다). 수동으로 열려면 별도 터미널에서 절대 경로로 실행한다(`--worktree` 를 쓸 때도 원본 저장소 루트 기준):
 
 ```bash
-./feature-live
+"$(git rev-parse --show-toplevel)/feature-live"
 ```
 
 파이프라인 시작 전에 켜도 `live.log` 생성을 기다렸다가 자동으로 스트리밍을 시작한다.

@@ -1,0 +1,12 @@
+{
+  "stage": "impl",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category": "REQUIREMENT_MISSING",
+      "evidence_type": "DIRECT_MISMATCH",
+      "origin": "ROUND_1"
+    }
+  ]
+}

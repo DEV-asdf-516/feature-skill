@@ -6,7 +6,7 @@
 python3 tests/validator-fixture-smoke.py              # 유료 호출 없는 fixture/비교 검사
 # 사용자 지시 후에만 1회용 승인 파일 생성:
 touch .claude/ALLOW_REAL_LLM_REGRESSION
-bash tests/validator-regression.sh                   # 11개, 최대 실제 검증자 11회
+bash tests/validator-regression.sh                   # 13개, 최대 실제 검증자 13회
 bash tests/validator-regression.sh case-08b-round2-new-issue # 08a 먼저 + 08b, 최대 2회
 bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 ```
@@ -20,14 +20,16 @@ bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 | 01 unrelated-existing-defect | 새 조회는 repo를 직접 사용하며 기존 캐시 결함 경로를 활성화하지 않음 | impl PASS |
 | 02 required-util-missing | 사용자 명시 MaskingUtil 재사용 대신 직접 구현 | impl BLOCK / REVISE_DOC / DIRECT_MISMATCH |
 | 03 runner-ops-missing | 정상 optional subtitle 응답 변경. 문서의 미커밋 메모·미정 baseline/archive는 운영 문제 | impl PASS |
-| 04 unrequested-message-check | status 판정만 합의. message 검사 요구를 새로 만들지 않음 | impl PASS |
+| 04 unrequested-message-check | status 판정만 합의. message 검사 요구를 새로 만들지 않음. 이름 인코딩은 REQUIRED 로 확정돼 있어 접근법 공백이 없음(VALIDATOR_CONTRACT_VERSION 9 에서 DELEGATED 인코딩이 정당한 BLOCK 이 되어 픽스처를 고침) | impl PASS |
 | 05a document-security-conflict | 키 비기록 요구와 키 포함 URL 로깅 설계가 문서만으로 충돌 | design BLOCK / REVISE_DOC / SECURITY / DIRECT_MISMATCH |
 | 05b reachable-security-failure | 직접 의존 코드가 키 포함 URL을 기록. 해당 공용 코드 수정 허용 | design BLOCK / REVISE_DOC / SECURITY / REACHABLE_FAILURE |
-| 05c out-of-scope-security-conflict | 05b와 같은 design·code. 인증 키 원문 전달·유일한 호출 경로·공용 코드/로그 설정 수정 금지로 범위 내 대안 없음 | design BLOCK / ASK_USER / SECURITY / REACHABLE_FAILURE |
+| 05c out-of-scope-security-conflict | 05b와 같은 design·code. 인증 키 원문 전달·유일한 호출 경로·공용 코드/로그 설정 수정 금지로 범위 내 대안 없음 | design BLOCK / ASK_USER / SECURITY 또는 REQUIREMENT_CONTRADICTION / REACHABLE_FAILURE 또는 DIRECT_MISMATCH (확정 계약 충돌이라 두 라벨 모두 타당, v9 회귀에서 후자 관측) |
 | 06 normalize-empty-persist | 숫자 정규화 뒤 무조건 저장이 8자리/미저장+400 계약 위반 | impl BLOCK / REVISE_DOC, category/evidence는 expected의 허용 집합 |
 | 07 policy-undecided | idempotency 재요청 정책이 미정이고 선례 없음 | design BLOCK / ASK_USER / POLICY_UNDECIDED / UNDECIDED_CHOICE |
 | 08a round1-blockers | A=필수 마스킹 유틸 미사용, B=없는 id에 404 대신 200. 두 독립 요구 위반 | impl Round 1 BLOCK / REVISE_DOC 2건 / DIRECT_MISMATCH |
 | 08b round2-new-issue | 직전 리뷰에는 A만 있음. A만 수정되고 이전부터 보인 별개 B는 그대로 | impl Round 2 PASS |
+| 09 approach-undecided-scan | 연속 중복 토큰 축약의 접근법(정규식 한 번 vs 수동 스캔+상태)이 DELEGATED 로 남음. 직접 범위에 precedent 없음 | impl BLOCK / REVISE_DOC / REQUIREMENT_MISSING / DIRECT_MISMATCH |
+| 10 expression-only-delegated | 접근법은 REQUIRED 로 정해졌고 결과 컨테이너 종류·Pattern 위치만 DELEGATED | impl PASS |
 
 SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURITY_RISK`다.
 

@@ -254,6 +254,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
       (.evidence_type=="REACHABLE_FAILURE" and (.reachable_scenario=="" or .impact=="")) or
       (.evidence_type=="SEMANTIC_REDUNDANCY" and (.reachable_scenario!="" or (.category!="REDUNDANT_CONTROL_FLOW" and .category!="REDUNDANT_CODE"))) or
       ((.category=="REDUNDANT_CONTROL_FLOW" or .category=="REDUNDANT_CODE") and .evidence_type!="SEMANTIC_REDUNDANCY") or
+      (.category=="UNDECIDED_APPROACH" and (.action!="DOC_GAP" or .evidence_type!="DIRECT_MISMATCH" or (.code_refs|length)==0)) or
       (.required_outcome=="") or
       (($round|tonumber)==1 and (.origin!="ROUND_1" or .previous_issue_id!="" or .fix_ref!="")) or
       (($round|tonumber)>1 and (

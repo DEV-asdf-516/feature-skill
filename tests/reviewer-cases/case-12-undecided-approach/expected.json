@@ -1,0 +1,11 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "DOC_GAP",
+      "category": "UNDECIDED_APPROACH",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ]
+}
