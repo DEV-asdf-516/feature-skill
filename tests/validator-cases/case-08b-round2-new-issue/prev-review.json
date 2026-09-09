@@ -1,5 +1,5 @@
 {
-  "schema_version": 8,
+  "schema_version": 9,
   "verdict": "BLOCK",
   "blocking_issues": [
     {

@@ -4,7 +4,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [
-        6
+        7
       ]
     },
     "verdict": {
@@ -40,7 +40,8 @@
               "REDUNDANT_CONTROL_FLOW",
               "REDUNDANT_CODE",
               "TEST_CONTRACT_GAP",
-              "OUT_OF_SCOPE_CHANGE"
+              "OUT_OF_SCOPE_CHANGE",
+              "UNDECIDED_APPROACH"
             ]
           },
           "evidence_type": {

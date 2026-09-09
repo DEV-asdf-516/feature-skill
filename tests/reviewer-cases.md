@@ -24,7 +24,7 @@ bash tests/reviewer-regression.sh compare <reviewer-round-NN.json> <expected.jso
 - `expected.json`은 핵심 필드만 본다: verdict, issues 개수, 각 기대 이슈를 만족하는 이슈의 존재. 필드는 정확 일치(`"category": "TEST_CONTRACT_GAP"`) 또는 `<field>_any_of` 허용 집합으로 적는다. 자연어 본문(`required_outcome`)은 대조하지 않고 스크립트가 출력만 한다 — 결과가 아니라 기법을 처방했는지는 사람이 본다.
 - 감도 회귀의 관심사는 "막지 말아야 할 것을 막았는가"와 "막아야 할 것을 통과시켰는가"다. 같은 유효 문제에 어떤 라벨을 골랐는지는 여러 답이 맞을 수 있으면 `_any_of`로 열어 둔다.
 
-모든 사례는 같은 피처(`GET /clients/{id}/summary`, 기존 `findOrThrow`·`MaskingUtil.maskPhone` 재사용, `ClientService.summary` 제어 흐름 절)를 공유하고 `changed/`의 코드만 다르다.
+case-12 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`, 기존 `findOrThrow`·`MaskingUtil.maskPhone` 재사용, `ClientService.summary` 제어 흐름 절)를 공유하고 `changed/`의 코드만 다르다. case-12 는 solution shape 경계를 위한 독립 피처(태그 병합)다.
 
 | 사례 | 상황 | 기대 |
 |---|---|---|
@@ -38,6 +38,7 @@ bash tests/reviewer-regression.sh compare <reviewer-round-NN.json> <expected.jso
 | case-08-extra-blackbox-test | implementation.md 에 이름이 없지만 design.md 마스킹 계약을 검증하는 추가 black-box 테스트 | APPROVE ("문서에 없는 테스트"로 막으면 회귀) |
 | case-09-internal-call-test | `verify(repo, times(1))`·`verifyNoMoreInteractions` 만 하는 내부 호출 테스트 추가 | REQUEST_CHANGES / FIX_CODE / TEST_CONTRACT_GAP |
 | case-10-round2-old-issue | Round 1 리뷰(고정 `prev-review.json`, null fallback 한 건)는 수정됐고, Round 1 부터 있던 별개 alias(`ClientController.summary`의 `body`)가 수정 diff 밖에 남아 있음 | **Round 2 APPROVE** — 별개 문제를 새로 제기하면 종결 검토 회귀 |
+| case-12-undecided-approach | approach.md 가 "없는 태그 판별" 접근법을 DELEGATED 로 남겼고 직접 범위에 precedent 도 없는데, 워커가 항목마다 선형 `contains` 를 골라 DONE 보고. 동작·테스트는 문서대로 | REQUEST_CHANGES / **DOC_GAP** / UNDECIDED_APPROACH / DIRECT_MISMATCH — 동작이 맞다는 이유로 APPROVE 하거나 "Set 이 더 좋다"를 required_outcome 에 적으면 회귀 |
 | case-11-fixer-out-of-scope | 수정자가 R-01(마스킹 재구현)을 고치면서 request.md 제외 대상인 `MaskingUtil.java` 까지 변경 | **Round 2 REQUEST_CHANGES** / OUT_OF_SCOPE_CHANGE / origin FIX_REGRESSION 또는 NEWLY_EXPOSED_BY_FIX |
 
 ## Round 2 사례의 실행 방식

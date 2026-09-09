@@ -29,12 +29,12 @@ CODEX_BIN="codex"
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=8
+VALIDATOR_CONTRACT_VERSION=9
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
 # 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
-REVIEWER_CONTRACT_VERSION=6
+REVIEWER_CONTRACT_VERSION=7
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
