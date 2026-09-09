@@ -15,8 +15,6 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 PROJECT_CONVENTIONS="$(load_project_conventions)"
-designer_rule_args=()
-[ -z "$PROJECT_CONVENTIONS" ] || designer_rule_args=(--append-system-prompt "$PROJECT_CONVENTIONS")
 
 # stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
 # EOF 를 기다리며 무기한 대기한다. 호출부가 어떤 형태로 이 스크립트를 묶어
@@ -48,7 +46,7 @@ case "$TARGET" in
 esac
 
 # ---------- 사전 점검 (환경이 틀리면 진행 금지) ----------
-for bin in "$CLAUDE_BIN" "$CODEX_BIN" jq uuidgen envsubst; do
+for bin in jq uuidgen envsubst; do
   command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치. 중단." >&2; exit 1; }
 done
 [ -f "$TARGET_DOC" ] || { echo "[FAIL] $TARGET_DOC 없음. 오케스트레이터가 초안을 먼저 작성해야 함." >&2; exit 1; }
@@ -177,14 +175,13 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
     prev_context="이번은 Round $round(종결 검토)다. 입력: 직전 blocking issue JSON = $prev_review, 디자이너의 ACCEPT/REJECT 판정 = $WORK_DIR/decisions.md, 직전 라운드 이후 문서 diff = $docs_diff, 현재 문서. 이번 라운드에서 허용되는 blocking 은 세 종류뿐이며 origin 으로 표시한다: UNRESOLVED_PREVIOUS(직전 이슈가 미해결, previous_issue_id 에 같은 id) / REVISION_REGRESSION(직전 수정이 새로 만든 직접 회귀, revision_ref 에 diff 위치) / NEWLY_EXPOSED_BY_REVISION(Round 1 에는 없던 정보가 수정으로 처음 드러남, revision_ref 필수). 직전 라운드 당시 이미 볼 수 있었던 별개의 문제는 제기하지 마라. 해결된 이슈는 제외한다. REJECT 된 이슈는 새로운 근거 위치가 없으면 재제기하지 마라."
   fi
 
-  # ---------- 검증자(codex) 검토: 읽기 전용, 스키마 강제 JSON ----------
+  # ---------- 검증자 검토: 읽기 전용, 스키마 강제 JSON (CLI 는 VALIDATOR_MODEL 로 라우팅) ----------
   # 공통 계약(validator-review-*.md) 뒤에 프로필 오버레이를 붙인다. 오버레이는 envsubst 를 거치지 않는다(치환 변수 없음).
   validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" \
     render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT}')"$VALIDATOR_OVERLAY"
-  "$CODEX_BIN" exec -m "$VALIDATOR_MODEL" -c "model_reasoning_effort=\"$VALIDATOR_EFFORT\"" --sandbox read-only \
-    --output-schema "$SCHEMA_FILE" -o "$review" \
-    "$validator_prompt" \
-    > "$review.log" 2>&1 || { echo "[FAIL] codex 실행 실패 (모델 '$VALIDATOR_MODEL' 확인)"; tail -20 "$review.log" >&2; exit 1; }
+  # conventions 는 검증자 프롬프트 본문에 이미 렌더링돼 있으므로 "" 를 넘긴다.
+  run_readonly_json_role VALIDATOR validator "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
+    || exit 1
 
   verdict=$(jq -er '.verdict' "$review") || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
   jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" '.schema_version==$v' "$review" >/dev/null 2>&1 \
@@ -275,16 +272,10 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   echo "--- 디자이너가 리뷰($(basename "$prev_review"))를 반영/반박합니다 ---"
   decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
   designer_result="$WORK_DIR/reviews/designer-$TARGET-round-$tag.raw"
-  session_args=$(claude_session_args designer-doc)
   designer_prompt=$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
-  "$CLAUDE_BIN" -p $session_args --model "$DESIGNER_MODEL" --effort "$DESIGNER_EFFORT" \
-    ${designer_rule_args[@]+"${designer_rule_args[@]}"} \
-    --permission-mode acceptEdits --output-format json \
-    "$designer_prompt" \
-    > "$designer_result" || { echo "[FAIL] claude 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1; }
-  claude_session_commit designer-doc
-  log_claude_usage "$TARGET-designer-round-$tag" "$designer_result"
+  run_edit_role DESIGNER designer-doc "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" \
+    || { echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1; }
   echo "--- 디자이너 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'
 

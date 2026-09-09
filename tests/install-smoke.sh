@@ -101,11 +101,27 @@ bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay'
   && fail "검증자 프로필: 없는 프로필이 조용히 생략됨"
 grep -Fq 'VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: consensus-loop 오버레이 로딩 누락"
 grep -Fq '"$VALIDATOR_OVERLAY"' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: 오버레이가 검증자 프롬프트에 붙지 않음"
-grep -Fq -- '--append-system-prompt "$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
-  || fail "규칙 전달: 리뷰어/수정자 system prompt 누락"
+# conventions 는 역할 호출 헬퍼(config.sh)로 전달된다 — claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록.
+grep -Fq 'run_readonly_json_role REVIEWER reviewer' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && grep -Eq 'run_readonly_json_role REVIEWER .*"\$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && grep -Eq 'run_edit_role FIXER .*"\$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && grep -Fq -- '--append-system-prompt "$conv"' "$TARGET_SKILL/config.sh" \
+  || fail "규칙 전달: 리뷰어/수정자 conventions 전달 누락"
+# 역할 → CLI 라우팅: 모델 이름으로 claude/codex 를 고르고, <ROLE>_CLI 로 덮어쓸 수 있으며, 알 수 없는 이름은 실패한다.
+routing="$(bash -c 'source "$1"
+  a=$(REVIEWER_MODEL=gpt-6-astra REVIEWER_CLI="" role_cli REVIEWER)
+  b=$(REVIEWER_MODEL=claude-sonnet-5 REVIEWER_CLI="" role_cli REVIEWER)
+  c=$(WORKER_MODEL=o4-mini WORKER_CLI="" role_cli WORKER)
+  d=$(WORKER_MODEL=mystery-1 WORKER_CLI=claude role_cli WORKER)
+  e=$(WORKER_MODEL=mystery-1 WORKER_CLI="" role_cli WORKER 2>/dev/null || echo FAIL)
+  f=$(WORKER_MODEL=gpt-5.6-luna WORKER_CLI=gemini role_cli WORKER 2>/dev/null || echo FAIL)
+  printf "%s|%s|%s|%s|%s|%s" "$a" "$b" "$c" "$d" "$e" "$f"' _ "$TARGET_SKILL/config.sh")"
+[ "$routing" = "codex|claude|codex|claude|FAIL|FAIL" ] || fail "역할 → CLI 라우팅 오류: $routing"
+grep -Fq 'require_role_bins REVIEWER FIXER' "$TARGET_SKILL/scripts/impl-review-loop.sh" || fail "설치 확인이 설정된 역할의 CLI 를 따르지 않음(impl-review-loop)"
+grep -Fq 'require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER' "$TARGET_SKILL/scripts/feature-run.sh" || fail "설치 확인이 설정된 역할의 CLI 를 따르지 않음(feature-run)"
 grep -Fq '.blocking_issues[]?' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 상세 blocking 이슈 출력 누락"
 grep -q 'decisions_lines_before' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 신규 결정 출력 누락"
-echo "[OK] 3b. 역할별 모델/effort + 선택 conventions + 합의 로그"
+echo "[OK] 3b. 역할별 모델/effort + 역할→CLI 라우팅 + 선택 conventions + 합의 로그"
 
 # ---------- 4. 비호환 구버전 config → 활성 코드 교체 전 중단 ----------
 printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"
@@ -503,7 +519,34 @@ set -e
 [ "$review_docgap_rc" = 3 ] || fail "리뷰어 DOC_GAP: 러너 종료 코드가 3(NEED_DOCS)이 아님 ($review_docgap_rc)"
 [ "$(jq -r '.reason' "$REVIEW_TARGET/.agent-work/run-state.json")" = APPROACH_GAP ] || fail "리뷰어 DOC_GAP: reason 이 APPROACH_GAP 이 아님"
 [ "$(jq -r '.stage' "$REVIEW_TARGET/.agent-work/run-state.json")" = impl ] || fail "리뷰어 DOC_GAP: 재개 stage 가 impl 이 아님"
-echo "[OK] 10. 구현 리뷰 루프 계약 연계 검사 (APPROVE / origin / schema_version / 필드 / DOC_GAP)"
+# (f) 역할 → CLI 라우팅: REVIEWER_MODEL 을 gpt-* 로 바꾸면 같은 루프가 codex 로 리뷰어를 부른다 (읽기 전용 sandbox + 스키마 + -o), claude 는 호출 0회
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  '# 가짜 codex: 리뷰어 호출 형태를 검사하고 FAKE_REVIEW 를 -o 경로에 쓴다' \
+  'case " $* " in *" --sandbox read-only "*) ;; *) echo "codex reviewer without read-only sandbox: $*" >&2; exit 9;; esac' \
+  'case " $* " in *" --output-schema "*) ;; *) echo "codex reviewer without --output-schema: $*" >&2; exit 9;; esac' \
+  'case " $* " in *" -m gpt-6-astra "*) ;; *) echo "codex reviewer with wrong model: $*" >&2; exit 9;; esac' \
+  'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
+  'printf "codex\n" >> "$FAKE_COUNT.codex"; cp "$FAKE_REVIEW" "$out"' \
+  > "$REVIEW_SIDE/fake-codex-reviewer"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "claude\n" >> "$FAKE_COUNT.claude"; exit 9' > "$REVIEW_SIDE/fake-claude-never"
+chmod +x "$REVIEW_SIDE/fake-codex-reviewer" "$REVIEW_SIDE/fake-claude-never"
+cp "$REVIEW_SKILL/config.sh" "$REVIEW_SIDE/config.before-routing.sh"
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/" "$REVIEW_SKILL/config.sh"
+mv "$REVIEW_SKILL/config.sh.sedbak" "$REVIEW_SIDE/config.sedbak.routing"
+FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop '{"schema_version":7,"verdict":"APPROVE","issues":[]}' \
+  || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "라우팅: REVIEWER_MODEL=gpt-* 인데 codex 리뷰어가 APPROVE 로 exit 0 이 아님"; }
+[ -f "$REVIEW_SIDE/.routing-calls.codex" ] || fail "라우팅: codex 리뷰어가 호출되지 않음"
+[ ! -f "$REVIEW_SIDE/.routing-calls.claude" ] || fail "라우팅: 리뷰어가 codex 인데 claude 가 호출됨"
+routing_attempt_dir="$(ls -d "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-"* | sort | tail -1)"   # 앞 사례들이 attempt 를 소비했으므로 마지막 attempt
+[ -f "$routing_attempt_dir/reviewer-round-01.json.log" ] || fail "라우팅: codex 리뷰어 로그(.log)가 남지 않음 ($routing_attempt_dir)"
+[ "$(jq -r '.verdict' "$routing_attempt_dir/reviewer-round-01.json")" = APPROVE ] || fail "라우팅: codex 리뷰어 결과 JSON 이 -o 경로에 없음"
+grep -q '검증자 CLI\|claude 실행 실패' "$REVIEW_SIDE/run.log" && fail "라우팅: codex 리뷰어 경로에서 claude 오류 메시지가 나옴"
+cp "$REVIEW_SIDE/config.before-routing.sh" "$REVIEW_SKILL/config.sh"   # 이후 절은 원래(claude 리뷰어) 설정으로 계속
+# 이 사례의 APPROVE 산출물(승인 지문·체크포인트)이 다음 절에서 재사용되지 않게 치운다 (삭제 대신 이동)
+mv "$REVIEW_TARGET/.agent-work/approved.fingerprint" "$REVIEW_SIDE/approved.fingerprint.routing"
+printf '{"version":0}\n' > "$REVIEW_TARGET/.agent-work/review-impl.json"
+echo "[OK] 10. 구현 리뷰 루프 계약 연계 검사 (APPROVE / origin / schema_version / 필드 / DOC_GAP / 리뷰어 codex 라우팅)"
 
 # ---------- 11. 범위 밖 변경은 자동 원복하지 않는다 — FOREIGN_WORKTREE_CHANGE 로 보존 후 중단 ----------
 # b.txt: 기준선 이전 사용자 unstaged 변경 + 기준선 이후 (워커 또는 다른 세션의) 추가 변경. 리뷰어가 OUT_OF_SCOPE_CHANGE 를 내면

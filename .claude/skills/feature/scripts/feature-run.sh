@@ -181,9 +181,7 @@ trap 'rc=$?; case $rc in 0|2|3) ;; *) jq -e ".status==\"ENV_ERROR\"" "$STATE" >/
 
 # ---------- preflight ----------
 STAGE=preflight
-for bin in "$CLAUDE_BIN" "$CODEX_BIN" jq uuidgen envsubst git; do
-  command -v "$bin" >/dev/null 2>&1 || env_error "'$bin' 미설치"
-done
+require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
 for f in consensus-loop.sh impl-review-loop.sh; do
   [ -x "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음/실행권한 없음: $f"
 done
@@ -318,9 +316,8 @@ run_worker() { # prompt-file extra-vars-spec
   before_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 전 tree 스냅샷 실패"
   printf '%s\n' "$before_tree" > "$WORK_DIR/worker-before.tree"
   set +e
-  "$CODEX_BIN" exec -m "$WORKER_MODEL" -c "model_reasoning_effort=\"$WORKER_EFFORT\"" --sandbox workspace-write \
-    --output-schema "$WORKER_SCHEMA" -o "$WORKER_RESULT" "$prompt" 2>&1 \
-    | tee "$raw"
+  # 워커 CLI 는 WORKER_MODEL 로 라우팅. 프롬프트에 conventions·core_rules 가 이미 있으므로 conventions 는 "".
+  run_edit_role WORKER worker "worker-$(date '+%Y%m%d-%H%M%S')" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$WORKER_RESULT" --allowedTools "Bash"
   worker_rc=$?
   set -e
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료하면 가드가 남지 않아
@@ -354,7 +351,7 @@ run_worker() { # prompt-file extra-vars-spec
   fi
   if [ "$worker_rc" -ne 0 ]; then
     tail -20 "$raw" >&2
-    env_error "codex 워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
+    env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
   fi
   jq -e '.status' "$WORKER_RESULT" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $WORKER_RESULT"
   local status; status="$(jq -r '.status' "$WORKER_RESULT")"
