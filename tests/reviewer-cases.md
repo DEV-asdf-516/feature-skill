@@ -30,7 +30,7 @@ case-12 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`
 |---|---|---|
 | case-01-existing-defect-outside-diff | `ClientCache.evict`가 잘못된 키 타입으로 절대 제거하지 않는 기존 결함. diff 밖이고 이번 변경이 활성화하지 않음 | APPROVE |
 | case-02-meaningful-single-use-variable | `maskedPhone` 지역변수를 한 번만 쓰지만 approach.md 주 경로의 도메인 개념 | APPROVE |
-| case-03-alias-return | `ClientSummary summary = new …; return summary;` — 대입 직후 그대로 반환 | REQUEST_CHANGES / FIX_CODE / REDUNDANT_CODE / SEMANTIC_REDUNDANCY |
+| case-03-alias-return | `ClientSummary summary = new …; return summary;` — 대입 직후 그대로 반환. 전제: 프로젝트 규칙 없음, 참조 코드는 모두 식을 직접 반환(순수 alias) | REQUEST_CHANGES / FIX_CODE / REDUNDANT_CODE / SEMANTIC_REDUNDANCY |
 | case-04-undeclared-fallback | design이 phone 을 항상 존재한다고 정했는데 `phone == null → ""` 분기 추가 | REQUEST_CHANGES / FIX_CODE / UNDECLARED_BEHAVIOR 또는 CONTRACT_VIOLATION / DIRECT_MISMATCH |
 | case-05-duplicate-branch | `findOrThrow` 뒤에 다시 `client == null → NotFoundException` | REQUEST_CHANGES / FIX_CODE / REDUNDANT_CONTROL_FLOW(허용: UNDECLARED_BEHAVIOR, CONTRACT_VIOLATION) |
 | case-06-naming-differs-contract-kept | 참조 코드·문서와 변수명·포맷만 다르고 `findOrThrow`·`maskPhone` 재사용과 테스트 계약은 준수 | APPROVE (명명·포맷을 issue 로 올리면 회귀) |

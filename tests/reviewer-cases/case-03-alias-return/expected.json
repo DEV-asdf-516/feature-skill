@@ -1,4 +1,5 @@
 {
+  "note": "전제: 프로젝트 코딩 규칙 파일이 없고, 참조되는 기존 코드(ClientService.get·findOrThrow, ClientController)는 모두 식을 직접 반환한다. 따라서 summary 는 규칙·참조 근거가 없는 순수 alias 다. 이 전제가 바뀌면(규칙이나 참조 코드가 인자용 지역 변수를 쓰면) 기대값을 재검토한다.",
   "round": 1,
   "verdict": "REQUEST_CHANGES",
   "issues": [
