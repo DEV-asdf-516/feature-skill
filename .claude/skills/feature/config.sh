@@ -59,7 +59,9 @@ LINT_CMD="CHANGE_ME"
 # 스킬은 언어 독립이므로 자체 코드 검사를 갖지 않는다. 커버리지 % 임계치도 두지 않는다 — 숫자 채우기용 테스트를 유발한다.
 
 # --- 역할별 규칙 파일 ---
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# 기본은 이 스킬이 설치된 프로젝트. 피처 전용 worktree 에서 돌 때는 러너가 FEATURE_PROJECT_ROOT 로 그 worktree 를 넘긴다 —
+# 규칙 파일·conventions·프로젝트 로컬 워커 스킬을 원본이 아니라 snapshot 된 worktree 에서 읽어 실행 격리를 지킨다(하위 루프도 상속).
+PROJECT_ROOT="${FEATURE_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 FEATURE_SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md" # 워커 전용 필수 규칙
 CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md" # 선택 파일: 없으면 조용히 생략
@@ -182,7 +184,8 @@ load_reference_code() {
 # 용도: 워커 진입 직전 기준선(worker-baseline.tree — 이번 작업이 만든 변경만 리뷰·원복 대상으로 삼는다),
 #       리뷰 라운드별 스냅샷(수정자가 실제로 바꾼 diff).
 snapshot_worktree_tree() {
-  local idx; idx="$(cd "$WORK_DIR" && pwd)/.snapshot-index"
+  # 임시 index 는 프로세스별 이름 — 같은 트리에서 두 실행(예: 두 피처의 worktree 부트스트랩)이 동시에 스냅샷해도 서로 덮어쓰지 않는다
+  local idx; idx="$(cd "$WORK_DIR" && pwd)/.snapshot-index.${BASHPID:-$$}"   # $$ 는 subshell 에서 부모와 같다 — BASHPID 로 구분
   rm -f "$idx"
   if git rev-parse --verify -q HEAD >/dev/null; then
     GIT_INDEX_FILE="$idx" git read-tree HEAD || return 1
