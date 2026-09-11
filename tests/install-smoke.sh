@@ -38,14 +38,13 @@ bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"
 jq -e '.hooks.UserPromptSubmit and .hooks.PreToolUse' "$TARGET/.claude/settings.json" >/dev/null \
   || fail "신규 설치: settings.json hooks 누락"
-[ -f "$TARGET_SKILL/worker-skills/ponytail/SKILL.md" ] || fail "신규 설치: worker-skills/ponytail 누락"
 # config.sh 의 CHANGE_ME 가드를 지나려면 값을 채운 사본으로 source 한다 (대상 config.sh 는 건드리지 않는다)
 # 사본은 대상 config.sh 옆에 둔다 — PROJECT_ROOT 가 파일 위치 기준이라 다른 곳에서 source 하면 대상 프로젝트를 못 찾는다
 sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" > "$TARGET_SKILL/.config.smoke.sh"
 worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/.config.smoke.sh")" || fail "신규 설치: load_worker_rules 실패"
 rm -f "$TARGET_SKILL/.config.smoke.sh"
-echo "$worker_rules" | grep -q '\[WORKER SKILL: ponytail\]' || fail "신규 설치: ponytail 이 워커 프롬프트에 주입되지 않음"
-echo "[OK] 1. 신규 설치 (+ ponytail 워커 주입)"
+echo "$worker_rules" | grep -q '\[WORKER SKILL:' && fail "신규 설치: 기본 설정에서 워커 스킬이 주입됨 (WORKER_SKILLS 는 비어 있어야 함)"
+echo "[OK] 1. 신규 설치"
 
 # ---------- 2. 재실행 멱등성 ----------
 rerun_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET")"
@@ -325,7 +324,7 @@ set -e
 [ "$missing_skill_rc" = 1 ] || fail "필수 워커 스킬 누락: 러너 종료 코드가 1 이 아님 ($missing_skill_rc)"
 grep -q "필수 워커 스킬 'missing-skill' 없음" "$LOG_TARGET/.agent-work/live.log" || fail "필수 워커 스킬 누락: 실패 사유가 기록되지 않음"
 grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "필수 워커 스킬 누락: 워커(codex)가 호출됨"
-sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=("ponytail")/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=()/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 # worker 단계 진입 시 원본 != lock → exit 2, run-state NEED_USER/SCOPE_MANIFEST_CHANGED, codex 호출 0 (set -e 아래 stop_need_user 도달 확인)
 [ -f "$LOG_TARGET/.agent-work/feature-scope.lock.json" ] || fail "scope lock: 러너가 feature-scope.lock.json 을 확정하지 않음"
 cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.json.orig"
@@ -495,20 +494,20 @@ run_review_loop() { # fake-review-json → exit code (stdout 은 run.log)
   return $rc
 }
 # (a) APPROVE → exit 0, 승인 지문 생성, diff 에 untracked 신규 파일 포함
-run_review_loop '{"schema_version":7,"verdict":"APPROVE","issues":[]}' || fail "리뷰 루프: APPROVE 가 exit 0 이 아님"
+run_review_loop '{"schema_version":8,"verdict":"APPROVE","issues":[]}' || fail "리뷰 루프: APPROVE 가 exit 0 이 아님"
 [ -f "$REVIEW_TARGET/.agent-work/approved.fingerprint" ] || fail "리뷰 루프: 승인 지문 미생성"
 grep -q 'src/new.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" || fail "리뷰 루프: untracked 신규 파일이 리뷰 diff 에 없음"
 grep -q 'src/b.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" && fail "리뷰 루프: 기준선 이전 사용자 변경(b.txt)이 리뷰 diff 에 섞임"
 grep -q '리뷰 기준선: 워커 진입 직전 tree' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: 기준선 tree 를 쓰지 않음"
 # (b) Round 1 인데 origin=FIX_REGRESSION → 연계 검사가 응답 오류로 거부 (exit 1)
-run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:7,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
+run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
 grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: origin 위반 거부 사유가 기록되지 않음"
 # (c) schema_version 불일치 → exit 1
 run_review_loop '{"schema_version":1,"verdict":"APPROVE","issues":[]}' && fail "리뷰 루프: 구버전 schema_version 이 통과됨"
 # (d) FIX_CODE 인데 required_outcome 비어 있음 → exit 1
-run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:7,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
+run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
 # (e) DOC_GAP → exit 3, 러너는 NEED_DOCS(APPROACH_GAP) + stage=impl 로 반환
-set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:7,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"; docgap_loop_rc=$?; set -e
+set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"; docgap_loop_rc=$?; set -e
 [ "$docgap_loop_rc" = 3 ] || fail "리뷰 루프: DOC_GAP 종료 코드가 3 이 아님 ($docgap_loop_rc)"
 [ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = DOC_GAP ] || fail "리뷰 루프: state.json 이 DOC_GAP 이 아님"
 printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > "$REVIEW_TARGET/.agent-work/run-state.json"
@@ -534,7 +533,7 @@ chmod +x "$REVIEW_SIDE/fake-codex-reviewer" "$REVIEW_SIDE/fake-claude-never"
 cp "$REVIEW_SKILL/config.sh" "$REVIEW_SIDE/config.before-routing.sh"
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/" "$REVIEW_SKILL/config.sh"
 mv "$REVIEW_SKILL/config.sh.sedbak" "$REVIEW_SIDE/config.sedbak.routing"
-FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop '{"schema_version":7,"verdict":"APPROVE","issues":[]}' \
+FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop '{"schema_version":8,"verdict":"APPROVE","issues":[]}' \
   || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "라우팅: REVIEWER_MODEL=gpt-* 인데 codex 리뷰어가 APPROVE 로 exit 0 이 아님"; }
 [ -f "$REVIEW_SIDE/.routing-calls.codex" ] || fail "라우팅: codex 리뷰어가 호출되지 않음"
 [ ! -f "$REVIEW_SIDE/.routing-calls.claude" ] || fail "라우팅: 리뷰어가 codex 인데 claude 가 호출됨"
@@ -563,9 +562,9 @@ printf '%s\n' \
   'jq -n -c --slurpfile r "$f" '"'"'{structured_output: $r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'"'" \
   > "$REVIEW_SIDE/fake-claude-fix"
 chmod +x "$REVIEW_SIDE/fake-claude-fix"
-printf '%s\n' "$review_issue" | jq -c '{schema_version:7,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"src/b.txt 의 변경이 범위 밖"}]}' > "$REVIEW_SIDE/review-oos.json"
-printf '%s\n' "$review_issue" | jq -c '{schema_version:7,verdict:"REQUEST_CHANGES",issues:[.]}' > "$REVIEW_SIDE/review-fix.json"
-printf '{"schema_version":7,"verdict":"APPROVE","issues":[]}\n' > "$REVIEW_SIDE/review-approve.json"
+printf '%s\n' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"src/b.txt 의 변경이 범위 밖"}]}' > "$REVIEW_SIDE/review-oos.json"
+printf '%s\n' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[.]}' > "$REVIEW_SIDE/review-fix.json"
+printf '{"schema_version":8,"verdict":"APPROVE","issues":[]}\n' > "$REVIEW_SIDE/review-approve.json"
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-fix\"|; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=1/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 : > "$REVIEW_TARGET/.agent-work/decisions.md"
 set +e

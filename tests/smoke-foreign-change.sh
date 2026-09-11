@@ -198,11 +198,11 @@ scope_ok && fail "사례6: files 와 roots 가 모두 비었는데 유효로 통
 cp "$TMP/scope.valid" .agent-work/feature-scope.json
 pass "사례6: roots-only manifest 유효 / 선행 ./ · 후행 / · 빈·.. 세그먼트 · 전부 빈 manifest 무효"
 
-# ===== 사례 7: 워커 프롬프트에 ponytail 이 실제로 주입된다 (vendored 사본 경로 포함) =====
+# ===== 사례 7: 기본 설정에서는 워커 프롬프트에 외부 스킬이 주입되지 않는다 (WORKER_SKILLS 비어 있음) =====
 worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$CFG")" || fail "사례7: load_worker_rules 실패"
-echo "$worker_rules" | grep -q '\[WORKER SKILL: ponytail\]' || fail "사례7: ponytail 이 워커 프롬프트에 주입되지 않음"
-echo "$worker_rules" | grep -q 'DELEGATED 결정과 로컬 구현 방식에만' || fail "사례7: ponytail 어댑터 블록 없음"
-pass "사례7: ponytail 워커 프롬프트 주입 (worker-skills/ vendored 사본)"
+echo "$worker_rules" | grep -q '\[CORE RULES\]' || fail "사례7: core rules 가 워커 프롬프트에 없음"
+echo "$worker_rules" | grep -q '\[WORKER SKILL:' && fail "사례7: 기본 설정인데 워커 스킬 블록이 주입됨"
+pass "사례7: 기본 설정에서 워커 스킬 미주입"
 
 # ===== 사례 8: 수정자가 manifest 를 넓혀 범위 우회 → SCOPE_MANIFEST_CHANGED, 원복 없음 =====
 echo "new worker change 2" >> src/feature.txt      # 직전 승인 무효화

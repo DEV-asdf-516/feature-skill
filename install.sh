@@ -8,7 +8,7 @@
 #    누락된 hook 항목은 감지해서 "추가해야 할 내용"만 출력한다.
 #  - 프로젝트별 편집 파일(config.sh, core_rules.md)은 보존한다.
 #    새 버전과 다르면 <파일>.new 로 옆에 두고 병합을 안내한다.
-#  - 스킬 코드(scripts/, prompts/, schemas/, worker-skills/, SKILL.md, 훅 스크립트)는 갱신한다.
+#  - 스킬 코드(scripts/, prompts/, schemas/, SKILL.md, 훅 스크립트)는 갱신한다.
 # =============================================================
 set -euo pipefail
 
@@ -63,17 +63,17 @@ fi
 mkdir -p "$TARGET_SKILL_DIR"
 trap 'rm -rf "$TARGET_SKILL_DIR"/.install-stage-* 2>/dev/null' EXIT
 # 1단계: 네 항목 전부 스테이징 성공 후에만 2단계 교체 시작 (혼합 버전 방지)
-for skill_entry in SKILL.md prompts schemas scripts worker-skills; do
+for skill_entry in SKILL.md prompts schemas scripts; do
   stage_path="$TARGET_SKILL_DIR/.install-stage-$skill_entry"
   rm -rf "$stage_path"
   cp -R "$SOURCE_ROOT/.claude/skills/feature/$skill_entry" "$stage_path"
 done
-for skill_entry in SKILL.md prompts schemas scripts worker-skills; do
+for skill_entry in SKILL.md prompts schemas scripts; do
   rm -rf "$TARGET_SKILL_DIR/${skill_entry:?}"
   mv "$TARGET_SKILL_DIR/.install-stage-$skill_entry" "$TARGET_SKILL_DIR/$skill_entry"
 done
 chmod +x "$TARGET_SKILL_DIR/scripts/"*.sh
-echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/, worker-skills/)"
+echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/)"
 install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_SKILL_DIR/config.sh"
 
 # ---------- 2. Claude 훅 스크립트 + core_rules.md ----------

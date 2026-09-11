@@ -79,12 +79,10 @@ CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md" # 워커 전용 필�
 CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md" # 선택 파일: 없으면 조용히 생략
 
 # --- 워커에 주입하는 외부 스킬 ---
-# 이름 목록. 탐색 순서: $PROJECT_ROOT/.claude/skills/<이름>/SKILL.md → .agents/skills/<이름>/SKILL.md (npx skills add 로 설치한 것)
-# → 이 스킬 안의 worker-skills/<이름>/SKILL.md (vendored 사본 — install.sh 가 함께 복사하므로 설치 대상에서도 항상 있다).
-# frontmatter 를 뗀 본문을 [WORKER SKILL: <이름>] 블록으로 core rules 뒤에 붙인다. 워커는 codex 라 Claude 스킬 로더가 없다.
+# 이름 목록(기본 없음). 탐색 순서: $PROJECT_ROOT/.claude/skills/<이름>/SKILL.md → .agents/skills/<이름>/SKILL.md (npx skills add 로 설치한 것).
+# frontmatter 를 뗀 본문을 [WORKER SKILL: <이름>] 블록으로 core rules 뒤에 붙인다. 워커가 codex 면 Claude 스킬 로더가 없다.
 # 목록에 있는데 어디에도 없으면 필수 동작 누락이므로 조용히 진행하지 않고 실패한다.
-WORKER_SKILLS=("ponytail")
-PONYTAIL_LEVEL="full"   # lite | full | ultra — ponytail 강도 (WORKER_SKILLS 에 ponytail 이 있을 때만)
+WORKER_SKILLS=()
 
 # =============================================================
 # 헬퍼
@@ -139,11 +137,9 @@ load_worker_rules() {
 }
 
 # WORKER_SKILLS 의 SKILL.md 본문(frontmatter 제외)을 워커 프롬프트에 붙인다.
-# 파이프라인 계약과의 우선순위를 함께 명시한다 — 스킬은 '어떻게'(DELEGATED 결정)에만 적용되고,
-# 문서가 정한 동작·REQUIRED 결정·테스트 목록은 스킬의 YAGNI 로 빼지 못한다.
 worker_skill_file() { # name → 경로 (없으면 빈 출력)
   local d
-  for d in "$PROJECT_ROOT/.claude/skills/$1" "$PROJECT_ROOT/.agents/skills/$1" "$FEATURE_SKILL_DIR/worker-skills/$1"; do
+  for d in "$PROJECT_ROOT/.claude/skills/$1" "$PROJECT_ROOT/.agents/skills/$1"; do
     [ -f "$d/SKILL.md" ] && { printf '%s' "$d/SKILL.md"; return 0; }
   done
   return 1
@@ -153,18 +149,9 @@ load_worker_skills() {
   local name file
   [ "${#WORKER_SKILLS[@]}" -gt 0 ] || return 0
   for name in "${WORKER_SKILLS[@]}"; do
-    file="$(worker_skill_file "$name")" || { echo "[FAIL] 필수 워커 스킬 '$name' 없음 — .claude/skills/, .agents/skills/, feature/worker-skills/ 어디에도 SKILL.md 가 없다. npx skills add 로 설치하거나 config.sh WORKER_SKILLS 에서 제거" >&2; return 1; }
+    file="$(worker_skill_file "$name")" || { echo "[FAIL] 필수 워커 스킬 '$name' 없음 — .claude/skills/, .agents/skills/ 어디에도 SKILL.md 가 없다. npx skills add 로 설치하거나 config.sh WORKER_SKILLS 에서 제거" >&2; return 1; }
     printf '\n\n[WORKER SKILL: %s]\n' "$name"
     strip_frontmatter "$file"
-    if [ "$name" = ponytail ]; then
-      printf '\n[WORKER SKILL: ponytail — 이 파이프라인에서의 적용 범위]\n'
-      printf -- '- 강도: %s.\n' "$PONYTAIL_LEVEL"
-      printf -- '- 사다리는 approach.md 의 DELEGATED 결정과 로컬 구현 방식에만 적용한다. request.md·design.md·implementation.md 가 정한 동작, approach.md 의 REQUIRED 결정, implementation.md 가 요구한 테스트는 YAGNI 로 빼거나 축소하지 않는다 — "이 요구가 필요한가"는 여기서 다시 묻지 않는다(문서 합의에서 이미 정해졌다).\n'
-      printf -- '- 요구 자체가 과하다고 판단되면 구현을 줄이지 말고 결과 JSON 의 delegated_choices 나 undecided(DOC_GAP) 로 보고한다. "lazy 버전을 먼저 내고 질문한다" 는 여기서는 UNDECIDED 로 돌려보내는 것이다.\n'
-      printf -- '- "skipped: X, add when Y" 는 코드 주석·산문이 아니라 delegated_choices 항목으로 남긴다. ponytail: 주석은 approach.md 가 허용한 범위에서만.\n'
-      printf -- '- 테스트: implementation.md 의 테스트 목록이 우선이며 그 외 자체 검사는 추가하지 않는다(리뷰어가 문서 밖 테스트를 TEST_CONTRACT_GAP 으로 보지 않더라도 커버리지용 테스트는 금지).\n'
-      printf -- '- 파일 삭제 금지·범위 밖 변경 금지·index 조작 금지는 스킬보다 우선한다("Deletion over addition" 은 파일 내 코드 제거에만 해당).\n'
-    fi
   done
 }
 
