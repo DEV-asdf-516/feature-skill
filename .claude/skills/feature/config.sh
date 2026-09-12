@@ -41,7 +41,7 @@ FIXER_CLI=""
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=9
+VALIDATOR_CONTRACT_VERSION=10
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -389,7 +389,12 @@ FEATURE_SCOPE_VERSION=1
 # manifest 변경은 write-set diff 에 보이지 않는다). 그래서 원본을 직접 쓰지 않고 lock 사본을 기준으로 삼고, 호출 전후
 # 원본·lock 해시를 대조해 달라졌으면 SCOPE_MANIFEST_CHANGED 로 자동 복구 없이 중단한다.
 feature_scope_present() { [ -f "$FEATURE_SCOPE_FILE" ]; }
-feature_scope_file() { if [ -f "$FEATURE_SCOPE_LOCK" ]; then printf '%s' "$FEATURE_SCOPE_LOCK"; else printf '%s' "$FEATURE_SCOPE_FILE"; fi; }
+# SCOPE_MANIFEST_OVERRIDE: 같은 files/new_file_roots 의미의 다른 manifest(구현 단위의 scope.json)로 아래 검사·pathspec 함수를 한 번 더 돌릴 때
+# 호출 한 번에만 지정한다(`SCOPE_MANIFEST_OVERRIDE=<path> feature_scope_violations …`). 두 번째 범위 엔진을 만들지 않기 위한 매개변수다.
+feature_scope_file() {
+  if [ -n "${SCOPE_MANIFEST_OVERRIDE:-}" ]; then printf '%s' "$SCOPE_MANIFEST_OVERRIDE"; return 0; fi
+  if [ -f "$FEATURE_SCOPE_LOCK" ]; then printf '%s' "$FEATURE_SCOPE_LOCK"; else printf '%s' "$FEATURE_SCOPE_FILE"; fi
+}
 # 원본 + lock 의 내용 해시 (없는 쪽은 MISSING). 워커·수정자 호출 전후로 비교한다.
 feature_scope_hash() {
   {
@@ -497,6 +502,134 @@ feature_scope_violations() { # before-tree after-tree [ownership-baseline-tree]
     printf '%s\n' "$changed"
   done
 }
+
+# ---------- 구현 단위 manifest (implementation-units.json) ----------
+# 오케스트레이터가 implementation.md/approach.md 와 함께 쓴다(schemas/implementation-units.schema.json). impl 합의의 입력이며(PASS 지문 포함),
+# 워커 단계는 이 파일을 units 배열 순서대로 **직렬** 실행한다 — unit 마다 fresh 워커 → targeted test. unit 별 리뷰 없음, 병렬·DAG·우선순위 없음.
+#   scope : feature-scope.json 과 같은 files/new_file_roots 의미. 전체 범위(lock)의 부분집합이어야 하며 위반 검사는 같은 feature_scope_violations 를 쓴다.
+#   lock  : 워커 진입 시 implementation-units.lock.json 으로 확정(feature-scope.lock.json 과 같은 철학). 원본≠lock 이면 어느 쪽이 맞는지 정하지 않고 사람에게.
+UNITS_MANIFEST_FILE="$WORK_DIR/implementation-units.json"
+UNITS_MANIFEST_LOCK="$WORK_DIR/implementation-units.lock.json"
+UNITS_MANIFEST_VERSION=1
+units_manifest_present() { [ -f "$UNITS_MANIFEST_FILE" ]; }
+units_manifest_file() { if [ -f "$UNITS_MANIFEST_LOCK" ]; then printf '%s' "$UNITS_MANIFEST_LOCK"; else printf '%s' "$UNITS_MANIFEST_FILE"; fi; }
+# 스키마(schemas/implementation-units.schema.json)를 jq 로 그대로 강제한다 — 이 파일은 모델 출력이 아니라 오케스트레이터가 쓰므로 CLI 의 스키마 검사가 없다.
+#   root/unit/scope additionalProperties false · version 1 · units ≥1 · id 순번 prefix + kebab · id 유일 · 순번이 배열 순서와 같이 증가 ·
+#   requirements/references ≥1 · targeted_test 비어 있지 않음 · scope 는 feature-scope 와 같은 canonical 규칙(files/roots 중 하나 이상)
+#   depends_on / priority / parallel 같은 필드는 additionalProperties false 로 거부된다(스케줄링 개념 없음).
+units_manifest_valid_file() { # manifest-path
+  [ -f "$1" ] && jq -e --argjson v "$UNITS_MANIFEST_VERSION" '
+    def canonical: type=="string" and length>0 and (startswith("/")|not) and (startswith("./")|not)
+      and (split("/") | all(.[]; . != "" and . != "." and . != ".."));
+    def nonempty_strings: type=="array" and length>0 and all(.[]; type=="string" and length>0);
+    type=="object" and .version==$v and ((keys - ["version","units"])|length)==0
+    and (.units|type=="array") and (.units|length)>=1
+    and all(.units[]; type=="object"
+      and ((keys - ["id","title","goal","requirements","scope","references","targeted_test"])|length)==0
+      and (.id|type=="string" and test("^[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$"))
+      and (.title|type=="string" and length>0) and (.goal|type=="string" and length>0)
+      and (.requirements|nonempty_strings) and (.references|nonempty_strings)
+      and (.targeted_test|type=="string" and length>0)
+      and (.scope|type=="object" and ((keys - ["files","new_file_roots"])|length)==0
+        and (.files|type=="array") and ((.new_file_roots // [])|type=="array")
+        and ((.files|length) + ((.new_file_roots // [])|length)) > 0
+        and all(.files[]; canonical)
+        and all((.new_file_roots // [])[]; type=="string" and (sub("/$"; "") | canonical))))
+    and ([.units[].id] | length == (unique|length))
+    and ([.units[].id | split("-")[0] | tonumber] as $n | all(range(1; $n|length); $n[.] > $n[.-1]))' \
+    "$1" >/dev/null 2>&1
+}
+# unit scope 가 전체 범위(feature-scope lock) 밖으로 나가는 경로를 "<unit-id>:<path>" 로 출력 (빈 출력이면 부분집합).
+#   files 는 전체 files 에 정확히 있거나 전체 roots 아래여야 하고, roots 는 전체 roots 와 같거나 그 아래여야 한다.
+#   실행 시에는 전체 검사와 unit 검사를 둘 다 통과해야 하므로(둘 중 좁은 규칙이 이긴다) 여기서는 경로 포함 관계만 본다.
+units_scope_outside_global() { # units-manifest global-scope-manifest
+  jq -r --slurpfile g "$2" '
+    ($g[0].files) as $gf | (($g[0].new_file_roots // []) | map(sub("/+$"; "") + "/")) as $gr
+    | def covered_file: . as $p | (($gf | index($p)) != null) or any($gr[]; . as $r | $p | startswith($r));
+      def covered_root: (sub("/+$"; "") + "/") as $p | any($gr[]; . as $r | $p == $r or ($p | startswith($r)));
+      .units[] | .id as $id
+      | ((.scope.files[] | select(covered_file | not) | "\($id):\(.)"),
+         ((.scope.new_file_roots // [])[] | select(covered_root | not) | "\($id):\(.)"))' "$1"
+}
+units_manifest_hash() { # 원본 + lock 내용 해시 (없는 쪽은 MISSING). unit 워커 호출 전후로 비교한다.
+  {
+    for f in "$UNITS_MANIFEST_FILE" "$UNITS_MANIFEST_LOCK"; do
+      printf '%s\0' "$f"; if [ -f "$f" ]; then cat "$f"; else printf 'MISSING'; fi; printf '\0'
+    done
+  } | sha256_stdin
+}
+# lock 확정: 없으면 원본을 복사. 있는데 원본과 다르면 2 (호출자가 중단 — 의도한 변경이면 impl 재합의 후 lock 을 지우고 재실행).
+lock_units_manifest() {
+  if [ ! -f "$UNITS_MANIFEST_LOCK" ]; then
+    cp "$UNITS_MANIFEST_FILE" "$UNITS_MANIFEST_LOCK" || return 1
+    return 0
+  fi
+  cmp -s "$UNITS_MANIFEST_FILE" "$UNITS_MANIFEST_LOCK" && return 0
+  return 2
+}
+unit_ids() { jq -r '.units[].id' "$(units_manifest_file)"; }
+unit_json() { jq -c --arg id "$1" '.units[] | select(.id==$id)' "$(units_manifest_file)"; }
+# unit spec 지문: lock 의 해당 unit 객체(정렬된 compact JSON)의 해시. done.json 의 spec_hash 와 대조해 spec 이 바뀐 unit 의 체크포인트를 무효화한다.
+unit_spec_hash() { jq -Sc --arg id "$1" '.units[] | select(.id==$id)' "$(units_manifest_file)" | sha256_stdin; }
+# 완료 체크포인트가 유효한가: run-state 는 힌트일 뿐이고 실제 판정은 units/<id>/done.json 의 내용 + 현재 spec 지문 교차 확인이다.
+unit_done_valid() { # unit-id
+  local done="$WORK_DIR/units/$1/done.json"
+  [ -f "$done" ] || return 1
+  jq -e --arg id "$1" --arg h "$(unit_spec_hash "$1")" \
+    '.version==1 and .unit_id==$id and .spec_hash==$h and .worker_status=="DONE" and .targeted_test_status=="PASS"' \
+    "$done" >/dev/null 2>&1
+}
+all_units_done() { local id; for id in $(unit_ids); do unit_done_valid "$id" || return 1; done; }
+
+# ---------- unit 간 rolling implementation context ----------
+# 파일: $WORK_DIR/implementation-context.json = {version, completed_units[], facts[{kind,subject,note,source_unit}]}.
+# source of truth 가 아니다(실제 코드 → 합의 문서 → 이 파일). 각 완료 unit 의 units/<id>/context-updates.json(워커 → test-fix 순서의
+# context_updates 원본)이 원천이고 이 파일은 그로부터 **재구성되는 파생 상태**다 — 러너는 의미를 해석하지 않고 upsert/remove 만 적용한다.
+#   identity  : (kind, subject). 같은 키의 upsert 는 제자리 교체(append 아님), remove 는 삭제. 한 update 안에서는 remove → upsert 순.
+#   확정 시점 : unit 워커 DONE → targeted test PASS → context-updates.json → done.json. 실패한 unit 의 update 는 확정되지 않는다.
+#   resume    : lock 순서대로 done 체크포인트가 유효한(내용 + spec_hash) 연속 prefix 만 fold 한다 — 무효화된 체크포인트의 update 는 재사용하지 않는다.
+IMPL_CONTEXT_FILE="$WORK_DIR/implementation-context.json"
+IMPL_CONTEXT_VERSION=1
+impl_context_empty() { jq -nc --argjson v "$IMPL_CONTEXT_VERSION" '{version:$v, completed_units:[], facts:[]}'; }
+# 결과 JSON(워커/test-fix) 의 context_updates 를 정규화해 한 줄로 낸다(없으면 빈 update). source 는 산출물 접두(worker, test-fix-01 …).
+context_update_of() { # result-json source-label
+  jq -c --arg src "$2" '{source:$src, upsert:((.context_updates.upsert // []) | map({kind,subject,note})), remove:((.context_updates.remove // []) | map({kind,subject}))}' "$1"
+}
+# fold: base facts 배열(JSON 문자열) 에 updates 배열(파일)을 순서대로 적용한 facts 배열을 낸다. 결정론적 — 병합·요약 판단 없음.
+fold_context_updates() { # base-facts-json updates-file source-unit
+  jq -c --argjson base "$1" --arg unit "$3" '
+    reduce .[] as $u ($base;
+      reduce ($u.remove // [])[] as $r (.; map(select((.kind==$r.kind and .subject==$r.subject) | not)))
+      | reduce ($u.upsert // [])[] as $f (.;
+          ({kind:$f.kind, subject:$f.subject, note:$f.note, source_unit:$unit}) as $new
+          | if any(.[]; .kind==$f.kind and .subject==$f.subject)
+            then map(if .kind==$f.kind and .subject==$f.subject then $new else . end)
+            else . + [$new] end))' "$2"
+}
+# implementation-context.json 재구성: lock 순서대로 완료 체크포인트가 유효한 unit 의 context-updates.json 을 fold 한다.
+#   stop-id 가 있으면 그 unit 직전까지(현재 unit 워커 호출 전) — 그 앞의 unit 이 하나라도 무효면 실패(조용히 건너뛰지 않는다).
+#   stop-id 가 없으면 첫 무효 unit 에서 멈춘다(그 뒤 unit 의 update 는 무효 unit 재실행 뒤 다시 포함된다).
+impl_context_write() { # [stop-id]
+  local stop="${1:-}" id facts='[]' done_ids='[]' upd
+  for id in $(unit_ids); do
+    [ "$id" != "$stop" ] || { stop=""; break; }
+    if ! unit_done_valid "$id"; then
+      [ -z "$stop" ] || return 1
+      break
+    fi
+    upd="$WORK_DIR/units/$id/context-updates.json"
+    if [ -f "$upd" ]; then
+      facts="$(jq -c '.updates' "$upd" | fold_context_updates "$facts" /dev/stdin "$id")" || return 1
+    else
+      echo "[WARN] unit $id: context-updates.json 없음(이 변경 이전의 체크포인트) — 해당 unit 의 문맥 없이 진행" >&2
+    fi
+    done_ids="$(jq -c --arg id "$id" '. + [$id]' <<<"$done_ids")"
+  done
+  [ -z "$stop" ] || return 1   # stop-id 가 unit 목록에 없음
+  jq -n --argjson v "$IMPL_CONTEXT_VERSION" --argjson u "$done_ids" --argjson f "$facts" '{version:$v, completed_units:$u, facts:$f}' \
+    > "$IMPL_CONTEXT_FILE.tmp" && mv "$IMPL_CONTEXT_FILE.tmp" "$IMPL_CONTEXT_FILE"
+}
+
 # 범위 지문: 현재 작업 트리의 git tree 객체에서 범위 경로의 엔트리(모드·유형·blob·경로)를 해시한다.
 # 내용뿐 아니라 실행 권한·symlink 목적지·생성/삭제까지 잡히고, snapshot_worktree_tree 와 같은 기준(untracked 포함, WORK_DIR 제외)이다.
 # manifest(lock) 자체도 포함한다 — 범위 정의가 바뀌면 이전 승인은 다른 범위에 대한 것이다.
@@ -558,9 +691,10 @@ compute_fixer_resume_fingerprint() {
 consensus_docs_for() { # design | impl
   case "$1" in
     design) printf '%s\n' "$WORK_DIR/design.md" "$WORK_DIR/decisions.md";;
-    impl) printf '%s\n' "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/decisions.md";;
+    impl) printf '%s\n' "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/implementation-units.json" "$WORK_DIR/decisions.md";;
   esac
 }
+# (impl 은 구현 단위 manifest 도 디자이너가 고치는 합의 대상이다 — 러너는 impl 단계 진입 전에 존재를 요구하고, 루프 단독 실행·회귀 픽스처에서는 없어도 된다)
 # 지문 세 종류 — 재개 지점은 "누가 무엇을 바꿨는가"에 따라 달라지므로 하나로 합치지 않는다.
 #   editable : 디자이너가 고치는 것(consensus_docs_for = 대상 문서 + decisions.md). DESIGNER_PENDING 에서 달라졌으면 디자이너 부분 실행.
 #   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + [USER-QUESTION]).
@@ -595,12 +729,12 @@ consensus_pass_fingerprint() { # design | impl
   {
     case "$1" in
       design) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
-      impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/feature-scope.json";;
+      impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json";;
     esac
     _user_decisions
   } | sha256_stdin
 }
-# (impl PASS 지문에 feature-scope.json 원본을 넣는다 — 사용자가 범위를 바꾸면 워커 재진입 전에 impl 재합의를 거치게 한다)
+# (impl PASS 지문에 feature-scope.json · implementation-units.json 원본을 넣는다 — 사용자가 범위나 구현 단위를 바꾸면 워커 재진입 전에 impl 재합의를 거치게 한다)
 # 리뷰 JSON 내용 검증 — 체크포인트가 가리키는 파일이 존재한다는 것만으로 PASS/APPROVE 를 복원하지 않는다.
 valid_spec_pass_review() { # review.json
   [ -f "$1" ] && jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" \

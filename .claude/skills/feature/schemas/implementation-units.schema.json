@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "implementation-units",
+  "description": "구현 단위(implementation unit) manifest. 오케스트레이터가 implementation.md/approach.md 와 함께 쓰고 impl 합의의 검증 대상이다. units 배열 순서가 실행 순서다 — depends_on/priority/parallel 같은 필드는 존재하지 않으며 러너는 항상 배열 순서대로 직렬 실행한다. unit id 는 manifest 전체에서 유일해야 하고(러너가 검사) 순번 prefix(01-, 02-, …)가 배열 순서와 같아야 한다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "units"],
+  "properties": {
+    "version": { "const": 1 },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "goal", "requirements", "scope", "references", "targeted_test"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "안정적인 순번 prefix + kebab-case 이름. 예: 01-intake-assignment",
+            "pattern": "^[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$"
+          },
+          "title": { "type": "string", "minLength": 1 },
+          "goal": { "type": "string", "minLength": 1, "description": "이 unit 이 완결하는 하나의 사용자/도메인 동작(또는 강하게 결합된 동작 묶음)" },
+          "requirements": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "implementation.md/design.md 의 요구 ID"
+          },
+          "scope": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "feature-scope.json 과 같은 의미(files: 정확한 경로, new_file_roots: 생성 경로 접두). 전체 feature-scope 의 부분집합이어야 한다(러너가 lock 대비 검사).",
+            "required": ["files"],
+            "properties": {
+              "files": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+              "new_file_roots": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          },
+          "references": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "이 unit 이 구현하는 implementation.md/approach.md 절 참조"
+          },
+          "targeted_test": {
+            "type": "string",
+            "minLength": 1,
+            "description": "이 unit 의 동작을 검증하는 명령(저장소 루트에서 실행). unit 워커 DONE 직후 러너가 실행한다 — 다음 unit 이 깨진 코드 위에 쌓이는 것을 막는 장치이지 리뷰가 아니다."
+          }
+        }
+      }
+    }
+  }
+}

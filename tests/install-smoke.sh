@@ -14,7 +14,9 @@ fail() { echo "[FAIL] $1" >&2; exit 1; }
 fake_consensus_pass() { # target-root design|impl
   local root="$1" t="$2"
   mkdir -p "$root/.agent-work/reviews"
-  printf '{"schema_version":9,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
+  # impl 은 구현 단위 manifest 가 러너의 진입 조건이다 — 없으면 feature-scope.json 전체를 unit 하나로 두는 최소 manifest 를 만든다
+  [ "$t" != impl ] || [ -f "$root/.agent-work/implementation-units.json" ] || fake_units "$root"
+  printf '{"schema_version":10,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
   (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
     || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
 }
@@ -22,6 +24,11 @@ fake_consensus_pass() { # target-root design|impl
 fake_scope() { # target-root file...
   local root="$1"; shift
   printf '%s\n' "$@" | jq -R . | jq -sc '{version:1, files:., new_file_roots:[]}' > "$root/.agent-work/feature-scope.json"
+}
+# 구현 단위 manifest 픽스처: feature-scope.json 의 files 전체를 unit 하나(01-all)로 — 단일 워커 시절의 동작을 그대로 재현한다
+fake_units() { # target-root
+  jq -c '{version:1, units:[{id:"01-all", title:"all", goal:"전체", requirements:["REQ-01"], scope:{files:.files, new_file_roots:(.new_file_roots // [])}, references:["implementation.md#all"], targeted_test:"true"}]}' \
+    "$1/.agent-work/feature-scope.json" > "$1/.agent-work/implementation-units.json"
 }
 
 TARGET="$SCRATCH/target"
@@ -84,7 +91,8 @@ echo "$conventions_with_file" | grep -q '커스텀 규칙' && fail "규칙 분�
 orchestrator_rules="$(CLAUDE_PROJECT_DIR="$TARGET" bash "$TARGET/.claude/hooks/inject_conventions.sh")"
 echo "$orchestrator_rules" | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: conventions.md 누락"
 echo "$orchestrator_rules" | grep -q '커스텀 규칙' && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
-grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-implement.md" || fail "규칙 전달: 워커 프롬프트 누락"
+grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit.md" || fail "규칙 전달: unit 워커 프롬프트 누락"
+grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit-fix.md" || fail "규칙 전달: unit 수정 프롬프트 누락"
 grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
 # 검증자 프로필 오버레이: 세 프로필 파일이 설치되고, 모델별 기본 매핑·명시 프로필·none·오타 실패가 동작하는지
 for ov in compact guided conservative; do
@@ -248,7 +256,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"schema_version":9,"verdict":"PASS","blocking_issues":[]}\n' \
+printf '{"schema_version":10,"verdict":"PASS","blocking_issues":[]}\n' \
   > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
 set +e
 (cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
@@ -299,7 +307,7 @@ set -e
 [ "$worker_rc" = 2 ] || fail "워커 스트리밍: USER_DECISION 종료 코드가 2가 아님 ($worker_rc)"
 [ -f "$LOG_TARGET/.agent-work/worker-baseline.tree" ] || fail "워커 기준선: 러너가 worker-baseline.tree 를 기록하지 않음"
 (cd "$LOG_TARGET" && git cat-file -e "$(cat .agent-work/worker-baseline.tree)") || fail "워커 기준선: tree 객체가 저장소에 없음"
-worker_raw="$(ls "$LOG_TARGET"/.agent-work/reviews/worker-*.log | tail -1)"
+worker_raw="$(ls "$LOG_TARGET"/.agent-work/units/01-all/worker-*.log | tail -1)"   # unit 워커 원문은 units/<id>/ 에 남는다
 [ "$(grep -c 'WORKER_STREAM_MARKER' "$worker_raw")" = 1 ] \
   || fail "워커 스트리밍: reviews 원문 로그에 출력이 정확히 1회 보존되지 않음"
 [ "$(grep -c 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log")" = 1 ] \

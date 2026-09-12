@@ -4,7 +4,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [
-        9
+        10
       ]
     },
     "verdict": {

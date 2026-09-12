@@ -26,8 +26,8 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 flowchart TD
     P0["Phase 0 · 오케스트레이터\nfeature-run.sh --new → 요구 기록(request.md)\n+ 설계 초안(design.md). 모호하면 사용자에게 질문"] --> P1
     P1["설계 합의 (러너)\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
-    P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
-    P2["구현 (러너)\n워커: REQUIRED는 그대로, DELEGATED는 제약 안에서\n결과는 JSON(DONE/UNDECIDED)"] --> P3
+    P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED)\n+ implementation-units.json(기능 단위 분할) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
+    P2["구현 (러너) — 구현 단위 직렬 실행\nunit 마다: fresh 워커(REQUIRED는 그대로, DELEGATED는 제약 안에서)\n→ targeted test(실패 시 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음"] --> P3
     P2 -.DOC_GAP.-> P15
     P3["리뷰 수렴 (러너)\n리뷰어 게이트(읽기 전용) → 수정자는 FIX_CODE 만\nRound 2 는 종결 검토. APPROVE + 이슈 0건까지"] --> P4
     P3 -.DOC_GAP.-> P15
@@ -75,16 +75,25 @@ flowchart TD
 
 오케스트레이터(LLM)는 문서 작성과 사용자 질문만 하고 결정론적 제어는 러너가 맡는다.
 `preflight → design → impl → worker → review → verify → done`을 연결하고 판단이 필요한 상태에서만 종료 코드로 돌아온다.
+worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 단위가 끝난 뒤에만 진입하며 unit 사이에는 review/verify 가 없다.
 
 | exit | status | reason |
 |---|---|---|
 | 0 | `DONE` | 승인 + 전체 테스트 통과 |
-| 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING` / `APPROACH_GAP`: 오케스트레이터가 문서를 쓰거나 보강할 차례 |
-| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` |
+| 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING` / `APPROACH_GAP`: 오케스트레이터가 문서를 쓰거나 보강할 차례 |
+| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) |
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
-재실행은 항상 같은 명령. `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물(합의 PASS 파일, `worker-result.json`, `approved.fingerprint`)과 교차 확인해 재개 지점을 고른다.
-러너는 agent 가 아니다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
+재실행은 항상 같은 명령. `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물(합의 PASS 파일, `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint`)과 교차 확인해 재개 지점을 고른다.
+러너는 agent 가 아니다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이며, 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째와 같은 형태·같은 한도다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
+
+### 구현 단위(implementation unit) 직렬 실행
+
+큰 feature 를 워커 한 번에 맡기면 후반부로 갈수록 conventions 가 밀린다 — 기존 utility/predicate 재구현, `a == X || a == Y || a == Z` 나열, 불필요한 if/else, 기존 책임 배치와 다른 구현이 누적된다. 작은 기능 범위에서는 워커가 컨벤션을 잘 따르므로 **설계는 feature 전체를 한 번만 합의하고, 코드 작성만 unit 크기로 자른다.** 워커 모델을 바꾸는 것이 아니다.
+
+- `implementation-units.json` 은 implementation.md/approach.md 가 확정된 뒤 그 범위를 **기능 단위**(접수+담당자 지정 / Drop 요청+상태 조회 / …)로 자른 것이다. 레이어(Repository/Service/Controller)로 나누지 않는다. 같은 파일을 여러 unit 이 순차 수정해도 된다. impl 합의의 입력이라 바꾸면 impl PASS 가 무효가 되고, 워커 진입 시 `implementation-units.lock.json` 으로 확정된다(원본≠lock 이면 사람에게).
+- 러너는 배열 순서대로 **직렬**로만 돈다. unit 마다 fresh 워커(이전 unit 의 대화 문맥 없이 worktree 의 코드만 이어받는다) → targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다 — 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. 바뀐 것은 워커 호출 1회가 unit 별 여러 회가 된 것뿐이다. unit scope 는 전체 범위의 부분집합이며 write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 없다.
+- 재실행은 첫 미완료 unit 부터(완료 체크포인트 + spec 지문 대조). 모든 unit 완료 후 **기존 전체 review 와 verify(TEST_CMD/LINT_CMD)를 그대로** 수행한다 — unit gate 는 조기 품질 장치이지 최종 승인이 아니다.
 
 ## 신뢰성 장치
 
@@ -123,8 +132,8 @@ flowchart TD
 └── skills/feature/
     ├── SKILL.md                 # 파이프라인 정의 (Phase 0 ~ 4, 강제 규칙)
     ├── config.sh                # 모델/effort/라운드 한도/프로젝트 명령 + 가드 + 헬퍼
-    ├── prompts/                 # 역할별 페르소나 템플릿 (8개, envsubst 변수 치환)
-    ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마
+    ├── prompts/                 # 역할별 페르소나 템플릿 (10개, envsubst 변수 치환 — unit 워커·unit 테스트 수정 포함)
+    ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
     └── scripts/
         ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드 (--feature <id> 로 전용 worktree 확정)
         ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩 — dirty 원본을 snapshot tree 로 materialize, 재실행 재사용
@@ -135,6 +144,7 @@ tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
 ├── smoke-foreign-change.sh      # 범위 밖 변경 원복 금지·범위 가드 회귀 (mock claude)
 ├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건
+├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 13개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
@@ -224,7 +234,9 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 |---|---|
 | `request.md` | 요구 원문 + 해석 범위 + 제외 사항 |
 | `design.md` / `implementation.md` / `approach.md` | 합의된 설계 / 구현 문서(무엇) / 구현 방식 문서(어떻게, REQUIRED/DELEGATED) |
-| `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests`) |
+| `implementation-units.json` / `.lock.json` | 구현 단위 manifest(기능 단위, 배열 순서 = 실행 순서) / 워커 진입 시 확정한 불변 사본 |
+| `units/<id>/` | unit 별 체크포인트: `unit.json`·`scope.json`·`before.tree`·`worker-before/after.tree`·`worker-result.json`·`targeted-test-NN.log`·`done.json` |
+| `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
 | `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 범위 밖 변경 원복의 기준선 |
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
@@ -237,6 +249,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 없음
 bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행. LLM 호출 없음
+bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
