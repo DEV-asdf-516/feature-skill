@@ -53,6 +53,8 @@ done
 if [ "$TARGET" = "impl" ]; then
   [ -f "$WORK_DIR/design.md" ] || { echo "[FAIL] $WORK_DIR/design.md 없음. 설계 합의가 먼저다." >&2; exit 1; }
   [ -f "$WORK_DIR/approach.md" ] || { echo "[FAIL] $WORK_DIR/approach.md 없음. 구현 문서는 implementation.md(무엇)와 approach.md(어떻게) 두 개가 모두 있어야 한다." >&2; exit 1; }
+  # 구현 단위 manifest 는 러너가 impl 단계 진입 전에 요구한다. 루프 단독 실행·회귀 픽스처에서는 없어도 되므로 여기서는 경고만 한다.
+  [ -f "$WORK_DIR/implementation-units.json" ] || echo "[WARN] $WORK_DIR/implementation-units.json 없음 — 구현 단위 분할은 검증되지 않는다(러너 실행에서는 impl 진입 전에 필수)"
 fi
 for prompt_file in "$VALIDATOR_PROMPT_FILE" "$DESIGNER_PROMPT_FILE"; do
   [ -f "$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $prompt_file" >&2; exit 1; }
@@ -68,18 +70,22 @@ SCHEMA_FILE="$SKILL_DIR/schemas/spec-review.schema.json"
 # Round 2+ 입력용: 디자이너 수정 전 문서를 보관하고, 다음 라운드에 현재 문서와의 diff 를 검증자에게 준다.
 # 파일 목록은 config.sh 의 consensus_docs_for — 스냅샷·diff·변경 파일·재개 지문이 같은 집합을 본다.
 consensus_docs() { consensus_docs_for "$TARGET"; }
+# 목록의 문서가 없을 수 있다(implementation-units.json 은 루프 단독 실행에서 선택) — 없는 쪽은 /dev/null 로 다뤄 생성·삭제도 변경으로 잡는다.
 snapshot_docs() { # dir
   mkdir -p "$1"
-  consensus_docs | while IFS= read -r doc; do cp "$doc" "$1/$(basename "$doc")"; done
+  consensus_docs | while IFS= read -r doc; do if [ -f "$doc" ]; then cp "$doc" "$1/$(basename "$doc")"; fi; done
 }
 snapshot_changed_docs() { # dir → 스냅샷 대비 내용이 바뀐 문서의 basename 목록 (변경 없으면 빈 출력)
   consensus_docs | while IFS= read -r doc; do
-    cmp -s "$1/$(basename "$doc")" "$doc" || basename "$doc"
+    if [ -f "$1/$(basename "$doc")" ] || [ -f "$doc" ]; then cmp -s "$1/$(basename "$doc")" "$doc" || basename "$doc"; fi
   done
 }
 snapshot_docs_diff() { # dir → stdout (unified diff, 검증자 입력·사람 확인용. 변경 없으면 빈 출력)
+  local before after
   consensus_docs | while IFS= read -r doc; do
-    diff -u "$1/$(basename "$doc")" "$doc" || true
+    before="$1/$(basename "$doc")"; after="$doc"
+    [ -f "$before" ] || before=/dev/null; [ -f "$after" ] || after=/dev/null
+    if [ "$before" != /dev/null ] || [ "$after" != /dev/null ]; then diff -u "$before" "$after" || true; fi
   done
 }
 
