@@ -9,6 +9,9 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 fail() { echo "[FAIL] $1" >&2; exit 1; }
+# 계약 버전은 config.sh 에서 읽는다 — 프롬프트 계약이 바뀌어 버전이 오를 때 픽스처가 같이 따라가야 한다
+VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEWER_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
 # 합의 PASS 픽스처: 러너의 stage 결정은 파일명이 아니라 consensus-<target>.json 체크포인트(+입력 지문·리뷰 내용)를 본다.
 # 가짜 PASS 리뷰 파일을 두고 합의 루프를 한 번 돌려 체크포인트를 만든다 (대상 config 의 CODEX_BIN 이 "true" 여야 한다 — 리뷰 파일을 덮어쓰지 않도록).
 fake_consensus_pass() { # target-root design|impl
@@ -16,7 +19,7 @@ fake_consensus_pass() { # target-root design|impl
   mkdir -p "$root/.agent-work/reviews"
   # impl 은 구현 단위 manifest 가 러너의 진입 조건이다 — 없으면 feature-scope.json 전체를 unit 하나로 두는 최소 manifest 를 만든다
   [ "$t" != impl ] || [ -f "$root/.agent-work/implementation-units.json" ] || fake_units "$root"
-  printf '{"schema_version":10,"verdict":"PASS","blocking_issues":[]}\n' > "$root/.agent-work/reviews/validator-$t-round-01.json"
+  printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$VALIDATOR_CONTRACT" > "$root/.agent-work/reviews/validator-$t-round-01.json"
   (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
     || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
 }
@@ -256,7 +259,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"schema_version":10,"verdict":"PASS","blocking_issues":[]}\n' \
+printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$VALIDATOR_CONTRACT" \
   > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
 set +e
 (cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
@@ -502,20 +505,20 @@ run_review_loop() { # fake-review-json → exit code (stdout 은 run.log)
   return $rc
 }
 # (a) APPROVE → exit 0, 승인 지문 생성, diff 에 untracked 신규 파일 포함
-run_review_loop '{"schema_version":8,"verdict":"APPROVE","issues":[]}' || fail "리뷰 루프: APPROVE 가 exit 0 이 아님"
+run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}" || fail "리뷰 루프: APPROVE 가 exit 0 이 아님"
 [ -f "$REVIEW_TARGET/.agent-work/approved.fingerprint" ] || fail "리뷰 루프: 승인 지문 미생성"
 grep -q 'src/new.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" || fail "리뷰 루프: untracked 신규 파일이 리뷰 diff 에 없음"
 grep -q 'src/b.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" && fail "리뷰 루프: 기준선 이전 사용자 변경(b.txt)이 리뷰 diff 에 섞임"
 grep -q '리뷰 기준선: 워커 진입 직전 tree' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: 기준선 tree 를 쓰지 않음"
 # (b) Round 1 인데 origin=FIX_REGRESSION → 연계 검사가 응답 오류로 거부 (exit 1)
-run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
+run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
 grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: origin 위반 거부 사유가 기록되지 않음"
 # (c) schema_version 불일치 → exit 1
 run_review_loop '{"schema_version":1,"verdict":"APPROVE","issues":[]}' && fail "리뷰 루프: 구버전 schema_version 이 통과됨"
 # (d) FIX_CODE 인데 required_outcome 비어 있음 → exit 1
-run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
+run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
 # (e) DOC_GAP → exit 3, 러너는 NEED_DOCS(APPROACH_GAP) + stage=impl 로 반환
-set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"; docgap_loop_rc=$?; set -e
+set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"; docgap_loop_rc=$?; set -e
 [ "$docgap_loop_rc" = 3 ] || fail "리뷰 루프: DOC_GAP 종료 코드가 3 이 아님 ($docgap_loop_rc)"
 [ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = DOC_GAP ] || fail "리뷰 루프: state.json 이 DOC_GAP 이 아님"
 printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > "$REVIEW_TARGET/.agent-work/run-state.json"
@@ -541,7 +544,7 @@ chmod +x "$REVIEW_SIDE/fake-codex-reviewer" "$REVIEW_SIDE/fake-claude-never"
 cp "$REVIEW_SKILL/config.sh" "$REVIEW_SIDE/config.before-routing.sh"
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/" "$REVIEW_SKILL/config.sh"
 mv "$REVIEW_SKILL/config.sh.sedbak" "$REVIEW_SIDE/config.sedbak.routing"
-FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop '{"schema_version":8,"verdict":"APPROVE","issues":[]}' \
+FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}" \
   || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "라우팅: REVIEWER_MODEL=gpt-* 인데 codex 리뷰어가 APPROVE 로 exit 0 이 아님"; }
 [ -f "$REVIEW_SIDE/.routing-calls.codex" ] || fail "라우팅: codex 리뷰어가 호출되지 않음"
 [ ! -f "$REVIEW_SIDE/.routing-calls.claude" ] || fail "라우팅: 리뷰어가 codex 인데 claude 가 호출됨"
@@ -570,9 +573,9 @@ printf '%s\n' \
   'jq -n -c --slurpfile r "$f" '"'"'{structured_output: $r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'"'" \
   > "$REVIEW_SIDE/fake-claude-fix"
 chmod +x "$REVIEW_SIDE/fake-claude-fix"
-printf '%s\n' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"src/b.txt 의 변경이 범위 밖"}]}' > "$REVIEW_SIDE/review-oos.json"
-printf '%s\n' "$review_issue" | jq -c '{schema_version:8,verdict:"REQUEST_CHANGES",issues:[.]}' > "$REVIEW_SIDE/review-fix.json"
-printf '{"schema_version":8,"verdict":"APPROVE","issues":[]}\n' > "$REVIEW_SIDE/review-approve.json"
+printf '%s\n' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {category:"OUT_OF_SCOPE_CHANGE",code_refs:["src/b.txt:L2-L2"],required_outcome:"src/b.txt 의 변경이 범위 밖"}]}' > "$REVIEW_SIDE/review-oos.json"
+printf '%s\n' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$REVIEW_SIDE/review-fix.json"
+printf '{"schema_version":%s,"verdict":"APPROVE","issues":[]}\n' "$REVIEWER_CONTRACT" > "$REVIEW_SIDE/review-approve.json"
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-fix\"|; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=1/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 : > "$REVIEW_TARGET/.agent-work/decisions.md"
 set +e
@@ -739,6 +742,71 @@ grep -q 'CHANGE_ME' "$SCRATCH/gate.log" || fail "승인 게이트: 게이트 다
 [ ! -f "$GATE_SOURCE/.claude/ALLOW_REAL_LLM_REGRESSION" ] || fail "승인 게이트: 허용 파일이 1회용으로 소모되지 않음"
 ls "$GATE_SOURCE/.agent-work"/ALLOW_REAL_LLM_REGRESSION.used.* >/dev/null 2>&1 || fail "승인 게이트: 소모된 허용 파일 기록이 없음"
 echo "[OK] 12. 유료 회귀 승인 게이트 (차단 / 1회용 소모)"
+
+# ---------- 13. usage telemetry recorder — 픽스처만으로 함수 검사 (실제 LLM 호출 없음) ----------
+# 한 행 = invocation 한 번. session 누적 delta 없음, label 은 unique key 아님, null 은 관측 불가(0 으로 위조 금지).
+# 임시 config 는 소스 트리가 아니라 $SCRATCH 의 가짜 프로젝트에 둔다 — 중간 실패·병렬 실행에도 trap 이 정리한다
+USAGE_DIR="$SCRATCH/usage-fixture"; mkdir -p "$USAGE_DIR/.agent-work" "$USAGE_DIR/.claude/skills/feature" "$USAGE_DIR/.claude/hooks"
+printf '# smoke\n' > "$USAGE_DIR/.claude/hooks/core_rules.md"
+USAGE_CFG="$USAGE_DIR/.claude/skills/feature/config.sh"
+sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$SOURCE_ROOT/.claude/skills/feature/config.sh" > "$USAGE_CFG"
+cat > "$USAGE_DIR/claude-a.json" <<'EOF'
+{"session_id":"session-a","total_cost_usd":1.25,"num_turns":7,"duration_ms":12000,"duration_api_ms":10000,
+ "usage":{"input_tokens":40,"output_tokens":500,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}
+EOF
+cat > "$USAGE_DIR/claude-b.json" <<'EOF'
+{"session_id":"session-b","total_cost_usd":0.5,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":30,"cache_creation_input_tokens":40}}
+EOF
+printf '{"session_id":"session-c","result":"no usage here"}\n' > "$USAGE_DIR/claude-c.json"
+cat > "$USAGE_DIR/claude-a2.json" <<'EOF'
+{"session_id":"session-a","total_cost_usd":0.1,"num_turns":1,"usage":{"input_tokens":5,"output_tokens":6,"cache_read_input_tokens":7,"cache_creation_input_tokens":0}}
+EOF
+cat > "$USAGE_DIR/claude-g.json" <<'EOF'
+{"session_id":"session-g","total_cost_usd":1.2914188,"num_turns":12,"usage":{"input_tokens":38,"output_tokens":14701,"cache_read_input_tokens":2509959,"cache_creation_input_tokens":158503}}
+EOF
+printf 'codex\n{"schema_version":6,"verdict":"PASS"}\ntokens used\n12,345\n{"schema_version":6,"verdict":"PASS"}\n' > "$USAGE_DIR/codex-f.log"
+printf 'codex\nno token line\n' > "$USAGE_DIR/codex-none.log"
+usage_run() { (cd "$USAGE_DIR" && source "$USAGE_CFG" && "$@"); }
+usage_last() { tail -1 "$USAGE_DIR/.agent-work/usage.jsonl" | jq -r "$1"; }
+usage_rows() { wc -l < "$USAGE_DIR/.agent-work/usage.jsonl" | tr -d ' '; }
+# A. 정상 result — 모든 필드 그대로, input_effective 파생
+usage_run log_claude_usage lbl-a REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a.json" 2>"$USAGE_DIR/warn.log" || fail "usage A: recorder 실패"
+[ "$(usage_rows)" = 1 ] || fail "usage A: 행 1개가 아님"
+[ "$(usage_last '[.input_uncached,.cache_read,.cache_write,.output,.input_effective,.num_turns,.duration_ms,.duration_api_ms,.cost_usd,.session]|@csv')" = '40,1000,200,500,1240,7,12000,10000,1.25,"session-a"' ] \
+  || fail "usage A: 필드 값 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.label,.role,.cli,.model,.source,.exit_code,.success]|@csv')" = '"lbl-a","REVIEWER","claude","claude-sonnet-5","claude-result",0,true' ] || fail "usage A: metadata 불일치"
+usage_last '.invocation_id' | grep -Eq '^.{8,}$' || fail "usage A: invocation_id 없음"
+usage_last 'has("in") or has("out")' | grep -q false || fail "usage A: legacy in/out 필드가 남아 있음"
+# B. optional 진단 필드 없음 → 행 생성, null (0 아님)
+usage_run log_claude_usage lbl-b VALIDATOR claude-sonnet-5 "$USAGE_DIR/claude-b.json" 2>>"$USAGE_DIR/warn.log" || fail "usage B: recorder 실패"
+[ "$(usage_rows)" = 2 ] || fail "usage B: 행이 추가되지 않음"
+[ "$(usage_last '[.num_turns,.duration_ms,.duration_api_ms]|map(.==null)|all')" = true ] || fail "usage B: optional 필드가 null 이 아님"
+[ "$(usage_last '.input_effective')" = 80 ] || fail "usage B: input_effective 오류"
+# C. usage 핵심 필드 없음 → WARN, 행 추가 안 함, 함수는 0 반환
+usage_run log_claude_usage lbl-c VALIDATOR claude-sonnet-5 "$USAGE_DIR/claude-c.json" 2>"$USAGE_DIR/warn-c.log" || fail "usage C: 함수가 실패를 돌려줌"
+grep -q '\[WARN\]' "$USAGE_DIR/warn-c.log" || fail "usage C: WARN 없음"
+[ "$(usage_rows)" = 2 ] || fail "usage C: 행이 추가됨"
+# D. 동일 session 두 invocation → 행 2개, 각각 fixture 값 그대로 (두 번째가 작아도 정상, delta 없음)
+usage_run log_claude_usage lbl-d REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a2.json" 2>>"$USAGE_DIR/warn.log"
+[ "$(jq -r 'select(.session=="session-a") | .cache_read' "$USAGE_DIR/.agent-work/usage.jsonl" | paste -sd, -)" = "1000,7" ] || fail "usage D: 같은 session 두 행이 invocation 값 그대로가 아님"
+# E. 동일 label 재시도 → 두 행, invocation_id 상이
+usage_run log_claude_usage lbl-a REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a.json" 2>>"$USAGE_DIR/warn.log"
+[ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | wc -l | tr -d ' ')" = 2 ] || fail "usage E: label 재시도 행이 2개가 아님"
+[ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | sort -u | wc -l | tr -d ' ')" = 2 ] || fail "usage E: invocation_id 가 같음"
+# F. codex 최소 telemetry → tokens_total 만, Claude 전용 필드 null
+usage_run log_role_usage codex VALIDATOR gpt-5.6-sol lbl-f "$USAGE_DIR/codex-f.log" 2>>"$USAGE_DIR/warn.log" || fail "usage F: recorder 실패"
+[ "$(usage_last '[.cli,.tokens_total,.source,.role,.model]|@csv')" = '"codex",12345,"codex-log","VALIDATOR","gpt-5.6-sol"' ] || fail "usage F: codex 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.cost_usd,.input_uncached,.cache_read,.cache_write,.output,.input_effective,.num_turns,.duration_ms,.duration_api_ms,.session]|map(.==null)|all')" = true ] || fail "usage F: 관측 불가 값이 null 이 아님"
+usage_run log_codex_usage lbl-f2 VALIDATOR gpt-5.6-sol "$USAGE_DIR/codex-none.log" 2>"$USAGE_DIR/warn-f.log" || fail "usage F: tokens used 없는 로그에서 함수 실패"
+grep -q '\[WARN\]' "$USAGE_DIR/warn-f.log" || fail "usage F: tokens used 없음 WARN 누락"
+[ "$(usage_rows)" = 5 ] || fail "usage F: tokens used 없는 로그가 행으로 기록됨"
+# G. effective input 회귀 + 실패 invocation 도 기록(exit_code/success)
+usage_run log_role_usage claude REVIEWER claude-sonnet-5 impl-review-a01-round-01 "$USAGE_DIR/claude-g.json" 1 2>>"$USAGE_DIR/warn.log"
+[ "$(usage_last '[.input_effective,.exit_code,.success]|@csv')" = '2668500,1,false' ] || fail "usage G: input_effective/exit_code 불일치"
+# 파생 집계는 writer 밖 — legacy 행(in/out)도 함께 읽는다
+printf '{"label":"legacy","session":"s","cost_usd":0.2,"in":3,"out":4,"cache_read":5,"cache_write":6}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
+[ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations]|@csv')" = "7,136,15731,1" ] || fail "usage summary: 합계 불일치: $(usage_run usage_summary)"
+echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex 최소·effective 회귀)"
 
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

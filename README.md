@@ -114,11 +114,15 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **승인 독립성**: 리뷰 세션(`reviewer`)과 수정 세션(`fixer`)은 절대 합치지 않는다.
   마지막 APPROVE 이후 코드가 한 줄이라도 바뀌면 재리뷰 없이 파이프라인을 끝내지 않는다.
 - **설계 모호성은 질문으로**: 추측 금지. 사용자 질문/답변은 `decisions.md`에
-  `- [USER-QUESTION] <질문> → <답>` 형식으로 남아 검증자 이슈 판정(ACCEPT/REJECT)과 구분 추적된다.
+  `- [USER-QUESTION][scope=design|impl] <질문> → <답>` 형식으로 남아 검증자 이슈 판정(ACCEPT/REJECT)과 구분 추적된다.
+  scope 는 질문이 발생한 합의 gate 다(Phase 0·design 루프 → `design`, impl 루프·워커 `USER_DECISION` → `impl`).
+- **사용자 결정의 의존성 범위**: design PASS 지문은 `scope=design` 결정만, impl PASS 지문은 `scope=design`+`scope=impl` 결정을 본다.
+  impl 합의 중 사용자가 검증자 요구를 기각해도 design PASS 는 그대로 재사용되고 impl 만 재검증된다. `request.md`/`design.md` 변경은 기존처럼 design 부터 다시 돈다.
+  scope 없는 옛 형식 줄은 러너가 LLM 호출 전에 `DECISION_SCOPE_REQUIRED` 로 멈추고 사람이 태그를 붙인다(자동 추정 없음). 지문 의미가 바뀌면 `CONSENSUS_CHECKPOINT_VERSION` 을 올린다.
 - **커밋 통제**: 워커는 커밋·푸시 불가(claude 훅 + codex 훅 이중 차단). 커밋은 사용자가 요청했을 때만
   오케스트레이터가 1회용 `ALLOW_COMMIT` 플래그를 만들고 수정자에게 위임한다.
 - **토큰 절약**: 역할별 세션 재사용(`--session-id`/`--resume`)으로 라운드 간 저장소 재탐색을 없애고
-  프롬프트 캐시를 살린다. 사용량은 `usage.jsonl`에 라운드별 누적.
+  프롬프트 캐시를 살린다. 사용량은 `usage.jsonl`에 CLI invocation 한 번당 행 1개로 기록한다(아래 "usage telemetry").
 - **역할별 규칙 전달**: 필수 `core_rules.md`는 워커에게만 주입하고 선택 `conventions.md`는 디자이너·검증자·워커·리뷰어·수정자 모두에게 주입.
 - **실시간 관찰**: 두 루프의 판정, 상세 이슈, 참고사항, 디자이너 반영 결정을 `.agent-work/live.log`에 누적. 러너가 `feature-live` 뷰어 창을 스스로 열며(이미 열려 있으면 `.agent-work/.feature-live.lock/viewer.pid` 로 감지해 다시 열지 않음), 오케스트레이터는 직접 실행하지 않는다. 수동 관찰은 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"`.
 
@@ -243,12 +247,34 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `units/<id>/` | unit 별 체크포인트: `unit.json`·`scope.json`·`before.tree`·`worker-before/after.tree`·`worker-result.json`·`targeted-test-NN.log`·`done.json` |
 | `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
 | `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 `new_file_roots` 소유권 판정의 시점 기준선(변경 소유권 증거가 아니며 원복 근거로 쓰지 않는다) |
-| `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION]` 기록 |
+| `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION][scope=design|impl]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
-| `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / 토큰·비용 누적 / 실시간 로그 |
+| `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / invocation 별 usage telemetry / 실시간 로그 |
 | `archive/` | 이전 피처 산출물 보관 (새 피처 시작 시 자동 이동) |
 | `feature.json` | (피처 worktree) 부트스트랩 기록 — version 2: branch·worktree·source_root·head·`snapshot_tree`·`bootstrap_tree`(finalize 기준선 B)·mode·created_at |
 | `archive/worktree/<id>/<timestamp>/` | (원본) finalize 기록 — `manifest.json`·`feature.patch`(B→F)·`finalize.json`(status·B/O/F/merge tree·`source_after_tree`·cleanup·충돌 목록)·`agent-work/`(worktree 산출물 사본) |
+
+### usage telemetry (`usage.jsonl`)
+
+`usage.jsonl` 한 행 = CLI invocation 한 번의 관측 telemetry. 세션 누계가 아니며, 같은 Claude 세션을 `--resume`해도 행은 invocation 별로 기록한다.
+writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·가격 추정을 하지 않는다. 집계는 그 위에서 한다(`usage_summary` 또는 아래 jq).
+
+```json
+{"invocation_id":"…","label":"impl-review-a01-round-01","role":"REVIEWER","cli":"claude","model":"claude-sonnet-5","session":"…",
+ "cost_usd":1.2914188,"input_uncached":38,"cache_read":2509959,"cache_write":158503,"output":14701,"input_effective":2668500,
+ "tokens_total":null,"num_turns":12,"duration_ms":123456,"duration_api_ms":110000,"exit_code":0,"success":true,"source":"claude-result","recorded_at":"…"}
+```
+
+- `input_uncached` 는 cache read/write 를 제외한 입력. `input_effective` = `input_uncached + cache_read + cache_write` — 진단 편의용 파생값이지 provider billing 공식 필드가 아니다.
+- `cache_read` 는 현재 context 크기가 아니라 해당 invocation 안의 model turn 들에서 읽힌 cache 토큰 누계일 수 있으므로 `num_turns` 와 함께 해석한다.
+- CLI 별로 노출 가능한 telemetry 가 다르다. `null` 은 0 이 아니라 "관측 불가" 다. codex 는 로그의 `tokens used` 총합만 `tokens_total` 에 기록하고 나머지는 `null`(`source: codex-log`).
+- CLI 가 실패해도 파싱 가능한 usage 가 있으면 `exit_code`/`success` 와 함께 기록한다. 같은 `label` 이 재시도되면 행이 여러 개이며 `invocation_id` 로 구분한다.
+- 옛 행(`in`/`out`)은 rewrite 하지 않는다. `usage_summary` 는 두 형식을 함께 읽는다.
+
+```bash
+jq -s '{cost_usd: (map(.cost_usd // 0) | add), input_uncached: (map(.input_uncached // 0) | add),
+        cache_read: (map(.cache_read // 0) | add), cache_write: (map(.cache_write // 0) | add), output: (map(.output // 0) | add)}' .agent-work/usage.jsonl
+```
 
 ## 테스트
 
@@ -257,6 +283,7 @@ bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 �
 bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음
 bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음
+bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지문·stage 회귀·DECISION_SCOPE_REQUIRED. LLM 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
@@ -272,6 +299,7 @@ bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제
 - **루프가 exit 2로 멈춤**: 설계된 에스컬레이션이다. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 blocker`**: 검증자가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어긴 것. 재실행하면 되고 반복되면 `tests/validator-regression.sh`로 프롬프트 회귀를 본다.
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).
+- **`NEED_USER(DECISION_SCOPE_REQUIRED)`**: `decisions.md`에 scope 없는 `- [USER-QUESTION] …` 줄이 있다. detail 의 행번호를 보고 `[USER-QUESTION][scope=design]` 또는 `[USER-QUESTION][scope=impl]` 로 고친 뒤 재실행(LLM 은 호출되지 않았다).
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 issue`** / **`리뷰 schema_version 이 현재 계약과 다름`**: 리뷰어가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어겼거나, 업데이트 후 `config.sh`의 `REVIEWER_CONTRACT_VERSION`이 병합되지 않은 것. 재실행하면 되고 반복되면 `tests/reviewer-regression.sh`로 프롬프트 회귀를 본다.
 - **리뷰 단계가 `NEED_DOCS(APPROACH_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈를 냈다. `state.json.review`의 해당 이슈 `required_outcome`대로 approach.md 를 보강하고 재실행하면 검증자 재합의 → 워커 재개 순으로 진행된다.
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).

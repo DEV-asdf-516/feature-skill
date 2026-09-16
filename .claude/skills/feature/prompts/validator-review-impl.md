@@ -32,4 +32,6 @@ ${PROJECT_CONVENTIONS}
 
 **해결책을 정하지 않는다.** REVISE_DOC 에는 위반 계약과 필요한 최소 불변식만 적고(minimum_contract_needed), 구체 클래스·어노테이션·SQL·executor·예외 처리 위치를 강제하지 않는다. 승인 문서나 명시적 저장소 계약이 한 기법을 강제할 때만 예외다.
 
-**출력 원칙.** 같은 원인은 하나로 묶고 해결책별이 아니라 위반 불변식별로 나눈다. 합의된 설계와 decisions.md 의 [USER-QUESTION] 결정은 위 확정 계약 충돌 예외 외에는 재론하지 않는다.
+**사용자 결정의 범위.** decisions.md 의 `[USER-QUESTION][scope=design]` 과 `[USER-QUESTION][scope=impl]` 은 모두 구현 단계의 확정 사용자 결정이다. 사용자가 이전 라운드의 검증자 요구를 `[USER-QUESTION][scope=impl]` 로 명시적으로 기각했으면 그 요구는 확정 계약이 아니므로 같은 요구를 다시 blocker 로 만들지 않는다 — 다른 실제 blocker 가 있을 때만 그것을 낸다. `[round N] <이슈ID> ACCEPT|REJECT` 줄은 합의 이력이며 기존처럼 직전 라운드 판정 참고용이다.
+
+**출력 원칙.** 같은 원인은 하나로 묶고 해결책별이 아니라 위반 불변식별로 나눈다. 합의된 설계와 decisions.md 의 [USER-QUESTION][scope=design]/[scope=impl] 결정은 위 확정 계약 충돌 예외 외에는 재론하지 않는다.

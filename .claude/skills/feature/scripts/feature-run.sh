@@ -36,7 +36,7 @@
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
-#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE)
+#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED)
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING | APPROACH_GAP)
 #   1 ENV_ERROR   환경·CLI 오류
 #
@@ -235,6 +235,10 @@ if [ "$NEW" = 1 ]; then
   write_state preflight RUNNING "" ""
 fi
 [ -f "$WORK_DIR/decisions.md" ] || : > "$WORK_DIR/decisions.md"
+# scope 없는 옛 형식 `- [USER-QUESTION] …` 은 어느 합의 gate 의 결정인지 코드가 안전하게 추론할 수 없다(design 으로 보면
+# impl 결정이 design PASS 를 깨는 버그가 유지되고, impl 로 보면 과거 design 결정을 잃는다). LLM 호출 전에 사람이 태그를 붙이게 멈춘다.
+unscoped_decisions="$(consensus_unscoped_user_decisions)"
+[ -z "$unscoped_decisions" ] || stop_need_user DECISION_SCOPE_REQUIRED "decisions.md 에 scope 없는 [USER-QUESTION] 줄이 있음 — 각 줄을 그 질문이 발생한 합의 gate 에 따라 '[USER-QUESTION][scope=design]'(요구·설계 선택, design ASK_USER/DEADLOCK/MAX_ROUNDS) 또는 '[USER-QUESTION][scope=impl]'(impl ASK_USER/DEADLOCK/MAX_ROUNDS, 워커 USER_DECISION) 로 직접 고친 뒤 재실행. 자동 추정 없음. 해당 줄(행번호:내용): $(printf '%s' "$unscoped_decisions" | paste -sd'|' -)"
 
 # 실시간 로그 뷰어. 저장소별 lock을 먼저 선점해 러너 재실행·동시 실행이
 # 같은 뷰어 터미널을 여러 개 열지 못하게 한다.
@@ -298,7 +302,8 @@ require_baseline_guard_resolved \
   || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음 (stage $STAGE 재개 전 전역 검사)"
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
 # 합의 PASS 판정은 config.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
-# 현재 입력 지문(request/design/impl docs + [USER-QUESTION])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
+# 현재 입력 지문(request/design/impl docs + 그 target 범위의 [USER-QUESTION][scope=…])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
+# scope=impl 결정은 impl 지문에만 들어가므로 impl 합의 뒤 추가된 사용자 결정은 design PASS 를 무효화하지 않는다.
 # 파일명 정렬로 마지막 라운드 파일을 고르지 않는다 — 과거 round-02 PASS 가 새 round-01 BLOCK 을 가리고,
 # 문서를 고친 뒤 재실행해도 합의 루프를 건너뛰는 경로가 있었다.
 [ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$ROOT/$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
@@ -428,7 +433,7 @@ run_worker() { # prompt-file [unit-dir]
     # 문서 누락(DOC_GAP)은 오케스트레이터가 approach.md 를 보강할 일이고, 제품 정책(USER_DECISION)만 사용자에게 간다.
     local user_n; user_n="$(jq '[.undecided[] | select(.kind=="USER_DECISION")] | length' "$result")"
     if [ "$user_n" -gt 0 ]; then
-      stop_need_user UNDECIDED "$result 의 USER_DECISION 항목을 사용자에게 질문 → decisions.md [USER-QUESTION] 기록 → approach.md 반영 후 재실행 (DOC_GAP 항목은 오케스트레이터가 함께 보강)"
+      stop_need_user UNDECIDED "$result 의 USER_DECISION 항목을 사용자에게 질문 → decisions.md 에 '- [USER-QUESTION][scope=impl] <질문> → <답>' 기록 → approach.md 반영 후 재실행 (DOC_GAP 항목은 오케스트레이터가 함께 보강)"
     fi
     # stage 힌트를 impl 로 되돌려 재실행 시 보강된 approach.md 가 검증자 재합의를 거치게 한다
     STAGE=impl
@@ -509,7 +514,7 @@ while :; do
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" design; rc=$?; set -e
       case $rc in
         0) STAGE=impl;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-design-*.json 의 쟁점을 사용자에게 보고";;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-design-*.json 의 쟁점을 사용자에게 보고. 답은 decisions.md 에 '- [USER-QUESTION][scope=design] <질문> → <답>' 으로 기록(필요하면 design.md 반영) 후 재실행";;
         *) env_error "consensus-loop design 실패 (exit $rc)";;
       esac;;
 
@@ -522,7 +527,7 @@ while :; do
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
       case $rc in
         0) STAGE=worker;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-impl-*.json 의 쟁점을 사용자에게 보고";;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-impl-*.json 의 쟁점을 사용자에게 보고. 답은 decisions.md 에 '- [USER-QUESTION][scope=impl] <질문> → <답>' 으로 기록(필요하면 implementation.md/approach.md 반영) 후 재실행 — design PASS 는 그대로 재사용되고 impl 만 Round 1 부터 재검증된다. 체크포인트·리뷰 JSON 을 손으로 고치지 않는다";;
         *) env_error "consensus-loop impl 실패 (exit $rc)";;
       esac;;
 
