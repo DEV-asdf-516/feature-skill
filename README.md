@@ -2,8 +2,8 @@
 
 Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 
-복잡한 피처 하나를 역할이 분리된 AI 실행들이 "설계 합의 → 구현 문서 합의 → 구현 → 리뷰 수렴 → 최종 테스트"로
-끝까지 처리한다. 문서는 검증자와 합의될 때까지 구현을 시작하지 않는다. 리뷰어가 승인하지 않으면 파이프라인도
+복잡한 피처 하나를 역할이 분리된 AI 실행들이 설계를 합의하고, 구현 문서를 합의하고, 구현한 뒤
+리뷰가 수렴하면 최종 테스트까지 끝낸다. 문서는 검증자와 합의될 때까지 구현을 시작하지 않는다. 리뷰어가 승인하지 않으면 파이프라인도
 끝나지 않고 막히면 사람에게 올라온다.
 
 ## 역할
@@ -44,13 +44,13 @@ flowchart TD
 
 - `design.md`: 왜·무엇을 만드는지(요구 수준). 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
 - `implementation.md`: 무엇을 코드로 바꾸는지(도메인 지식). 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
-- `approach.md`: 어떻게 구현하는지(CS 지식), 구현 결정 단위로 REQUIRED/DELEGATED 표시. 판정 기준은 기술 범주가 아니라 **solution shape** 다 — 외부 동작·영속 데이터 정합성·보안 경계가 갈리거나 사용자가 방식을 명시한 결정은 항상 REQUIRED 이고, 그 밖에는 워커가 고르면 해결 전략·주요 흐름·비용 특성·재사용 vs 새 구현·새 구조물 여부·실패 방식이 달라지는 결정(정규식 vs 수동 스캔, 사전 인덱스 vs 반복 탐색, CSS vs JS 상태)이 REQUIRED, 같은 접근법 안의 코드 표현(변수명, 동등한 제어문 형태, 작은 헬퍼 내부, import·포맷)이 DELEGATED 다. 판정 예시와 과잉 설계 안전장치는 `tests/solution-shape-cases.md`. 근거는 기존 프로젝트 패턴 최우선이며 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용한다. 러너가 그 범위를 워커 프롬프트에 직접 붙인다.
+- `approach.md`: 어떻게 구현하는지(CS 지식), 구현 결정 단위로 REQUIRED/DELEGATED 표시. 판정 기준은 기술 범주가 아니라 solution shape 다 — 외부 동작·영속 데이터 정합성·보안 경계가 갈리거나 사용자가 방식을 명시한 결정은 항상 REQUIRED 이고, 그 밖에는 워커가 고르면 해결 전략·주요 흐름·비용 특성·재사용 vs 새 구현·새 구조물 여부·실패 방식이 달라지는 결정(정규식 vs 수동 스캔, 사전 인덱스 vs 반복 탐색, CSS vs JS 상태)이 REQUIRED, 같은 접근법 안의 코드 표현(변수명, 동등한 제어문 형태, 작은 헬퍼 내부, import·포맷)이 DELEGATED 다. 판정 예시와 과잉 설계 안전장치는 `tests/solution-shape-cases.md`. 근거는 기존 프로젝트 패턴 최우선이며 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용한다. 러너가 그 범위를 워커 프롬프트에 직접 붙인다.
 
 "무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 REQUIRED 결정을 그대로 옮기는 타이피스트로 둔다. 반대로 DELEGATED 를 "외부 동작만 안 바뀌면 전부"로 넓히면 알고리즘·자료구조 선택이 워커에게 넘어가 "정확하고 계약은 지키지만 별로인 구현"이 어느 단계에서도 잡히지 않는다. 그래서 "무슨 방식으로 풀 것인가"는 오케스트레이터가, "그 방식을 이 코드베이스 문법으로 어떻게 적을 것인가"만 워커가 소유한다.
 
 ### 동작 분기 계약
 
-워커가 요구에 없는 방어 분기·fallback·재시도·타입별 if를 임의로 늘리는 문제는 스타일 규칙이나 정규식 게이트로는 잡히지 않는다. 대신 approach.md에서 외부 동작이나 상태 변경 결과가 갈리는 함수에 "허용된 결정점"을 열거한다(선택 사항이며 모든 함수에 쓰지 않는다).
+워커가 요구에 없는 방어 분기·fallback·재시도·타입별 if를 임의로 늘리는 문제는 스타일 규칙이나 정규식 게이트로는 잡히지 않는다. 대신 approach.md에서 외부 동작이나 상태 변경 결과가 갈리는 함수에 허용된 결정점을 열거한다(선택 사항이며 모든 함수에 쓰지 않는다).
 
 ```
 ## `OrderService.process` 제어 흐름 [REQUIRED]
@@ -62,12 +62,12 @@ flowchart TD
 참조 구현: `src/order/ExistingOrderService.java:L40-L68`
 ```
 
-- 워커는 절이 있는 함수에서 열거된 결정점만 구현하고 문서에 없는 결정점이 정말 필요하면 구현하지 않고 `UNDECIDED`로 돌려보낸다. 소스에 분기 ID 주석은 달지 않는다.
-- 리뷰어는 계약 밖 결정점만 issue 로 낸다(`UNDECLARED_BEHAVIOR` — 절이 없는 함수라도 요구에 없는 외부 동작을 추가했으면 해당, `REDUNDANT_CONTROL_FLOW` — 같은 조건·결과의 반복이나 도달 불가 분기, `CONTRACT_VIOLATION` — 열거된 분기 누락). 정상 대응하는 분기는 출력하지 않는다.
+- 워커는 절이 있는 함수에서 열거된 결정점만 구현하고 문서에 없는 결정점이 정말 필요하면 구현하지 않고 `UNDECIDED`로 돌려보낸다. 소스에 분기 ID 주석은 금지다.
+- 리뷰어는 계약 밖 결정점만 issue 로 낸다(`UNDECLARED_BEHAVIOR` — 절이 없는 함수라도 요구에 없는 외부 동작을 추가했으면 해당, `REDUNDANT_CONTROL_FLOW` — 같은 조건·결과의 반복이나 도달 불가 분기, `CONTRACT_VIOLATION` — 열거된 분기 누락). 정상 대응하는 분기는 출력에서 뺀다.
 - 검증자는 이미 합의된 동작이 절에서 빠졌는지만 본다. 새 예외 상황을 발굴해 추가하라고 요구하지 않는다.
 - 워커의 `UNDECIDED`는 두 종류다. `DOC_GAP`(제품 동작은 정해져 있는데 approach.md에 그 분기만 빠짐)은 사용자에게 가지 않고 오케스트레이터가 문서를 보강한다. `USER_DECISION`(어느 문서에도 없는 제품 정책)만 사용자에게 간다.
 
-테스트는 implementation.md가 명시한 동작 계약을 검증하는 것만 쓴다. 작성 순서는 강제하지 않지만 테스트 편의를 위한 운영 코드 변경, 내부 호출·private 상태만 검증하는 테스트, 커버리지 숫자 목적의 테스트는 리뷰어가 `TEST_CONTRACT_GAP` issue로 올린다. 이미 합의된 외부 동작을 검증하는 추가 black-box 테스트는 문서에 이름이 없어도 issue 가 아니다. 커버리지 % 게이트는 두지 않는다.
+테스트는 implementation.md가 명시한 동작 계약을 검증하는 것만 쓴다. 작성 순서는 강제하지 않지만 테스트 편의를 위한 운영 코드 변경, 내부 호출·private 상태만 검증하는 테스트, 커버리지 숫자 목적의 테스트는 리뷰어가 `TEST_CONTRACT_GAP` issue로 올린다. 이미 합의된 외부 동작을 검증하는 추가 black-box 테스트는 문서에 이름이 없어도 issue 가 아니다. 커버리지 % 게이트는 없다.
 설계가 먼저 굳어야 구현 문서 재작성 낭비가 없다. 구현 문서 검증 단계에서 설계 변경이 필요해지면
 검증자·디자이너가 임의로 바꾸지 못하고 "설계 재합의 필요"로 REJECT 기록을 남긴다.
 
@@ -84,16 +84,18 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 | 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) |
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
+`DONE` 뒤 별도 명령 `--feature <id> --finalize`(사용자 승인 뒤에만, 아래 "사용")의 종료 코드는 0 `FINALIZED`(또는 already finalized) / 2 `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE`(사용자 확인) / 1 거부·오류(원본·worktree 불변) 다.
+
 재실행은 항상 같은 명령. `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물(합의 PASS 파일, `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint`)과 교차 확인해 재개 지점을 고른다.
-러너는 agent 가 아니다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이며, 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째와 같은 형태·같은 한도다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
+러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이며, 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째와 같은 형태·같은 한도다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
 
 ### 구현 단위(implementation unit) 직렬 실행
 
-큰 feature 를 워커 한 번에 맡기면 후반부로 갈수록 conventions 가 밀린다 — 기존 utility/predicate 재구현, `a == X || a == Y || a == Z` 나열, 불필요한 if/else, 기존 책임 배치와 다른 구현이 누적된다. 작은 기능 범위에서는 워커가 컨벤션을 잘 따르므로 **설계는 feature 전체를 한 번만 합의하고, 코드 작성만 unit 크기로 자른다.** 워커 모델을 바꾸는 것이 아니다.
+큰 feature 를 워커 한 번에 맡기면 후반부로 갈수록 conventions 가 밀린다. 기존 utility/predicate 재구현, `a == X || a == Y || a == Z` 나열, 불필요한 if/else, 기존 책임 배치와 다른 구현이 누적된다. 작은 기능 범위에서는 워커가 컨벤션을 잘 따르므로 **설계는 feature 전체를 한 번만 합의하고, 코드 작성만 unit 크기로 자른다.** 워커 모델을 바꾸는 것이 아니다.
 
 - `implementation-units.json` 은 implementation.md/approach.md 가 확정된 뒤 그 범위를 **기능 단위**(접수+담당자 지정 / Drop 요청+상태 조회 / …)로 자른 것이다. 레이어(Repository/Service/Controller)로 나누지 않는다. 같은 파일을 여러 unit 이 순차 수정해도 된다. impl 합의의 입력이라 바꾸면 impl PASS 가 무효가 되고, 워커 진입 시 `implementation-units.lock.json` 으로 확정된다(원본≠lock 이면 사람에게).
-- 러너는 배열 순서대로 **직렬**로만 돈다. unit 마다 fresh 워커(이전 unit 의 대화 문맥 없이 worktree 의 코드만 이어받는다) → targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다 — 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. 바뀐 것은 워커 호출 1회가 unit 별 여러 회가 된 것뿐이다. unit scope 는 전체 범위의 부분집합이며 write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 없다.
-- 재실행은 첫 미완료 unit 부터(완료 체크포인트 + spec 지문 대조). 모든 unit 완료 후 **기존 전체 review 와 verify(TEST_CMD/LINT_CMD)를 그대로** 수행한다 — unit gate 는 조기 품질 장치이지 최종 승인이 아니다.
+- 러너는 배열 순서대로 직렬로만 돈다. unit 마다 fresh 워커(이전 unit 의 대화 문맥 없이 worktree 의 코드만 이어받는다) → targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다. 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. 바뀐 것은 워커 호출 1회가 unit 별 여러 회가 된 것뿐이다. unit scope 는 전체 범위의 부분집합이며 write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 넣지 않았다.
+- 재실행은 첫 미완료 unit 부터(완료 체크포인트 + spec 지문 대조). 모든 unit 완료 후 **기존 전체 review 와 verify(TEST_CMD/LINT_CMD)를 그대로** 수행한다 — unit gate 는 조기 품질 장치이고 최종 승인은 이 전체 review 가 한다.
 
 ## 신뢰성 장치
 
@@ -106,9 +108,9 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **ASK_USER 분리**: 문서 재작성으로 풀리지 않는 문제(허용 범위 밖 공용 컴포넌트 수정, 제품 정책 선택)는 디자이너를 거치지 않고 `user_question`·`options`를 그대로 사용자에게 전달한다.
 - **디자이너는 처방을 복사하지 않는다**: blocking issue를 5단계(요구 근거, 이번 변경 관련, 도달 가능한 경로, 지금 결정 필요, 불변식만 요구)로 판정해 REJECT하고 ACCEPT해도 위반된 불변식만 문서에 반영한다.
 - **검증 계약 버전**: 검증자 프롬프트·스키마·러너 검사 중 하나라도 바꾸면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 다른 버전의 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
-- **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건(이번 diff 가 만든 문제, 아홉 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 해결(`UNDECIDED_APPROACH` 는 동작이 맞아도 예외), 기존 결함·장래 개선이 아님, 정확한 위치)을 모두 만족할 때만 등록된다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 러너가 워커 진입 직전에 기록한 기준선 tree(`worker-baseline.tree`) 대비이므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않고, 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
+- **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건을 모두 만족할 때만 등록된다. 이번 diff 가 만든 문제, 아홉 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 해결(`UNDECIDED_APPROACH` 는 동작이 맞아도 예외), 기존 결함·장래 개선이 아님, 정확한 위치다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 러너가 워커 진입 직전에 기록한 기준선 tree(`worker-baseline.tree`) 대비이므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않고, 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
 - **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어 프롬프트·스키마·루프 검사가 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을 올린다.
-- **수정자는 수정자다**: `FIX_CODE` 이슈의 required_outcome 만 구현하고 새 문제를 찾거나 무관한 리팩터링을 하지 않는다. 잘못된 이슈는 코드 대신 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다. `OUT_OF_SCOPE_CHANGE` 는 이번 작업이 바꾼 범위 밖 기존 파일을 워커 진입 기준선 tree 로 `git restore --worktree` 로만 원복한다 — HEAD 원복·index 변경 금지, 기준선이 없으면 DEFER 로 보고만 한다. 워커·수정자는 git index 조작(add/reset/stash/restore --staged)이 금지된다 — codex 훅의 정규식에 더해 러너·루프가 호출 전후 index 지문(`git ls-files --stage`)을 비교해 바뀌었으면 자동 복구 없이 중단한다(결과 기준 차단). 관련 테스트만 필터로 돌리고 전체 스위트는 verify 단계가 한 번 돌린다.
+- **수정자는 수정자다**: `FIX_CODE` 이슈의 required_outcome 만 구현하고 새 문제를 찾거나 무관한 리팩터링을 하지 않는다. 잘못된 이슈는 코드 대신 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다. `OUT_OF_SCOPE_CHANGE` 는 수정자에게 가지 않는다. 범위 밖 변경은 자동 원복하지 않고 현재 상태를 보존한 채 러너가 `FOREIGN_WORKTREE_CHANGE` 로 사용자에게 반환하며, 되돌릴지 보존할지는 사용자가 결정한다(같은 working tree 의 다른 세션 변경일 수 있고 `pre_bash_guard` 가 `git restore`/`checkout --`/`reset --hard` 를 차단한다). 워커·수정자는 git index 조작(add/reset/stash/restore --staged)이 금지된다 — codex 훅의 정규식에 더해 러너·루프가 호출 전후 index 지문(`git ls-files --stage`)을 비교해 바뀌었으면 자동 복구 없이 중단한다(결과 기준 차단). 관련 테스트만 필터로 돌리고 전체 스위트는 verify 단계가 한 번 돌린다.
 - **승인 독립성**: 리뷰 세션(`reviewer`)과 수정 세션(`fixer`)은 절대 합치지 않는다.
   마지막 APPROVE 이후 코드가 한 줄이라도 바뀌면 재리뷰 없이 파이프라인을 끝내지 않는다.
 - **설계 모호성은 질문으로**: 추측 금지. 사용자 질문/답변은 `decisions.md`에
@@ -136,14 +138,14 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
     └── scripts/
         ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드 (--feature <id> 로 전용 worktree 확정)
-        ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩 — dirty 원본을 snapshot tree 로 materialize, 재실행 재사용
+        ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩(dirty 원본을 snapshot tree 로 materialize, 재실행 재사용) + finalize(B/O/F 3-way 무커밋 반영·archive·정리)
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
         └── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지
 
 tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
 ├── smoke-foreign-change.sh      # 범위 밖 변경 원복 금지·범위 가드 회귀 (mock claude)
-├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건
+├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩·finalize 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건·3-way 반영·충돌·archive·정리
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 13개 (문서·src·expected.json)
@@ -206,11 +208,14 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 피처: 주문 취소 API 추가하고 재고 원복까지 처리해줘
 ```
 
-피처는 처음부터 전용 git worktree 에서 돈다. 러너를 `--feature <id>` 로 실행하면 branch `feature/<id>` 와 worktree `../<repo>-feature-<id>` 를 id 로 결정론적으로 정하고, 없으면 원본 working tree 의 현재 상태(미커밋 tracked 변경·untracked 포함, gitignore 파일·`.agent-work` 제외)를 bootstrap 커밋 없이 snapshot tree 로 옮겨 만든다(원본 branch/HEAD/index/working tree 불변, snapshot 도중 원본이 바뀌면 실패). 같은 id 로 다시 실행하면 그 worktree 와 `.agent-work` 를 이어서 쓴다. 서로 다른 피처는 동시에 실행할 수 있고 서로에게도 원본에도 보이지 않는다. 완료 후 merge·commit·worktree 삭제는 자동으로 하지 않는다. 수동 `--worktree <dir> --branch <name>` 도 그대로 쓸 수 있다.
+피처는 처음부터 전용 git worktree 에서 돈다. 러너를 `--feature <id>` 로 실행하면 branch `feature/<id>` 와 worktree `../<repo>-feature-<id>` 를 id 로 결정론적으로 정하고, 없으면 원본 working tree 의 현재 상태(미커밋 tracked 변경·untracked 포함, gitignore 파일·`.agent-work` 제외)를 bootstrap 커밋 없이 snapshot tree 로 옮겨 만든다(원본 branch/HEAD/index/working tree 불변, snapshot 도중 원본이 바뀌면 실패). 같은 id 로 다시 실행하면 그 worktree 와 `.agent-work` 를 이어서 쓴다. 서로 다른 피처는 동시에 실행할 수 있고 서로에게도 원본에도 보이지 않는다. 완료 후 merge·commit·worktree 삭제는 자동으로 하지 않는다. `DONE` 뒤 오케스트레이터가 사용자에게 묻고, 승인했을 때만 `--finalize` 로 결과를 원본 working tree 에 **커밋 없이** 반영하고 worktree·피처 브랜치를 정리한다. 수동 `--worktree <dir> --branch <name>` 도 그대로 쓸 수 있다.
 
 ```bash
-bash .claude/skills/feature/scripts/feature-run.sh --feature 018    # → ../<repo>-feature-018, branch feature/018
+bash .claude/skills/feature/scripts/feature-run.sh --feature 018               # → ../<repo>-feature-018, branch feature/018
+bash .claude/skills/feature/scripts/feature-run.sh --feature 018 --finalize    # DONE 뒤, 사용자 승인 뒤에만. 원본 working tree 에서 실행
 ```
+
+finalize 는 `HEAD` 대비 diff 를 붙이지 않는다. worktree 생성 시 원본의 dirty 상태까지 snapshot 했으므로 B = 생성 당시 tree(`feature.json.bootstrap_tree`), O = 지금 원본, F = 지금 worktree 로 두고 `merge(B, O, F)` 를 `git merge-tree` 로 object 상에서만 계산한 뒤, 임시 index 로 원본 working tree 에만 materialize 한다. 원본 index(staged 상태)·branch·HEAD 는 그대로이고 commit·stash 도 없다. 반영 전에 `<원본>/.agent-work/archive/worktree/<id>/<timestamp>/`(manifest.json, feature.patch(B→F, binary 포함), finalize.json, agent-work/) 를 남기고, 반영 결과를 다시 snapshot 해 기대 merge tree 와 같을 때만 `git worktree remove` + `git branch -D` 를 한다. 같은 hunk 충돌은 자동 해결하지 않고 `FINALIZE_CONFLICT`(exit 2) 로 전부 보존한 채 멈추며, 정리만 실패하면 `APPLIED_CLEANUP_INCOMPLETE` 로 기록하고 재실행 시 정리만 재시도한다. 성공한 피처에 같은 명령을 다시 내리면 `already finalized` 로 끝난다(worktree 재생성·delta 재적용 없음). 커밋은 finalize 와 별개로 사용자가 따로 요청할 때만 하며, 그때는 `finalize.json.source_after_tree` 와 지금 원본 tree 가 같아야 한다(`feature_finalized_source_current <id>`).
 
 진행 상황 관찰은 러너가 시작할 때 `feature-live` 창을 자동으로 연다(같은 worktree 에 이미 열려 있으면 lock 으로 감지해 다시 열지 않는다). 수동으로 열려면 별도 터미널에서 절대 경로로 실행한다(피처 worktree 에 `feature-live` 가 없으면 원본 저장소 루트의 파일을 worktree 로 `cd` 한 뒤 실행):
 
@@ -237,18 +242,20 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `implementation-units.json` / `.lock.json` | 구현 단위 manifest(기능 단위, 배열 순서 = 실행 순서) / 워커 진입 시 확정한 불변 사본 |
 | `units/<id>/` | unit 별 체크포인트: `unit.json`·`scope.json`·`before.tree`·`worker-before/after.tree`·`worker-result.json`·`targeted-test-NN.log`·`done.json` |
 | `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
-| `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 범위 밖 변경 원복의 기준선 |
+| `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 `new_file_roots` 소유권 판정의 시점 기준선(변경 소유권 증거가 아니며 원복 근거로 쓰지 않는다) |
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / 토큰·비용 누적 / 실시간 로그 |
 | `archive/` | 이전 피처 산출물 보관 (새 피처 시작 시 자동 이동) |
+| `feature.json` | (피처 worktree) 부트스트랩 기록 — version 2: branch·worktree·source_root·head·`snapshot_tree`·`bootstrap_tree`(finalize 기준선 B)·mode·created_at |
+| `archive/worktree/<id>/<timestamp>/` | (원본) finalize 기록 — `manifest.json`·`feature.patch`(B→F)·`finalize.json`(status·B/O/F/merge tree·`source_after_tree`·cleanup·충돌 목록)·`agent-work/`(worktree 산출물 사본) |
 
 ## 테스트
 
 ```bash
 bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 없음
 bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
-bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행. LLM 호출 없음
+bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음
 bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
@@ -262,13 +269,16 @@ bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제
 - **`[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요.`**: 설치 2번을 안 한 것. `TEST_CMD`/`LINT_CMD`를 채운다.
 - **`[FAIL] codex 실행 실패 (모델 '...' 확인)`**: codex 계정에서 해당 모델 ID가 유효한지 확인 (`codex -m` 후보 목록).
 - **`[FAIL] 모델 '...' 의 CLI 를 이름으로 정하지 못함`**: 모델 ID 가 `claude*`/`gpt-*`/`o*`/`codex*` 어디에도 맞지 않는다. `config.sh` 에 `<ROLE>_CLI=claude|codex` 를 지정한다.
-- **루프가 exit 2로 멈춤**: 버그가 아니라 설계된 에스컬레이션. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
+- **루프가 exit 2로 멈춤**: 설계된 에스컬레이션이다. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 blocker`**: 검증자가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어긴 것. 재실행하면 되고 반복되면 `tests/validator-regression.sh`로 프롬프트 회귀를 본다.
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 issue`** / **`리뷰 schema_version 이 현재 계약과 다름`**: 리뷰어가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어겼거나, 업데이트 후 `config.sh`의 `REVIEWER_CONTRACT_VERSION`이 병합되지 않은 것. 재실행하면 되고 반복되면 `tests/reviewer-regression.sh`로 프롬프트 회귀를 본다.
 - **리뷰 단계가 `NEED_DOCS(APPROACH_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈를 냈다. `state.json.review`의 해당 이슈 `required_outcome`대로 approach.md 를 보강하고 재실행하면 검증자 재합의 → 워커 재개 순으로 진행된다.
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
 - **이전 피처 문맥이 섞임**: `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
+- **`[FINALIZE_CONFLICT]`**: 피처(B→F)와 원본(B→O)이 같은 부분을 바꿨다. 아무것도 반영되지 않았고 worktree·브랜치·index 도 그대로다. `finalize.json.conflict_files` 의 파일을 원본이나 worktree 에서 정리한 뒤(worktree 를 고쳤으면 러너 재실행으로 재승인) 같은 명령을 다시 낸다.
+- **`[FAIL] feature.json ... 에 finalize 기준선(bootstrap_tree)이 없다`**: version 1 metadata 의 `new-from-branch` worktree 처럼 생성 시점 tree 를 알 수 없는 경우. 기준선을 추측하지 않으므로 결과를 사람이 직접 옮긴다(worktree·브랜치 유지).
+- **`APPLIED_CLEANUP_INCOMPLETE`**: 원본 반영은 끝났고 되돌리지 않는다. `finalize.json.cleanup.error` 의 원인(브랜치가 다른 worktree 에 체크아웃, ref lock 등)을 해소하고 같은 명령을 다시 내면 정리만 재시도한다.
 
 ## Claude Code Agent Teams와의 차이
 

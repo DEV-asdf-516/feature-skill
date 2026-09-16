@@ -3,7 +3,11 @@
 # feature 파이프라인 러너 — 교통정리기 (agent 가 아니다)
 # 파일 경로: .claude/skills/feature/scripts/feature-run.sh
 # 사용법 (저장소 루트에서):
-#   feature-run.sh [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>]
+#   feature-run.sh [--feature <id>] [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>]
+#   feature-run.sh --feature <id> --finalize
+#     --feature : 피처 전용 worktree 를 id 로 결정론적으로 확정(권장, scripts/feature-worktree.sh)
+#     --finalize: DONE 된 피처 worktree 의 결과(B→F delta)를 원본 working tree 에 커밋 없이 3-way 반영하고 worktree·브랜치를 정리.
+#                 사용자 승인 뒤에만 실행한다. 파이프라인 stage 가 아니며 DONE 의 의미를 바꾸지 않는다.
 #     --worktree: 피처 전용 git worktree 에서 실행(권장). 없으면 --branch 로 생성. 다른 세션의 미커밋 변경과 물리적으로 분리.
 #     --new     : 이전 피처 산출물을 archive/ 로 mv 하고 처음부터 시작
 #     --branch  : 워커 진입 전 해당 브랜치가 없으면 생성·체크아웃
@@ -49,7 +53,7 @@ source "$SKILL_DIR/config.sh"
 ROOT="$(git rev-parse --show-toplevel)"
 
 # ---------- 인자 ----------
-NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""
+NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1;;
@@ -57,10 +61,27 @@ while [ $# -gt 0 ]; do
     --branch) BRANCH="$2"; shift;;
     --worktree) WORKTREE="$2"; shift;;
     --feature) FEATURE_ID="$2"; shift;;
+    --finalize) FINALIZE=1;;
     *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
   esac
   shift
 done
+
+# ---------- --feature <id> --finalize: DONE 된 피처 worktree 결과를 원본에 커밋 없이 반영하고 정리 (사용자 승인 뒤에만) ----------
+# 파이프라인 stage 가 아니다 — 부트스트랩·러너 락·live.log 어느 것도 거치지 않고, 기존 worktree 를 찾아(없으면 만들지 않음) 검증·archive·
+# B/O/F 3-way 반영·정리만 한다(scripts/feature-worktree.sh 의 finalize 절). 원본에서 실행한다. 종료 코드:
+#   0 FINALIZED(또는 already finalized)  2 FINALIZE_CONFLICT / APPLIED_CLEANUP_INCOMPLETE(사용자 확인)  1 거부·오류(원본·worktree 불변)
+if [ "$FINALIZE" = 1 ]; then
+  [ -n "$FEATURE_ID" ] || { echo "[FAIL] --finalize 는 --feature <id> 와 함께 쓴다" >&2; exit 1; }
+  [ "$NEW" = 0 ] || { echo "[FAIL] --finalize 와 --new 는 함께 쓸 수 없다" >&2; exit 1; }
+  source "$SKILL_DIR/scripts/feature-worktree.sh"
+  exec </dev/null
+  if feature_worktree_finalize "$FEATURE_ID" "$BRANCH" "$WORKTREE"; then exit 0; else rc=$?; fi
+  case "$rc" in
+    2) exit 2;;
+    *) echo "[FAIL] finalize 실패 (--feature $FEATURE_ID) — 원본·worktree 는 위 사유대로 보존됨" >&2; exit 1;;
+  esac
+fi
 
 # ---------- --feature <id>: 결정론적 전용 worktree 부트스트랩 (기본 모드) ----------
 # branch feature/<id>, 경로 <main root 옆>/<repo>-feature-<id> 를 id 로 정한다. 없으면 원본의 dirty 상태(미커밋 tracked 변경·untracked)를
