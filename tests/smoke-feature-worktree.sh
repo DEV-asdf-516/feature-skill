@@ -16,6 +16,19 @@
 #   9. 원본에서 러너가 실행 중이면 bootstrap 거부 / 같은 피처 worktree 에서 러너 실행 중이면 거부
 #  10. dirty submodule 은 거부, clean submodule 은 gitlink 경로를 빈 디렉터리로 두고 통과
 #  11. 잘못된 식별자 거부
+# finalize (--feature <id> --finalize, DONE 이후 사용자 승인 뒤 — 러너 대신 run-state DONE + 승인 지문을 파일로 만들어 재현):
+#  12. clean 원본: 피처 변경이 원본 working tree 에 커밋 없이 반영, worktree·브랜치 제거, archive(manifest/patch/finalize.json/agent-work) 생성
+#  13. finalize 재실행: worktree 재생성 없음, delta 중복 적용 없음, "already finalized"
+#  14. bootstrap 당시 원본 dirty X: B = HEAD+X, 피처 Y → 원본 = X + Y (X 중복 적용 없음), untracked 신규 파일(중첩 디렉터리 포함) 전달
+#  15. finalize 전 원본의 별도 변경(다른 파일) 보존 + 원본 index(staged) byte 단위 불변
+#  16. 같은 파일의 떨어진 hunk 수정 → 3-way 자동 병합
+#  17. 같은 hunk 충돌 → FINALIZE_CONFLICT(exit 2), 원본 내용·index·worktree·브랜치·archive 불변/보존, 충돌 목록 기록
+#  18. binary 변경·신규 전달 + feature.patch 에 binary patch 보존
+#  19. 실행 권한 부여/제거·symlink 보존
+#  20. archive 실패 → 원본·worktree·브랜치 불변, 복구 후 재실행 성공
+#  21. 원본 반영 뒤 브랜치 삭제 실패 → 반영 유지, APPLIED_CLEANUP_INCOMPLETE 기록(exit 2), 재실행은 정리만(delta 재적용 없음)
+#  22. 기준선(bootstrap_tree)을 모르는 이전 metadata → 추측 없이 거부 / version 1 의 mode new snapshot_tree 는 인정
+#  23. 러너 실행 중(worktree·원본) / DONE 아님 / 승인 지문 stale / worktree 안에서 실행 / --feature 없음 / worktree·기록 없음 / 검증 뒤 원본 변경 → 거부, 아무것도 바꾸지 않음
 # =============================================================
 set -u
 PROJECT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -256,5 +269,275 @@ for bad in 'a..b' 'foo.lock' 'x.'; do   # 자체 정규식은 통과하지만 gi
   [ "$rc" = 1 ] && grep -q 'git ref 규칙' "$TMP/run-bad.log" && [ ! -e "$WORK/proj-feature-$bad" ] || fail "사례11: ref 부적합 식별자 '$bad' 가 거부되지 않음 (exit $rc)"
 done
 pass "사례11: 잘못된 식별자·ref 부적합 이름 거부"
+
+# =============================================================
+# finalize — DONE 이후 사용자 승인 뒤 원본 무커밋 3-way 반영 + worktree/브랜치 정리
+# =============================================================
+mark_done() { # worktree — LLM 없이 DONE 의 파일 수준 의미를 만든다: run-state DONE + 현재 트리에 유효한 approved.fingerprint
+  local wt="$1"
+  (cd "$wt" && source "$CFG" && compute_approval_fingerprint > "$WORK_DIR/approved.fingerprint") || fail "mark_done: 승인 지문 계산 실패 ($wt)"
+  jq -n '{version:1, stage:"done", status:"DONE", reason:null, detail:"smoke", test_retries:0, stale_count:0, updated_at:"", history:[]}' \
+    > "$wt/.agent-work/run-state.json"
+}
+run_finalize() { # id [extra args...] → exit, 로그 $TMP/fin-<id>.log
+  local id="$1"; shift
+  (cd "$SRC" && bash "$RUN" --feature "$id" --finalize "$@") > "$TMP/fin-$id.log" 2>&1; echo $?
+}
+src_tree() { wt_tree "$SRC"; }
+cached_hash() { git diff --cached --binary | shasum -a 256 | awk '{print $1}'; }
+latest_record() { ls -1d "$SRC/.agent-work/archive/worktree/$1"/*/finalize.json 2>/dev/null | sort | tail -1; }
+set_line() { # file line-no text
+  awk -v n="$2" -v t="$3" 'NR==n{$0=t}1' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+commit_all() { git add -A && $GIT commit -qm "$1" || fail "테스트 전제: 커밋 실패 ($1)"; }
+
+# 전제: 지금까지의 dirty 상태를 전부 커밋해 clean 원본으로 시작. finalize 사례용 파일 추가.
+for i in $(seq -w 1 12); do echo "L$i"; done > src/long.txt
+echo "c base" > src/c.txt
+mkdir -p assets && printf '\x00\x01\x02\x03' > assets/base.bin
+printf '#!/bin/sh\necho plain\n' > bin/plain.sh && chmod -x bin/plain.sh
+commit_all "finalize base"
+[ -z "$(git status --porcelain=v1 -uall)" ] || fail "테스트 전제: 원본이 clean 이 아님"
+HEAD_F="$(git rev-parse HEAD)"
+
+# ===== 사례 12: clean 원본 → 반영·정리·archive =====
+rc="$(run_feature f1)"; [ "$rc" = 3 ] || { cat "$TMP/run-f1.log"; fail "사례12: bootstrap exit 3 기대, 실제 $rc"; }
+WT_F1="$WORK/proj-feature-f1"
+[ "$(jq -r .version "$WT_F1/.agent-work/feature.json")" = 2 ] || fail "사례12: feature.json version 2 가 아님"
+[ "$(jq -r .bootstrap_tree "$WT_F1/.agent-work/feature.json")" = "$(jq -r .snapshot_tree "$WT_F1/.agent-work/feature.json")" ] || fail "사례12: bootstrap_tree 가 snapshot_tree 와 다름"
+echo "f1 change" > "$WT_F1/src/a.txt"
+mark_done "$WT_F1"
+count_before="$(git rev-list --all --count)"; index_before="$(index_hash)"; stash_before="$(git stash list | wc -l | tr -d ' ')"
+rc="$(run_finalize f1)"
+[ "$rc" = 0 ] || { cat "$TMP/fin-f1.log"; fail "사례12: finalize exit 0 기대, 실제 $rc"; }
+[ "$(cat src/a.txt)" = "f1 change" ] || fail "사례12: 피처 변경이 원본에 반영되지 않음"
+[ "$(git status --porcelain=v1 -uall)" = " M src/a.txt" ] || fail "사례12: 원본 status 가 ' M src/a.txt' 하나가 아님: $(git status --porcelain=v1 -uall)"
+[ "$(git rev-parse HEAD)" = "$HEAD_F" ] && [ "$(git symbolic-ref --short HEAD)" = main ] || fail "사례12: 원본 HEAD/브랜치가 바뀜"
+[ "$(git rev-list --all --count)" = "$count_before" ] || fail "사례12: finalize 가 커밋을 만듦"
+[ "$(index_hash)" = "$index_before" ] || fail "사례12: 원본 index 가 바뀜"
+[ "$(git stash list | wc -l | tr -d ' ')" = "$stash_before" ] || fail "사례12: stash 가 생김"
+[ ! -e "$WT_F1" ] || fail "사례12: worktree 가 남아 있음"
+git worktree list | grep -q 'proj-feature-f1' && fail "사례12: worktree 등록이 남음"
+git rev-parse --verify -q refs/heads/feature/f1 >/dev/null && fail "사례12: 피처 브랜치가 남음"
+REC="$(latest_record f1)"; [ -n "$REC" ] || fail "사례12: archive 의 finalize.json 없음"
+ADIR="$(dirname "$REC")"
+[ -f "$ADIR/manifest.json" ] && [ -f "$ADIR/feature.patch" ] && [ -f "$ADIR/agent-work/run-state.json" ] && [ -f "$ADIR/agent-work/feature.json" ] || fail "사례12: archive 구성(manifest/patch/agent-work) 누락: $ADIR"
+[ "$(jq -r .status "$REC")" = FINALIZED ] || fail "사례12: finalize.json status 가 FINALIZED 가 아님"
+[ "$(jq -r .source_after_tree "$REC")" = "$(src_tree)" ] || fail "사례12: source_after_tree 가 지금 원본 tree 와 다름"
+[ "$(jq -r .base_tree "$REC")" = "$(jq -r .bootstrap_tree "$ADIR/agent-work/feature.json")" ] || fail "사례12: base_tree 가 bootstrap_tree 와 다름"
+[ "$(jq -r '.cleanup.worktree_removed and .cleanup.branch_deleted' "$REC")" = true ] || fail "사례12: cleanup 기록이 완료가 아님"
+grep -q '^+f1 change$' "$ADIR/feature.patch" || fail "사례12: feature.patch 에 피처 delta 가 없음"
+pass "사례12: clean 원본 finalize — 반영·커밋 없음·index 불변·worktree/브랜치 제거·archive 생성"
+
+# ===== 사례 13: 재실행 =====
+fp_before="$(src_fp)"
+rc="$(run_finalize f1)"
+[ "$rc" = 0 ] || { cat "$TMP/fin-f1.log"; fail "사례13: 재실행 exit 0 기대, 실제 $rc"; }
+grep -q 'already finalized' "$TMP/fin-f1.log" || fail "사례13: already finalized 안내 없음"
+grep -q 'finalize 이후 변경 없음' "$TMP/fin-f1.log" || fail "사례13: finalize 결과 일치 확인이 출력되지 않음"
+[ ! -e "$WT_F1" ] || fail "사례13: 재실행이 worktree 를 만듦"
+git rev-parse --verify -q refs/heads/feature/f1 >/dev/null && fail "사례13: 재실행이 브랜치를 만듦"
+[ "$(src_fp)" = "$fp_before" ] && [ "$(cat src/a.txt)" = "f1 change" ] || fail "사례13: 재실행이 원본을 바꿈(delta 중복 적용?)"
+[ "$(ls -1d "$SRC/.agent-work/archive/worktree/f1"/* | wc -l | tr -d ' ')" = 1 ] || fail "사례13: 재실행이 archive 를 추가로 만듦"
+# 원본을 고친 뒤의 재실행은 결과 불일치를 알린다(커밋 전 확인용) — 여전히 delta 재적용은 없다
+echo "edited after finalize" >> src/a.txt
+rc="$(run_finalize f1)"; [ "$rc" = 0 ] && grep -q 'FINALIZE_STALE' "$TMP/fin-f1.log" || fail "사례13: finalize 이후 원본 변경이 감지되지 않음 (exit $rc)"
+pass "사례13: finalize 재실행 — worktree 재생성·delta 중복 적용 없음, 이후 원본 변경은 FINALIZE_STALE 로 알림"
+commit_all "f1"
+
+# ===== 사례 14: bootstrap 당시 원본 dirty X + 피처 Y → X + Y (X 중복 없음), untracked 신규 파일 =====
+echo "X untracked" > src/x.txt
+echo "b X" > src/b.txt
+rc="$(run_feature f2)"; [ "$rc" = 3 ] || fail "사례14: bootstrap exit 3 기대, 실제 $rc"
+WT_F2="$WORK/proj-feature-f2"
+[ "$(cat "$WT_F2/src/x.txt")" = "X untracked" ] || fail "사례14: 전제 — dirty X 가 worktree 에 없음"
+echo "Y" > "$WT_F2/src/y.txt"
+mkdir -p "$WT_F2/src/newdir" && echo "nested" > "$WT_F2/src/newdir/n.txt"
+mark_done "$WT_F2"
+rc="$(run_finalize f2)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f2.log"; fail "사례14: finalize exit 0 기대, 실제 $rc"; }
+[ "$(cat src/x.txt)" = "X untracked" ] && [ "$(cat src/b.txt)" = "b X" ] || fail "사례14: 원본의 기존 dirty X 가 훼손됨"
+[ "$(cat src/y.txt)" = "Y" ] && [ "$(cat src/newdir/n.txt)" = "nested" ] || fail "사례14: 피처 신규 파일이 원본에 없음"
+st="$(git status --porcelain=v1 -uall)"
+[ "$(echo "$st" | wc -l | tr -d ' ')" = 4 ] || fail "사례14: 원본 status 가 4줄이 아님(X 중복/누락?): $st"
+ADIR="$(dirname "$(latest_record f2)")"
+grep -q 'X untracked' "$ADIR/feature.patch" && fail "사례14: 원본의 기존 dirty X 가 피처 delta 로 잡힘"
+grep -q '^+Y$' "$ADIR/feature.patch" || fail "사례14: feature.patch 에 Y 가 없음"
+[ ! -e "$WT_F2" ] || fail "사례14: worktree 가 남음"
+pass "사례14: bootstrap 당시 dirty X 는 중복 적용되지 않고 피처 Y·untracked 신규 파일(중첩 포함)만 더해짐"
+commit_all "f2"
+
+# ===== 사례 15: finalize 전 원본의 별도 변경 보존 + index(staged) 불변 =====
+rc="$(run_feature f3)"; [ "$rc" = 3 ] || fail "사례15: bootstrap exit 3 기대, 실제 $rc"
+WT_F3="$WORK/proj-feature-f3"
+echo "f3 a" > "$WT_F3/src/a.txt"
+mark_done "$WT_F3"
+echo "c source" > src/c.txt                                   # 피처와 다른 파일의 원본 변경
+echo "staged content" > src/staged.txt && git add src/staged.txt
+echo "b staged" > src/b.txt && git add src/b.txt && echo "b after stage" > src/b.txt   # staged ≠ working tree ≠ HEAD
+cached_before="$(cached_hash)"; index_before="$(index_hash)"
+rc="$(run_finalize f3)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f3.log"; fail "사례15: finalize exit 0 기대, 실제 $rc"; }
+[ "$(cat src/a.txt)" = "f3 a" ] || fail "사례15: 피처 변경 미반영"
+[ "$(cat src/c.txt)" = "c source" ] || fail "사례15: 원본의 별도 변경이 사라짐"
+[ "$(cat src/b.txt)" = "b after stage" ] && [ -f src/staged.txt ] || fail "사례15: 원본의 staged/unstaged 상태가 훼손됨"
+[ "$(cached_hash)" = "$cached_before" ] || fail "사례15: git diff --cached 가 바뀜"
+[ "$(index_hash)" = "$index_before" ] || fail "사례15: 원본 index 가 바뀜"
+[ "$(git diff --cached --name-only | sort | paste -sd, -)" = "src/b.txt,src/staged.txt" ] || fail "사례15: staged 목록이 바뀜"
+pass "사례15: 원본의 별도 변경 보존, staged 상태·index byte 불변"
+commit_all "f3"
+
+# ===== 사례 16: 같은 파일의 떨어진 hunk → 3-way 자동 병합 =====
+rc="$(run_feature f4)"; [ "$rc" = 3 ] || fail "사례16: bootstrap exit 3 기대, 실제 $rc"
+WT_F4="$WORK/proj-feature-f4"
+set_line "$WT_F4/src/long.txt" 1 "L01-feature"
+mark_done "$WT_F4"
+set_line src/long.txt 12 "L12-source"
+rc="$(run_finalize f4)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f4.log"; fail "사례16: finalize exit 0 기대, 실제 $rc"; }
+[ "$(head -1 src/long.txt)" = "L01-feature" ] && [ "$(tail -1 src/long.txt)" = "L12-source" ] && [ "$(wc -l < src/long.txt | tr -d ' ')" = 12 ] \
+  || fail "사례16: 3-way 병합 결과가 틀림: $(cat src/long.txt | paste -sd, -)"
+pass "사례16: 같은 파일 비충돌 변경 자동 병합"
+commit_all "f4"
+
+# ===== 사례 17: 같은 hunk 충돌 → 거부, 전부 보존 =====
+rc="$(run_feature f5)"; [ "$rc" = 3 ] || fail "사례17: bootstrap exit 3 기대, 실제 $rc"
+WT_F5="$WORK/proj-feature-f5"
+set_line "$WT_F5/src/long.txt" 6 "L06-feature"
+mark_done "$WT_F5"
+set_line src/long.txt 6 "L06-source"
+echo "s2" > src/staged2.txt && git add src/staged2.txt
+fp_before="$(src_fp)"; index_before="$(index_hash)"; cached_before="$(cached_hash)"
+branch_before="$(git rev-parse refs/heads/feature/f5)"; wt_before="$(wt_tree "$WT_F5")"
+rc="$(run_finalize f5)"
+[ "$rc" = 2 ] || { cat "$TMP/fin-f5.log"; fail "사례17: 충돌 exit 2 기대, 실제 $rc"; }
+grep -q 'FINALIZE_CONFLICT' "$TMP/fin-f5.log" && grep -q 'src/long.txt' "$TMP/fin-f5.log" || fail "사례17: FINALIZE_CONFLICT 와 충돌 경로가 보고되지 않음"
+[ "$(src_fp)" = "$fp_before" ] || fail "사례17: 충돌인데 원본 working tree 가 바뀜"
+[ "$(index_hash)" = "$index_before" ] && [ "$(cached_hash)" = "$cached_before" ] || fail "사례17: 충돌인데 원본 index 가 바뀜"
+[ "$(sed -n 6p src/long.txt)" = "L06-source" ] || fail "사례17: 충돌 파일이 부분 변경됨"
+[ -d "$WT_F5" ] && [ "$(wt_tree "$WT_F5")" = "$wt_before" ] || fail "사례17: worktree 가 제거되거나 바뀜"
+[ "$(git rev-parse refs/heads/feature/f5)" = "$branch_before" ] || fail "사례17: 피처 브랜치가 삭제되거나 바뀜"
+REC="$(latest_record f5)"; [ -n "$REC" ] || fail "사례17: 충돌 archive 가 없음"
+[ "$(jq -r .status "$REC")" = CONFLICT ] && [ "$(jq -r '.conflict_files[0]' "$REC")" = "src/long.txt" ] || fail "사례17: finalize.json 에 CONFLICT/충돌 목록이 없음"
+[ -f "$(dirname "$REC")/feature.patch" ] || fail "사례17: 충돌 archive 에 feature.patch 없음"
+pass "사례17: 충돌 → FINALIZE_CONFLICT, 원본 내용·index·worktree·브랜치 불변, archive 에 충돌 목록"
+commit_all "f5 source side"
+
+# ===== 사례 18: binary =====
+rc="$(run_feature f6)"; [ "$rc" = 3 ] || fail "사례18: bootstrap exit 3 기대, 실제 $rc"
+WT_F6="$WORK/proj-feature-f6"
+printf '\x00\xff\x10\x00' > "$TMP/exp-base.bin" && cp "$TMP/exp-base.bin" "$WT_F6/assets/base.bin"
+printf '\x89PNG\x00\x01' > "$TMP/exp-new.bin" && cp "$TMP/exp-new.bin" "$WT_F6/assets/new.bin"
+mark_done "$WT_F6"
+rc="$(run_finalize f6)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f6.log"; fail "사례18: finalize exit 0 기대, 실제 $rc"; }
+cmp -s assets/base.bin "$TMP/exp-base.bin" && cmp -s assets/new.bin "$TMP/exp-new.bin" || fail "사례18: binary 내용이 원본에 정확히 전달되지 않음"
+[ "$(grep -c 'GIT binary patch' "$(dirname "$(latest_record f6)")/feature.patch")" -ge 2 ] || fail "사례18: feature.patch 에 binary patch 가 없음"
+pass "사례18: binary 변경·신규 전달, archive patch 에 binary 보존"
+commit_all "f6"
+
+# ===== 사례 19: 실행 권한·symlink =====
+rc="$(run_feature f7)"; [ "$rc" = 3 ] || fail "사례19: bootstrap exit 3 기대, 실제 $rc"
+WT_F7="$WORK/proj-feature-f7"
+chmod +x "$WT_F7/bin/plain.sh"; chmod -x "$WT_F7/bin/run.sh"; ln -s ../src/a.txt "$WT_F7/bin/link-a"
+mark_done "$WT_F7"
+rc="$(run_finalize f7)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f7.log"; fail "사례19: finalize exit 0 기대, 실제 $rc"; }
+[ -x bin/plain.sh ] && [ ! -x bin/run.sh ] || fail "사례19: 실행 권한 변경이 전달되지 않음"
+[ -L bin/link-a ] && [ "$(readlink bin/link-a)" = "../src/a.txt" ] || fail "사례19: symlink 가 전달되지 않음"
+pass "사례19: 실행 권한 부여/제거·symlink 보존"
+commit_all "f7"
+
+# ===== 사례 20: archive 실패 → 아무것도 바꾸지 않음 =====
+rc="$(run_feature f8)"; [ "$rc" = 3 ] || fail "사례20: bootstrap exit 3 기대, 실제 $rc"
+WT_F8="$WORK/proj-feature-f8"
+echo "f8" > "$WT_F8/src/a.txt"
+mark_done "$WT_F8"
+mkdir -p .agent-work/archive && chmod 000 .agent-work/archive
+fp_before="$(src_fp)"
+rc="$(run_finalize f8)"
+chmod 755 .agent-work/archive
+[ "$rc" = 1 ] || { cat "$TMP/fin-f8.log"; fail "사례20: archive 실패 exit 1 기대, 실제 $rc"; }
+grep -q 'archive' "$TMP/fin-f8.log" || fail "사례20: archive 실패 사유 없음"
+[ "$(src_fp)" = "$fp_before" ] && [ "$(cat src/a.txt)" != "f8" ] || fail "사례20: archive 실패인데 원본이 바뀜"
+[ -d "$WT_F8" ] && git rev-parse --verify -q refs/heads/feature/f8 >/dev/null || fail "사례20: archive 실패인데 worktree/브랜치가 제거됨"
+rc="$(run_finalize f8)"; [ "$rc" = 0 ] && [ "$(cat src/a.txt)" = "f8" ] || { cat "$TMP/fin-f8.log"; fail "사례20: 복구 후 재실행 실패 (exit $rc)"; }
+pass "사례20: archive 실패 → 원본·worktree·브랜치 불변, 복구 후 재실행 성공"
+commit_all "f8"
+
+# ===== 사례 21: 반영 성공 뒤 브랜치 삭제 실패 → 반영 유지, cleanup incomplete, 재실행은 정리만 =====
+rc="$(run_feature f9)"; [ "$rc" = 3 ] || fail "사례21: bootstrap exit 3 기대, 실제 $rc"
+WT_F9="$WORK/proj-feature-f9"
+echo "f9" > "$WT_F9/src/a.txt"
+mark_done "$WT_F9"
+mkdir -p .git/refs/heads/feature && : > .git/refs/heads/feature/f9.lock     # ref lock → git branch -D 실패
+rc="$(run_finalize f9)"
+[ "$rc" = 2 ] || { rm -f .git/refs/heads/feature/f9.lock; cat "$TMP/fin-f9.log"; fail "사례21: cleanup 실패 exit 2 기대, 실제 $rc"; }
+grep -q 'APPLIED_CLEANUP_INCOMPLETE' "$TMP/fin-f9.log" || fail "사례21: cleanup incomplete 가 보고되지 않음"
+[ "$(cat src/a.txt)" = "f9" ] || fail "사례21: cleanup 실패로 반영이 되돌려짐"
+git rev-parse --verify -q refs/heads/feature/f9 >/dev/null || fail "사례21: 브랜치 삭제가 실패해야 하는데 사라짐"
+REC="$(latest_record f9)"
+[ "$(jq -r .status "$REC")" = APPLIED_CLEANUP_INCOMPLETE ] && [ "$(jq -r '.cleanup.branch_deleted' "$REC")" = false ] && [ "$(jq -r '.cleanup.error' "$REC")" != null ] \
+  || fail "사례21: finalize.json 에 cleanup incomplete 가 기록되지 않음"
+rm -f .git/refs/heads/feature/f9.lock
+fp_before="$(src_fp)"
+rc="$(run_finalize f9)"; [ "$rc" = 0 ] || { cat "$TMP/fin-f9.log"; fail "사례21: 정리 재시도 exit 0 기대, 실제 $rc"; }
+grep -q '정리만 재시도' "$TMP/fin-f9.log" || fail "사례21: 재실행이 정리만 재시도하지 않음"
+[ "$(src_fp)" = "$fp_before" ] || fail "사례21: 정리 재시도가 원본을 바꿈(delta 중복 적용?)"
+git rev-parse --verify -q refs/heads/feature/f9 >/dev/null && fail "사례21: 재시도 후에도 브랜치가 남음"
+[ ! -e "$WT_F9" ] || fail "사례21: worktree 가 남음"
+[ "$(jq -r .status "$REC")" = FINALIZED ] || fail "사례21: 같은 기록이 FINALIZED 로 갱신되지 않음"
+pass "사례21: 브랜치 삭제 실패 → 반영 유지·APPLIED_CLEANUP_INCOMPLETE, 재실행은 정리만 완료"
+commit_all "f9"
+
+# ===== 사례 22: 기준선을 모르는 이전 metadata → 거부 =====
+rc="$(run_feature f10)"; [ "$rc" = 3 ] || fail "사례22: bootstrap exit 3 기대, 실제 $rc"
+WT_F10="$WORK/proj-feature-f10"
+echo "f10" > "$WT_F10/src/a.txt"
+mark_done "$WT_F10"
+META="$WT_F10/.agent-work/feature.json"; cp "$META" "$TMP/f10-meta.json"
+jq 'del(.bootstrap_tree) | .version=1 | .mode="new-from-branch" | .snapshot_tree=null' "$TMP/f10-meta.json" > "$META"
+fp_before="$(src_fp)"
+rc="$(run_finalize f10)"; [ "$rc" = 1 ] || { cat "$TMP/fin-f10.log"; fail "사례22: exit 1 기대, 실제 $rc"; }
+grep -q 'bootstrap_tree' "$TMP/fin-f10.log" || fail "사례22: 기준선 부재 사유가 보고되지 않음"
+[ "$(src_fp)" = "$fp_before" ] && [ -d "$WT_F10" ] && git rev-parse --verify -q refs/heads/feature/f10 >/dev/null || fail "사례22: 거부됐는데 원본/worktree/브랜치가 바뀜"
+# version 1 이라도 mode new 의 snapshot_tree 는 materialize 가 검증한 값이라 기준선으로 인정
+jq 'del(.bootstrap_tree) | .version=1' "$TMP/f10-meta.json" > "$META"
+rc="$(run_finalize f10)"; [ "$rc" = 0 ] && [ "$(cat src/a.txt)" = "f10" ] || { cat "$TMP/fin-f10.log"; fail "사례22: version 1 (mode new, snapshot_tree) finalize 실패 (exit $rc)"; }
+pass "사례22: 기준선 없는 이전 metadata 는 거부, version 1 의 검증된 snapshot_tree 는 인정"
+commit_all "f10"
+
+# ===== 사례 23: 거부 조건들 — 아무것도 바꾸지 않음 =====
+rc="$(run_feature f11)"; [ "$rc" = 3 ] || fail "사례23: bootstrap exit 3 기대, 실제 $rc"
+WT_F11="$WORK/proj-feature-f11"
+echo "f11" > "$WT_F11/src/a.txt"
+mark_done "$WT_F11"
+fp_before="$(src_fp)"
+reject() { # label log-pattern
+  [ "$rc" = 1 ] || { cat "$TMP/fin-f11.log" "$TMP/fin-f12.log" 2>/dev/null; fail "사례23($1): exit 1 기대, 실제 $rc"; }
+  grep -q -e "$2" "$TMP/fin-f11.log" "$TMP/fin-f12.log" 2>/dev/null || fail "사례23($1): 사유 '$2' 가 보고되지 않음"
+  [ "$(src_fp)" = "$fp_before" ] || fail "사례23($1): 거부됐는데 원본이 바뀜"
+  [ -d "$WT_F11" ] && git rev-parse --verify -q refs/heads/feature/f11 >/dev/null || fail "사례23($1): 거부됐는데 worktree/브랜치가 사라짐"
+}
+mkdir -p "$WT_F11/.agent-work/.runner.lock" && printf '%s\n' "$$" > "$WT_F11/.agent-work/.runner.lock/pid"
+rc="$(run_finalize f11)"; reject "worktree 러너" '피처 worktree 에서 러너가 실행 중'
+rm -rf "$WT_F11/.agent-work/.runner.lock"
+mkdir -p .agent-work/.runner.lock && printf '%s\n' "$$" > .agent-work/.runner.lock/pid
+rc="$(run_finalize f11)"; reject "원본 러너" '원본 working tree 에서 러너가 실행 중'
+rm -rf .agent-work/.runner.lock
+rc="$( (cd "$WT_F11" && bash "$RUN" --feature f11 --finalize) > "$TMP/fin-f11.log" 2>&1; echo $?)"; reject "worktree 안에서 실행" '원본 working tree'
+rc="$( (cd "$SRC" && bash "$RUN" --finalize) > "$TMP/fin-f11.log" 2>&1; echo $?)"; reject "--feature 없음" '--feature <id> 와 함께'
+rc="$( (cd "$SRC" && bash "$RUN" --feature f11 --finalize --new) > "$TMP/fin-f11.log" 2>&1; echo $?)"; reject "--new 조합" '함께 쓸 수 없다'
+rc="$(run_feature f12)"; [ "$rc" = 3 ] || fail "사례23: f12 bootstrap 실패"
+WT_F12="$WORK/proj-feature-f12"; echo "f12" > "$WT_F12/src/a.txt"
+rc="$(run_finalize f12)"; reject "DONE 아님" 'DONE 이 아님'
+mark_done "$WT_F12"; echo "after approval" > "$WT_F12/src/b.txt"
+rc="$(run_finalize f12)"; reject "승인 지문 stale" '승인 지문이 유효하지 않음'
+[ ! -e "$WORK/proj-feature-nope" ] || fail "사례23: 전제"
+rc="$(run_finalize nope)"; [ "$rc" = 1 ] && grep -q 'finalize 할 것이 없다' "$TMP/fin-nope.log" && [ ! -e "$WORK/proj-feature-nope" ] \
+  || fail "사례23(worktree·기록 없음): 거부되지 않거나 worktree 를 만듦 (exit $rc)"
+# 검증과 반영 사이 원본 변경 → 반영하지 않음, 원본의 그 변경도 건드리지 않음
+rc="$( (cd "$SRC" && FEATURE_FINALIZE_DEBUG_HOOK='echo "concurrent" >> src/c.txt' bash "$RUN" --feature f11 --finalize) > "$TMP/fin-f11.log" 2>&1; echo $?)"
+[ "$rc" = 1 ] && grep -q '검증 이후 원본 working tree 가 바뀜' "$TMP/fin-f11.log" || { cat "$TMP/fin-f11.log"; fail "사례23(검증 뒤 원본 변경): exit 1 과 사유 기대, 실제 $rc"; }
+[ "$(tail -1 src/c.txt)" = "concurrent" ] && [ "$(cat src/a.txt)" != "f11" ] || fail "사례23(검증 뒤 원본 변경): 반영됐거나 원본 변경이 지워짐"
+[ -d "$WT_F11" ] && [ "$(jq -r .status "$(latest_record f11)")" = FAILED ] || fail "사례23(검증 뒤 원본 변경): worktree 유지·FAILED 기록 기대"
+# 원인 해소 뒤 정상 finalize
+rc="$(run_finalize f11)"; [ "$rc" = 0 ] && [ "$(cat src/a.txt)" = "f11" ] && [ ! -e "$WT_F11" ] || { cat "$TMP/fin-f11.log"; fail "사례23: 정상 finalize 실패 (exit $rc)"; }
+pass "사례23: 러너 실행 중·DONE 아님·승인 stale·잘못된 cwd/인자·기록 없음·검증 뒤 원본 변경 → 거부, 아무것도 바꾸지 않음"
 
 echo "[SMOKE] 전부 통과 — 임시 저장소: $TMP (필요 없으면 직접 정리)"
