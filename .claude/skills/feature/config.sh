@@ -41,7 +41,7 @@ FIXER_CLI=""
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=10
+VALIDATOR_CONTRACT_VERSION=11
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -52,7 +52,7 @@ REVIEWER_CONTRACT_VERSION=8
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
 # 로더는 버전이 다르면 저장된 지문을 해석하지 않고 안전하게 처음(Round 1 / 새 attempt)으로 돌아간다 —
 # 다른 의미의 지문을 비교해 "부분 실행"으로 오판하고 단계를 건너뛰는 것을 막는다.
-CONSENSUS_CHECKPOINT_VERSION=2
+CONSENSUS_CHECKPOINT_VERSION=3
 REVIEW_CHECKPOINT_VERSION=2
 
 # --- 수렴/안전 한도 ---
@@ -264,17 +264,19 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
 # 읽기 전용·스키마 강제 JSON 역할(검증자·리뷰어).
 #   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.log(stdout/stderr).
 #   conventions: 프롬프트에 이미 들어 있으면 "" 를 넘긴다. claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록으로 붙인다.
-#   claude 는 세션(session_name)을 라운드 간 이어가고 usage 를 기록한다(codex exec 는 무상태 — 사용량은 $out.log 의 "tokens used" 참고).
+#   claude 는 세션(session_name)을 라운드 간 이어간다(codex exec 는 무상태). 두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
-  local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli
+  local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  inv="$(new_invocation_id)"
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
       "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
         --output-schema "$schema" -o "$out" \
-        "$prompt" > "$out.log" 2>&1 \
-        || { echo "[FAIL] codex 실행 실패 (모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1; }
+        "$prompt" > "$out.log" 2>&1 || rc=$?
+      log_role_usage codex "$role" "$model" "$label" "$out.log" "$rc" "$inv"
+      [ "$rc" -eq 0 ] || { echo "[FAIL] codex 실행 실패 (모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1; }
       ;;
     claude)
       local session_args conv_args=()
@@ -286,9 +288,10 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
         --disallowedTools "Bash,Edit,Write,NotebookEdit" \
         --json-schema "$(cat "$schema")" --output-format json \
         "$prompt" \
-        > "$out.raw" || { echo "[FAIL] claude 실행 실패 (모델 '$model', $role 확인)" >&2; return 1; }
+        > "$out.raw" || rc=$?
+      log_role_usage claude "$role" "$model" "$label" "$out.raw" "$rc" "$inv"
+      [ "$rc" -eq 0 ] || { echo "[FAIL] claude 실행 실패 (모델 '$model', $role 확인)" >&2; return 1; }
       claude_session_commit "$session"
-      log_claude_usage "$label" "$out.raw"
       jq -e '.structured_output' "$out.raw" > "$out" \
         || { echo "[FAIL] 응답에 structured_output 없음: $out.raw" >&2; return 1; }
       ;;
@@ -300,8 +303,9 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
 #   conventions 는 run_readonly_json_role 과 같다. 나머지 인자는 claude 에만 붙는 추가 플래그(예: --allowedTools Bash).
 run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions schema_file out_json [claude_extra_args...]
   local role="$1" session="$2" label="$3" raw="$4" prompt="$5" conv="$6" schema="$7" out="$8"; shift 8
-  local model effort cli rc=0
+  local model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  inv="$(new_invocation_id)"
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
@@ -310,6 +314,7 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
         ${schema_args[@]+"${schema_args[@]}"} "$prompt" 2>&1 \
         | tee "$raw" || rc=$?
+      log_role_usage codex "$role" "$model" "$label" "$raw" "$rc" "$inv"
       ;;
     claude)
       local session_args conv_args=() schema_args=()
@@ -322,9 +327,9 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
         "$@" --output-format json \
         "$prompt" \
         > "$raw" || rc=$?
+      log_role_usage claude "$role" "$model" "$label" "$raw" "$rc" "$inv"   # 실패해도 파싱 가능한 usage 는 남긴다
       if [ "$rc" -eq 0 ]; then
         claude_session_commit "$session"
-        log_claude_usage "$label" "$raw"
         # 스키마 역할이면 structured_output 을 꺼낸다. 없으면 out 은 빈 파일로 남고 호출자의 스키마 검사가 잡는다.
         [ -z "$schema" ] || jq -e '.structured_output' "$raw" > "$out" 2>/dev/null || rc=1
       fi
@@ -697,18 +702,37 @@ consensus_docs_for() { # design | impl
 # (impl 은 구현 단위 manifest 도 디자이너가 고치는 합의 대상이다 — 러너는 impl 단계 진입 전에 존재를 요구하고, 루프 단독 실행·회귀 픽스처에서는 없어도 된다)
 # 지문 세 종류 — 재개 지점은 "누가 무엇을 바꿨는가"에 따라 달라지므로 하나로 합치지 않는다.
 #   editable : 디자이너가 고치는 것(consensus_docs_for = 대상 문서 + decisions.md). DESIGNER_PENDING 에서 달라졌으면 디자이너 부분 실행.
-#   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + [USER-QUESTION]).
+#   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + target 범위의 [USER-QUESTION]).
 #              달라졌으면 저장된 리뷰 자체가 무효 → Round 1 부터.
-#   pass     : 합의된 입력 전체(upstream + 대상 문서 + [USER-QUESTION]). PASS 가 현재 입력에 대한 것인지.
+#   pass     : 합의된 입력 전체(upstream + 대상 문서 + target 범위의 [USER-QUESTION]). PASS 가 현재 입력에 대한 것인지.
+# [USER-QUESTION] 의 의존성 범위(scope) — downstream 은 upstream 결정을 상속하지만 upstream 은 downstream 결정을 보지 않는다:
+#   design ← [USER-QUESTION][scope=design]
+#   impl   ← [USER-QUESTION][scope=design] + [USER-QUESTION][scope=impl]
+# 그래서 impl 합의 중 사용자가 검증자 요구를 기각한 결정(scope=impl)은 이미 PASS 한 design 을 무효화하지 않는다.
+# scope 없는 옛 형식 `- [USER-QUESTION] ...` 은 어느 단계의 결정인지 코드가 추론할 수 없으므로 여기서 추정하지 않는다 —
+# 러너·합의 루프가 LLM 호출 전에 DECISION_SCOPE_REQUIRED 로 멈추고 사용자가 태그를 명시한다(consensus_unscoped_user_decisions).
 _fingerprint_files() { # file... → NUL 구분 내용 스트림
   for file in "$@"; do
     [ -f "$file" ] || continue
     printf '%s\0' "$file"; cat "$file"; printf '\0'
   done
 }
-_user_decisions() {
-  printf 'decisions:USER-QUESTION\0'
-  if [ -f "$WORK_DIR/decisions.md" ]; then grep -E '^\s*- \[USER-QUESTION\]' "$WORK_DIR/decisions.md" || true; fi
+# decisions.md 에서 scope 없는 옛 형식의 사용자 결정 줄 → stdout (없으면 빈 출력). LLM 호출 전 preflight 가 쓴다.
+consensus_unscoped_user_decisions() {
+  [ -f "$WORK_DIR/decisions.md" ] || return 0
+  grep -nE '^[[:space:]]*- \[USER-QUESTION\]' "$WORK_DIR/decisions.md" | grep -vE '^[0-9]+:[[:space:]]*- \[USER-QUESTION\]\[scope=(design|impl)\]' || true
+}
+# target 이 보는 사용자 결정 줄만 → NUL 구분 스트림 (지문 입력). [round N] ACCEPT/REJECT 같은 합의 이력은 넣지 않는다.
+consensus_user_decisions_for() { # design | impl
+  local pattern
+  case "$1" in
+    design) pattern='^[[:space:]]*- \[USER-QUESTION\]\[scope=design\]';;
+    impl) pattern='^[[:space:]]*- \[USER-QUESTION\]\[scope=(design|impl)\]';;
+    *) echo "[FAIL] consensus_user_decisions_for: 대상은 design 또는 impl 이어야 함: '$1'" >&2; return 1;;
+  esac
+  printf 'decisions:USER-QUESTION:%s\0' "$1"
+  if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "$pattern" "$WORK_DIR/decisions.md" || true; fi
+  printf '\0'
 }
 consensus_editable_fingerprint() { # design | impl
   { consensus_docs_for "$1" | while IFS= read -r file; do _fingerprint_files "$file"; done; } | sha256_stdin
@@ -719,19 +743,21 @@ consensus_upstream_fingerprint() { # design | impl
       design) _fingerprint_files "$WORK_DIR/request.md";;
       impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
     esac
-    _user_decisions
+    consensus_user_decisions_for "$1"
   } | sha256_stdin
 }
 # PASS 지문: 합의된 '입력'이 여전히 같은지 확인하는 용도. request/design(/implementation/approach) 전체와
-# decisions.md 중 사용자 정책 결정([USER-QUESTION]) 줄만 — 이후 수정자·디자이너의 판정 기록이 쌓여도
-# 이전 PASS 가 불필요하게 무효화되지 않게 한다.
+# decisions.md 중 이 target 범위의 사용자 정책 결정([USER-QUESTION][scope=…]) 줄만 — 이후 수정자·디자이너의 판정 기록이
+# 쌓이거나 downstream 단계의 사용자 결정이 추가돼도 이전 PASS 가 불필요하게 무효화되지 않게 한다.
+# decisions.md 전체를 넣지 않는다(합의 이력이 PASS 를 깨면 안 됨). 반대로 사용자 결정을 아예 빼지도 않는다 — 문서 변경 없이
+# 검증자 요구를 기각한 결정이 합의 입력에서 빠지면 옛 PASS 가 그대로 재사용되는 다른 stale-cache 문제가 생긴다.
 consensus_pass_fingerprint() { # design | impl
   {
     case "$1" in
       design) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
       impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json";;
     esac
-    _user_decisions
+    consensus_user_decisions_for "$1"
   } | sha256_stdin
 }
 # (impl PASS 지문에 feature-scope.json · implementation-units.json 원본을 넣는다 — 사용자가 범위나 구현 단위를 바꾸면 워커 재진입 전에 impl 재합의를 거치게 한다)
@@ -789,17 +815,106 @@ verify_approved_fingerprint() {
   echo "승인 지문 일치 — 마지막 APPROVE 이후 변경 없음."
 }
 
-# claude --output-format json 결과에서 사용량을 $WORK_DIR/usage.jsonl 에 누적.
-# 필수 필드가 없으면 null 을 조용히 쌓지 않고 경고 후 생략한다.
-log_claude_usage() {
-  local label="$1" result_file="$2"
+# =============================================================
+# usage telemetry — $WORK_DIR/usage.jsonl
+#   한 행 = CLI invocation 한 번의 관측값(세션 누계 아님). 같은 session 이 여러 행에 나와도 각 행은 독립된 실행 결과다.
+#   writer 는 append-only 원시 기록만 한다 — session 별 delta·누적 total·가격 추정은 하지 않는다(집계는 usage_summary 참고).
+#   null = "관측 불가"(0 이 아님). CLI 마다 노출 가능한 필드가 달라 codex 는 tokens_total 만 채운다.
+#   input_effective = input_uncached + cache_read + cache_write — 진단용 파생값이지 provider billing 공식 필드가 아니다.
+#   cache_read 는 invocation 안의 model turn 들에서 읽힌 cache 누계일 수 있으므로 num_turns 와 함께 해석한다.
+#   CLI 종료 성공/실패와 무관하게 파싱 가능한 telemetry 가 있으면 기록한다(exit_code/success). 파싱 불가면 WARN 후 생략.
+# =============================================================
+USAGE_SCHEMA_VERSION=2
+
+new_invocation_id() { # 호출 직전 생성. 같은 label 재시도를 구분한다
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
+  else printf '%s-%s-%s' "$(date +%s)" "$$" "$RANDOM$RANDOM"; fi
+}
+
+# claude --output-format json 결과 파일 → 행 1개.  usage 핵심 필드(usage.input_tokens)가 없으면 경고 후 생략(pipeline 실패 아님).
+log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
+  local label="$1" role="$2" model="$3" result_file="$4" rc="${5:-0}" inv="${6:-}"
+  [ -n "$inv" ] || inv="$(new_invocation_id)"
   if ! jq -e '.usage.input_tokens != null' "$result_file" >/dev/null 2>&1; then
     echo "[WARN] usage 필드 없음 — 기록 생략: $result_file" >&2
     return 0
   fi
-  jq -c --arg label "$label" \
-    '{label: $label, session: .session_id, cost_usd: .total_cost_usd, in: .usage.input_tokens, out: .usage.output_tokens, cache_read: .usage.cache_read_input_tokens, cache_write: .usage.cache_creation_input_tokens}' \
-    "$result_file" >> "$WORK_DIR/usage.jsonl"
+  jq -c --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" \
+    --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
+    {
+      schema_version: $v,
+      invocation_id: $inv,
+      label: $label, role: $role, cli: "claude", model: $model,
+      session: (.session_id // null),
+      cost_usd: (.total_cost_usd // null),
+      input_uncached: (.usage.input_tokens // null),
+      cache_read: (.usage.cache_read_input_tokens // 0),
+      cache_write: (.usage.cache_creation_input_tokens // 0),
+      output: (.usage.output_tokens // null),
+      input_effective: ((.usage.input_tokens // 0) + (.usage.cache_read_input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
+      tokens_total: null,
+      num_turns: (.num_turns // null),
+      duration_ms: (.duration_ms // null),
+      duration_api_ms: (.duration_api_ms // null),
+      exit_code: $rc, success: ($rc == 0),
+      source: "claude-result",
+      recorded_at: $now
+    }' "$result_file" >> "$WORK_DIR/usage.jsonl"
+}
+
+# codex exec 로그(stdout/stderr) → 행 1개. 안정적으로 파싱되는 값은 "tokens used" 다음 줄의 총합뿐이라 tokens_total 만 채우고
+# input/output/cache 는 null 로 둔다(regex 로 의미를 추측하지 않는다). 마지막 "tokens used" 블록을 쓴다.
+log_codex_usage() { # label role model log_file [exit_code] [invocation_id]
+  local label="$1" role="$2" model="$3" log_file="$4" rc="${5:-0}" inv="${6:-}" total
+  [ -n "$inv" ] || inv="$(new_invocation_id)"
+  total="$(grep -A1 -x 'tokens used' "$log_file" 2>/dev/null | grep -v -x 'tokens used' | grep -v '^--$' | tail -1 | tr -d ', \r')"
+  if ! printf '%s' "$total" | grep -Eq '^[0-9]+$'; then
+    echo "[WARN] codex 로그에 'tokens used' 없음 — 기록 생략: $log_file" >&2
+    return 0
+  fi
+  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" \
+    --argjson total "$total" --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
+    {
+      schema_version: $v,
+      invocation_id: $inv,
+      label: $label, role: $role, cli: "codex", model: $model,
+      session: null,
+      cost_usd: null,
+      input_uncached: null, cache_read: null, cache_write: null, output: null, input_effective: null,
+      tokens_total: $total,
+      num_turns: null, duration_ms: null, duration_api_ms: null,
+      exit_code: $rc, success: ($rc == 0),
+      source: "codex-log",
+      recorded_at: $now
+    }' >> "$WORK_DIR/usage.jsonl"
+}
+
+# 공통 진입점 — 모든 역할 invocation 이 여기를 지나 기록 누락을 막는다.
+log_role_usage() { # cli role model label raw_or_log_path [exit_code] [invocation_id]
+  local cli="$1"; shift
+  case "$cli" in
+    claude) log_claude_usage "$3" "$1" "$2" "$4" "${5:-0}" "${6:-}" ;;
+    codex)  log_codex_usage  "$3" "$1" "$2" "$4" "${5:-0}" "${6:-}" ;;
+    *) echo "[WARN] usage 기록: 알 수 없는 cli '$cli'" >&2 ;;
+  esac
+}
+
+# 파생 집계(별도 명령). legacy 행(in/out)도 읽는다. 사용: usage_summary [usage.jsonl]
+# cost_usd 는 cost 를 보고한 행의 합이며 cost_unknown_invocations(codex 등 cost null)만큼 전체 비용보다 작다.
+usage_summary() {
+  local f="${1:-$WORK_DIR/usage.jsonl}"
+  [ -s "$f" ] || { echo '{}'; return 0; }
+  jq -s '{
+    invocations: length,
+    cost_usd: (map(.cost_usd // 0) | add),
+    cost_unknown_invocations: (map(select(.cost_usd == null)) | length),
+    input_uncached: (map(.input_uncached // .in // 0) | add),
+    cache_read: (map(.cache_read // 0) | add),
+    cache_write: (map(.cache_write // 0) | add),
+    output: (map(.output // .out // 0) | add),
+    tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),
+    by_role: (group_by(.role // "legacy") | map({key: (.[0].role // "legacy"), value: {invocations: length, cost_usd: (map(.cost_usd // 0) | add), cache_read: (map(.cache_read // 0) | add)}}) | from_entries)
+  }' "$f"
 }
 
 # =============================================================

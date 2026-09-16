@@ -64,6 +64,9 @@ VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1
 echo "검증자: $VALIDATOR_MODEL / effort=$VALIDATOR_EFFORT / profile=$(validator_profile)"
 mkdir -p "$WORK_DIR/reviews"
 touch "$WORK_DIR/decisions.md"
+# scope 없는 옛 형식의 사용자 결정은 어느 단계 지문에 넣을지 추정하지 않는다 — 유료 호출 전에 중단(러너 preflight 와 같은 검사).
+unscoped_decisions="$(consensus_unscoped_user_decisions)"
+[ -z "$unscoped_decisions" ] || { echo "[FAIL] DECISION_SCOPE_REQUIRED: decisions.md 에 scope 없는 [USER-QUESTION] 줄이 있음 — '[USER-QUESTION][scope=design]' 또는 '[USER-QUESTION][scope=impl]' 로 직접 고친 뒤 재실행. 해당 줄: $(printf '%s' "$unscoped_decisions" | paste -sd'|' -)" >&2; exit 1; }
 
 SCHEMA_FILE="$SKILL_DIR/schemas/spec-review.schema.json"
 [ -f "$SCHEMA_FILE" ] || { echo "[FAIL] 스키마 없음: $SCHEMA_FILE" >&2; exit 1; }
@@ -244,7 +247,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # ASK_USER: 문서 재작성으로 풀리지 않는 문제(범위 밖 공용 컴포넌트 수정·제품 정책 선택)는 디자이너를 거치지 않고 즉시 사용자에게
   ask_ids=$(jq -r '[.blocking_issues[] | select(.action=="ASK_USER") | .id] | join(",")' "$review")
   if [ -n "$ask_ids" ]; then
-    echo "[STOP] 검증자가 사용자 결정을 요구함($ask_ids). user_question / options 를 사용자에게 그대로 전달." >&2
+    echo "[STOP] 검증자가 사용자 결정을 요구함($ask_ids). user_question / options 를 사용자에게 그대로 전달. 답은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록." >&2
     jq -n --arg t "$TARGET" --arg i "$ask_ids" --arg r "$review" '{phase:$t, status:"ASK_USER", issues:$i, review:$r}' > "$WORK_DIR/state.json"
     reset_consensus_checkpoint
     exit 2
@@ -253,7 +256,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # 교착 감지: 이슈 '내용'까지 동일한 집합이 2라운드 연속이면 사람에게 에스컬레이션
   # (같은 id라도 reachable_scenario/minimum_contract_needed 가 달라지면 진전 중으로 본다)
   if [ -n "$ids" ] && [ "$fingerprint" = "$prev_fingerprint" ]; then
-    echo "[STOP] 동일 이슈($ids)가 내용 변화 없이 2라운드 연속 반복됨. 사용자 판단 필요." >&2
+    echo "[STOP] 동일 이슈($ids)가 내용 변화 없이 2라운드 연속 반복됨. 사용자 판단 필요 — 답은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록." >&2
     jq -n --arg t "$TARGET" --arg i "$ids" '{phase:$t, status:"DEADLOCK", issues:$i}' > "$WORK_DIR/state.json"
     reset_consensus_checkpoint
     exit 2
@@ -292,7 +295,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   fi # DESIGNER_PENDING
 done
 
-echo "[STOP] $MAX_SPEC_ROUNDS 라운드 내 수렴 실패. 쟁점을 사용자에게 보고하고 중단." >&2
+echo "[STOP] $MAX_SPEC_ROUNDS 라운드 내 수렴 실패. 쟁점을 사용자에게 보고하고 중단 — 사용자 결정은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록(검증자 요구를 기각한 경우도 같은 형식, 체크포인트·리뷰 JSON 수동 편집 없음)." >&2
 jq -n --arg t "$TARGET" '{phase:$t, status:"MAX_ROUNDS_EXCEEDED"}' > "$WORK_DIR/state.json"
 reset_consensus_checkpoint
 exit 2
