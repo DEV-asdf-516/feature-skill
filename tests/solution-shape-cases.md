@@ -55,3 +55,5 @@ approach.md 를 쓴 뒤 REQUIRED 항목마다 다음을 확인한다.
 검증자는 반대 방향을 본다: 접근법이 갈리는 결정이 DELEGATED 로 남아 있으면 갈리는 접근법 둘과 영향 하나를 basis_refs 와 함께 적어 REVISE_DOC 으로 올리되, 어느 접근법을 고를지는 처방하지 않는다. 워커는 그런 결정을 문서와 직접 범위의 precedent 어디서도 찾지 못하면 스스로 고르지 않고 `DOC_GAP` 으로 돌려보낸다. 검증자와 워커가 둘 다 놓쳐 워커가 접근법을 골라 버린 경우 리뷰어가 `UNDECIDED_APPROACH` + `DOC_GAP` 으로 문서 단계로 되돌린다 — 리뷰어도 어느 접근법이 나은지는 적지 않는다.
 
 실제 검증자가 이 경계를 잡는지는 `validator-cases/case-09-approach-undecided-scan`(BLOCK)·`case-10-expression-only-delegated`(PASS) 가, 리뷰어가 마지막 방어선으로 잡는지는 `reviewer-cases/case-12-undecided-approach`(REQUEST_CHANGES / UNDECIDED_APPROACH / DOC_GAP) 가 고정한다.
+
+재사용 vs 새 구현이 solution shape 의 일부이므로 새 구조물(repository·service·helper·converter·query/변환 경로)을 도입하는 결정은 `REUSE / EXTEND / NEW` 를 명시하고, NEW 에는 같은 모듈·직접 의존 코드에서 확인한 symbol·가장 가까운 후보·REUSE/EXTEND 불가 이유를 적는다. 근거 없는 NEW 는 검증자 `REUSE_DISCOVERY_GAP`(`validator-cases/case-11`, BLOCK), 근거 있는 NEW 는 통과(`case-12`, PASS), REUSE 로 정해진 symbol 옆의 병렬 구현은 리뷰어 `CONTRACT_VIOLATION`(`reviewer-cases/case-13`) 이 고정한다.

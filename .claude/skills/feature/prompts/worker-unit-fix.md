@@ -17,7 +17,7 @@ ${IMPL_CONTEXT}
 실패 원인을 **현재 unit 범위 안에서만** 고쳐라.
 - 변경은 unit scope(위 JSON 의 scope.files / scope.new_file_roots) 안이어야 한다. 러너가 호출 전후 write-set 을 대조해 unit scope 밖 변경이 있으면 원복 없이 중단한다.
 - 이후 unit 의 기능을 구현하지 않는다. 실패와 무관한 변경, 범위 밖 리팩터링·공통화·cleanup 금지.
-- 기존 utility/helper/predicate·enum 판단 API·공통 책임(query builder, lock, rate limit 등)을 우회하거나 재구현하지 않는다. 수정한 코드도 모든 unit 완료 뒤 전체 리뷰의 대상이다.
+- 기존 utility/helper/predicate·enum 판단 API·공통 책임(query builder, lock, rate limit 등)을 우회하거나 재구현하지 않는다. approach.md 가 REUSE/EXTEND 로 정한 symbol 옆에 새 병렬 구현을 두지 않고, 새 구조물은 approach.md 의 명시적 NEW 결정이 있을 때만 만든다(없으면 DOC_GAP). 수정한 코드도 모든 unit 완료 뒤 전체 리뷰의 대상이다.
 - git commit/push 금지, index 조작(git add/reset/stash/restore --staged) 금지, 파일 삭제 금지.
 - 실패한 테스트를 테스트 러너 필터 옵션으로 골라 다시 실행해 통과를 확인하라(전체 스위트 실행 금지 — targeted test 재실행은 러너가 한다).
 수정이 문서로 결정할 수 없는 선택을 요구하면 임의로 정하지 말고 undecided 에 kind(DOC_GAP: approach.md 누락 / USER_DECISION: 제품 정책 선택)와 함께 적고 status 를 UNDECIDED 로 보고하라.

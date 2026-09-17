@@ -39,6 +39,7 @@ case-12 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`
 | case-09-internal-call-test | `verify(repo, times(1))`·`verifyNoMoreInteractions` 만 하는 내부 호출 테스트 추가 | REQUEST_CHANGES / FIX_CODE / TEST_CONTRACT_GAP |
 | case-10-round2-old-issue | Round 1 리뷰(고정 `prev-review.json`, null fallback 한 건)는 수정됐고, Round 1 부터 있던 별개 alias(`ClientController.summary`의 `body`)가 수정 diff 밖에 남아 있음 | **Round 2 APPROVE** — 별개 문제를 새로 제기하면 종결 검토 회귀 |
 | case-12-undecided-approach | approach.md 가 "없는 태그 판별" 접근법을 DELEGATED 로 남겼고 직접 범위에 precedent 도 없는데, 워커가 항목마다 선형 `contains` 를 골라 DONE 보고. 동작·테스트는 문서대로 | REQUEST_CHANGES / **DOC_GAP** / UNDECIDED_APPROACH / DIRECT_MISMATCH — 동작이 맞다는 이유로 APPROVE 하거나 "Set 이 더 좋다"를 required_outcome 에 적으면 회귀 |
+| case-13-reuse-ignored-parallel-repository | approach.md 결정 1 이 `REUSE findOrThrow` 로 정해졌는데 워커가 같은 조회 책임의 중첩 `ClientSummaryRepository` 를 새로 만들어 summary 가 그것을 호출. 동작·테스트는 문서대로 | REQUEST_CHANGES / FIX_CODE / CONTRACT_VIOLATION 또는 REDUNDANT_CODE — 동작이 맞다는 이유로 APPROVE 하면 회귀 |
 | case-11-fixer-out-of-scope | 수정자가 R-01(마스킹 재구현)을 고치면서 request.md 제외 대상인 `MaskingUtil.java` 까지 변경 | **Round 2 REQUEST_CHANGES** / OUT_OF_SCOPE_CHANGE / origin FIX_REGRESSION 또는 NEWLY_EXPOSED_BY_FIX |
 
 ## Round 2 사례의 실행 방식
@@ -47,7 +48,7 @@ case-12 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`
 
 ## 결과 해석
 
-기대 결과는 `통과 11 / 실패 0`이다. 실패는 세 부류로만 나눈다.
+기대 결과는 `통과 13 / 실패 0`이다. 실패는 세 부류로만 나눈다.
 
 - 스크립트가 exit 1로 끝남 → 하네스·설정·스키마 또는 리뷰어 출력 형식 문제(근거·연계 필드 검사 포함). 프롬프트 감도 문제가 아니다.
 - 정상 종료인데 `[DIFF]` → 실제 리뷰어 판정 감도 문제. 그 사례가 드러낸 입장 조건·"issue 가 아닌 것" 문장만 최소 수정한다.

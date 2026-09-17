@@ -25,11 +25,11 @@ ${IMPL_CONTEXT}
 1. 현재 unit 의 goal / requirements 만 구현한다.
 2. unit scope(위 JSON 의 scope.files / scope.new_file_roots) 밖을 수정하지 않는다. 러너가 호출 전후 write-set 을 대조해 unit scope 밖(전체 feature 범위 안이라도) 변경이 있으면 원복 없이 중단하고 사람에게 보고한다. 범위 밖 파일에 기존 변경이 보여도 되돌리지 마라(다른 세션·앞선 unit 의 작업일 수 있다).
 3. 이후 unit 의 기능을 선행 구현하지 않는다. "어차피 필요할" 코드도 이번 unit 의 requirements 에 없으면 쓰지 않는다.
-4. 기존 코드와 앞선 unit 구현을 우선 재사용한다. 이번 unit 이 필요로 하는 의미(판정·변환·조회)를 기존 코드가 이미 제공하면 그것을 호출한다.
+4. 기존 코드와 앞선 unit 구현을 우선 재사용한다. 이번 unit 이 필요로 하는 의미(판정·변환·조회)를 기존 코드가 이미 제공하면 그것을 호출한다. 그 후보는 같은 모듈·직접 의존 코드 안에서 현재 구현 책임과 같은 symbol(repository·service·utility·query·converter 등)을 능동적으로 찾아 확인한다 — 저장소 전체의 유사 코드 탐색은 하지 않는다.
 5. 기존 utility/helper/predicate 가 제공하는 의미를 직접 조건식으로 재구현하지 않는다.
 6. 기존 enum/status 판단 API 가 있으면 `x == A || x == B || x == C` 식의 직접 나열로 다시 만들지 않는다.
 7. 기존 responsibility placement 를 우회하지 않는다 — 데이터를 소유한 객체가 해야 할 판단을 getter 로 꺼내 service/caller 에서 직접 하지 않는다. 기존 query builder·version lock·request lock·rate limit 같은 공통 책임을 직접 재구현하거나 우회하지 않는다.
-8. 기존 reference pattern(프롬프트의 [REFERENCE CODE], approach.md 가 인용한 참조 구현)과 다른 구조가 필요하면 임의로 진행하지 않는다.
+8. 기존 reference pattern(프롬프트의 [REFERENCE CODE], approach.md 가 인용한 참조 구현)과 다른 구조가 필요하면 임의로 진행하지 않는다. approach.md 가 REUSE 또는 EXTEND 로 정한 기존 symbol 옆에 같은 책임의 새 구조·병렬 구현을 만드는 것은 명백한 계약 위반이다. 새 class·repository·service·helper·converter·query/변환 경로가 필요한데 approach.md 에 명시적 NEW 결정과 탐색 근거(확인한 symbol·가장 가까운 후보·REUSE/EXTEND 가 안 되는 이유)가 없으면 만들지 않고 규칙 9 의 DOC_GAP 으로 보고한다.
 9. 문서에 없는 동작 분기나 solution-shape 결정(해결 전략, 주요 데이터/제어 흐름, 비용 특성, 재사용 vs 새 구현, 새 구조물 필요 여부, 실패 방식)이 필요하면 그 부분은 손대지 않은 채 결과 JSON 의 undecided 에 위치·필요한 결정·후보를 적고 status 를 UNDECIDED 로 보고한다. kind 는 **DOC_GAP**(제품 동작은 design.md/implementation.md 에 정해져 있는데 approach.md 에 그 분기·방식만 빠짐 — 문서 작성자가 보강한다) 또는 **USER_DECISION**(어느 문서에도 없고 두 동작 모두 요구사항상 가능해 제품 정책 선택이 필요함 — 사용자에게 간다). 애매하면 DOC_GAP. 직접 범위(같은 모듈·직접 의존 코드)에 같은 종류의 문제를 푸는 명백한 단일 precedent 가 있으면 그것이 접근법이므로 DOC_GAP 을 내지 않고 따른다.
 10. 범위 밖 리팩터링, 공통화, adjacent cleanup 을 하지 않는다. 앞선 unit 의 코드가 마음에 들지 않아도 이번 unit 의 requirements 가 요구하지 않으면 건드리지 않는다.
 

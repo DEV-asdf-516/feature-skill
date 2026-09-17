@@ -45,8 +45,15 @@ def main():
     del allowed['issues'][0]['category']
     assert compare({'verdict': 'BLOCK', 'blocking_issues': [required]}, allowed)
 
+    schema = json.loads((ROOT / '.claude/skills/feature/schemas/spec-review.schema.json').read_text())
+    issue_props = schema['properties']['blocking_issues']['items']['properties']
+    assert 'REUSE_DISCOVERY_GAP' in issue_props['category']['enum']
     for case in sorted(CASES.glob('case-*')):
         exp = json.loads((case / 'expected.json').read_text())
+        for issue in exp['issues']:  # expected 라벨은 스키마 enum 안의 값이어야 한다
+            for field in ('action', 'category', 'evidence_type', 'origin'):
+                for value in [issue[field]] if field in issue else issue.get(field + '_any_of', []):
+                    assert value in issue_props[field]['enum'], (case, field, value)
         assert (case / 'input/request.md').is_file(), case
         assert (case / 'input/design.md').is_file(), case
         if exp['stage'] == 'impl':

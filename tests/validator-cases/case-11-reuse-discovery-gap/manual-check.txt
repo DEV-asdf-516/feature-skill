@@ -1,0 +1,1 @@
+conflict_refs 가 approach.md 결정 1 을 가리키고, minimum_contract_needed 가 "REUSE/EXTEND/NEW 판단과 탐색 근거(확인한 symbol, 가장 가까운 후보, REUSE/EXTEND 가 안 되는 이유)가 적혀야 한다" 만 요구하는지 — findOrThrow 를 쓰라거나 새 repository 가 나쁘다는 처방이 없는지 확인

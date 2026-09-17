@@ -223,7 +223,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
        WORKER_RESULT="$WORK_DIR/worker-result.json" PREV_CONTEXT="$prev_context" REVIEWER_CONTRACT_VERSION="$REVIEWER_CONTRACT_VERSION" \
       render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION}')"
   # 리뷰어 CLI 는 REVIEWER_MODEL 로 라우팅. 결과 JSON 은 $review, 원문은 $review.raw(claude) / $review.log(codex).
-  run_readonly_json_role REVIEWER reviewer "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
+  run_readonly_json_role REVIEWER "reviewer-a$attempt_tag" "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
     || exit 1
   jq -e '.verdict' "$review" >/dev/null 2>&1 \
     || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
@@ -333,7 +333,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
       render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE}')"
   set +e
   # 수정자 CLI 는 FIXER_MODEL 로 라우팅(codex 는 --sandbox workspace-write, claude 는 acceptEdits + Bash 허용).
-  run_edit_role FIXER fixer "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
+  run_edit_role FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
   fixer_rc=$?
   set -e
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료해도 재실행 가드는 남아야 한다

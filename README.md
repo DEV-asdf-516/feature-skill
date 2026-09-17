@@ -133,7 +133,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 ├── settings.json                # claude 훅 등록
 ├── hooks/
 │   ├── core_rules.md            # 워커에게만 주입되는 필수 구현 규칙 (프로젝트에 맞게 수정)
-│   ├── inject_conventions.sh    # UserPromptSubmit: 선택적 프로젝트 규범 주입
+│   ├── inject_conventions.sh    # UserPromptSubmit: 선택적 프로젝트 규범을 세션당 1회 주입 (파이프라인 child 는 제외)
 │   └── pre_bash_guard.sh        # 지시 없는 git commit/push 차단 (ALLOW_COMMIT 플래그)
 └── skills/feature/
     ├── SKILL.md                 # 파이프라인 정의 (Phase 0 ~ 4, 강제 규칙)
@@ -152,10 +152,10 @@ tests/
 ├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩·finalize 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건·3-way 반영·충돌·archive·정리
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
-├── validator-cases/             # 고정 픽스처 13개 (문서·src·expected.json)
+├── validator-cases/             # 고정 픽스처 15개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
 ├── reviewer-cases.md            # 리뷰어 판정 감도 회귀 세트 설명
-├── reviewer-cases/              # 고정 픽스처 12개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
+├── reviewer-cases/              # 고정 픽스처 13개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
 ├── reviewer-regression.sh       # 실제 리뷰어 모델로 회귀 실행 (리뷰어 프롬프트·스키마 변경 시)
 └── solution-shape-cases.md      # REQUIRED/DELEGATED 판정 사례 10개 — 과잉 설계·과잉 위임 양쪽 경계
 
@@ -181,6 +181,11 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 
 1. 이 저장소의 `.claude/` 와 `.codex/` 를 대상 저장소 루트에 복사한다.
    이미 `.claude/settings.json` 이 있으면 hooks 항목을 병합한다.
+   기존 설치를 갱신할 때 `.claude/hooks/inject_conventions.sh` 가 구버전(매 UserPromptSubmit 마다 `conventions.md` 전체 주입)이면
+   `install.sh` 가 `[WARN]` 과 함께 `inject_conventions.sh.new` 를 둔다. 새 훅은 interactive 오케스트레이터 세션당 첫 프롬프트에만 주입하고
+   (`session_id` 별 마커, `$TMPDIR/claude-conventions-injected/`), 파이프라인 child Claude(`FEATURE_ROLE_CHILD=1`)에는 주입하지 않는다 —
+   child 는 `run_readonly_json_role`/`run_edit_role` 이 conventions 를 이미 명시 전달하므로 훅까지 넣으면 turn 마다 중복 cache read 가 생긴다.
+   커스터마이즈가 없으면 `.new` 로 덮어쓰면 된다.
 2. `.claude/skills/feature/config.sh` 의 `CHANGE_ME` 를 채운다.
    ```bash
    DESIGNER_MODEL="<디자이너 모델>"
@@ -258,6 +263,8 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 
 `usage.jsonl` 한 행 = CLI invocation 한 번의 관측 telemetry. 세션 누계가 아니며, 같은 Claude 세션을 `--resume`해도 행은 invocation 별로 기록한다.
 writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·가격 추정을 하지 않는다. 집계는 그 위에서 한다(`usage_summary` 또는 아래 jq).
+Claude 세션은 stage/attempt 단위다(`designer-design`/`designer-impl`, `validator-design`/`validator-impl`, `reviewer-a01`, `fixer-a01`, `worker-unit-<id>`) —
+같은 stage/attempt 안의 라운드·재시도만 `--resume` 하고, 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
 
 ```json
 {"invocation_id":"…","label":"impl-review-a01-round-01","role":"REVIEWER","cli":"claude","model":"claude-sonnet-5","session":"…",
@@ -270,6 +277,19 @@ writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·
 - CLI 별로 노출 가능한 telemetry 가 다르다. `null` 은 0 이 아니라 "관측 불가" 다. codex 는 로그의 `tokens used` 총합만 `tokens_total` 에 기록하고 나머지는 `null`(`source: codex-log`).
 - CLI 가 실패해도 파싱 가능한 usage 가 있으면 `exit_code`/`success` 와 함께 기록한다. 같은 `label` 이 재시도되면 행이 여러 개이며 `invocation_id` 로 구분한다.
 - 옛 행(`in`/`out`)은 rewrite 하지 않는다. `usage_summary` 는 두 형식을 함께 읽는다.
+- `usage_summary [usage.jsonl]` 은 전체와 `by_role`/`by_label`/`by_session` 그룹마다 `invocations`·`cost_usd`·`cache_read`·`num_turns`·`output`·`cache_read_per_turn`(cache_read 합 ÷ num_turns 합, num_turns 를 보고한 행만; 없으면 `null`)을 낸다. 어느 역할·호출·세션이 cache read 를 만드는지 보는 관측값이며 임계치·자동 세션 교체 같은 판단은 하지 않는다.
+
+**변경 전후 비용 측정.** `usage.jsonl` 은 러너가 부른 child invocation(디자이너·검증자·워커·리뷰어·수정자)의 telemetry 만 담는다 — interactive 오케스트레이터 세션 자체의 turn·cache read 는 여기에 없다. 그래서 두 층을 따로 비교한다.
+
+- 상위 오케스트레이터: CodeBurn 에서 같은 피처 A/B 실행의 turns·calls·cache read·비용을 본다(conventions 훅 변경의 효과는 이 층에만 나타난다).
+- 하위 역할(child): 같은 피처를 돌린 두 `usage.jsonl` 에 아래를 적용해 대조한다(세션 분리·child 중복 주입 제거의 효과는 이 층에 나타난다).
+
+성공 기준은 `cache_read` 단독 감소가 아니다. 세션을 stage/attempt 로 나누면 새 세션마다 저장소를 다시 읽으므로 `cache_write`·`input_uncached` 가 늘 수 있다. 동일 피처 A/B 실행의 총비용(CodeBurn 상위 + `cost_usd` 하위)·invocations/calls·num_turns·cache_read·cache_write·input_uncached 를 함께 놓고 총비용이 줄었는지로 판단한다.
+
+```bash
+bash -c 'source .claude/skills/feature/config.sh; usage_summary .agent-work/usage.jsonl' \
+  | jq '{invocations, num_turns, cache_read, cache_write, input_uncached, cache_read_per_turn, cost_usd, sessions: (.by_session|length), by_role}'
+```
 
 ```bash
 jq -s '{cost_usd: (map(.cost_usd // 0) | add), input_uncached: (map(.input_uncached // 0) | add),
@@ -304,6 +324,7 @@ bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제
 - **리뷰 단계가 `NEED_DOCS(APPROACH_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈를 냈다. `state.json.review`의 해당 이슈 `required_outcome`대로 approach.md 를 보강하고 재실행하면 검증자 재합의 → 워커 재개 순으로 진행된다.
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
 - **이전 피처 문맥이 섞임**: `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
+- **오케스트레이터에 conventions 가 안 보임**: 훅은 세션당 첫 프롬프트에만 넣는다(마커 `$TMPDIR/claude-conventions-injected/<session_id>`). 새 세션을 열거나 마커를 지우면 다시 주입된다. `FEATURE_ROLE_CHILD=1` 환경에서는 의도적으로 넣지 않는다.
 - **`[FINALIZE_CONFLICT]`**: 피처(B→F)와 원본(B→O)이 같은 부분을 바꿨다. 아무것도 반영되지 않았고 worktree·브랜치·index 도 그대로다. `finalize.json.conflict_files` 의 파일을 원본이나 worktree 에서 정리한 뒤(worktree 를 고쳤으면 러너 재실행으로 재승인) 같은 명령을 다시 낸다.
 - **`[FAIL] feature.json ... 에 finalize 기준선(bootstrap_tree)이 없다`**: version 1 metadata 의 `new-from-branch` worktree 처럼 생성 시점 tree 를 알 수 없는 경우. 기준선을 추측하지 않으므로 결과를 사람이 직접 옮긴다(worktree·브랜치 유지).
 - **`APPLIED_CLEANUP_INCOMPLETE`**: 원본 반영은 끝났고 되돌리지 않는다. `finalize.json.cleanup.error` 의 원인(브랜치가 다른 worktree 에 체크아웃, ref lock 등)을 해소하고 같은 명령을 다시 내면 정리만 재시도한다.
