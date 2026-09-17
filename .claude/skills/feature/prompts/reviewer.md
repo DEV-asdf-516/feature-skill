@@ -4,12 +4,12 @@ ${REFERENCE_CODE}
 
 **입력.** 이번 작업의 diff = ${DIFF_FILE}(워커 진입 직전 기준선 대비, feature-scope.json 범위 경로로 한정, 신규 파일 포함 — 기준선 이전의 미커밋 변경과 범위 밖 경로의 변경은 이번 작업이 아니며 diff 에 없다), 변경 파일 목록 = ${STATUS_FILE}. 기준 문서: ${WORK_DIR}/implementation.md(무엇 — 변경 파일·계약·테스트 목록), ${WORK_DIR}/approach.md(어떻게 — REQUIRED/DELEGATED 결정, 선택적 "제어 흐름" 절), 합의된 설계 ${WORK_DIR}/design.md, 요구 ${WORK_DIR}/request.md, 사용자 결정 ${WORK_DIR}/decisions.md. 워커 보고 ${WORKER_RESULT}(delegated_choices)는 참고 자료다 — 보고 누락 자체는 issue 가 아니며, 코드 위치를 근거로만 issue 를 낸다. 프롬프트 앞의 [REFERENCE CODE]는 approach.md 가 인용한 기존 코드이며 재사용 계약 확인용이다.
 
-**증거 탐색 범위.** diff 에 나온 파일, 문서가 직접 언급한 파일·심볼, 그 계약 확인에 반드시 필요한 직접 의존 코드까지만 연다. 저장소 전체 grep, 유사 사례 탐색, 잠재 결함 감사, 관련 없는 호출 경로 추적은 하지 않는다. 단, approach.md 가 재사용을 명시한 유틸·패턴이 실제로 쓰였는지 확인하는 범위에서만 해당 모듈을 열 수 있다.
+**증거 탐색 범위.** diff 에 나온 파일, 문서가 직접 언급한 파일·심볼, 그 계약 확인에 반드시 필요한 직접 의존 코드까지만 연다. 저장소 전체 grep, 유사 사례 탐색, 잠재 결함 감사, 관련 없는 호출 경로 추적은 하지 않는다. 단, approach.md 가 재사용(REUSE/EXTEND 표시 포함)을 명시한 유틸·패턴이 실제로 쓰였는지 확인하는 범위에서만 해당 모듈을 열 수 있다. 문서가 지정하지 않은 재사용 후보를 찾는 것은 리뷰어의 일이 아니다(그 책임은 approach.md 작성·검증 단계에 있다).
 
 **issue 입장 조건 — 여섯 가지를 모두 만족할 때만 issue 를 등록한다.**
 1. 이번 diff 가 새로 만들거나 직접 변경한 코드의 문제다. diff 밖 기존 코드의 결함은 이번 변경이 그것을 직접 활성화·악화한 경우에만 해당한다. approach.md 가 REQUIRED 로 지정한 기존 유틸·패턴을 그대로 호출했다는 사실만으로는 그 유틸 내부의 기존 결함을 이번 diff 의 issue 로 등록하지 않는다. 단, 이번 diff 가 그 유틸의 실패 경로로 이어지는 새로운 호출 경로(예: 새 외부 API)를 만들었고, 그 실패 입력·상태가 실제로 도달 가능하다는 근거 위치(데이터 계약·기존 검증·호출자 코드)와 위반되는 명시 계약을 모두 제시할 수 있으면 활성화된 기존 결함으로 등록한다(REACHABLE_FAILURE). 매개변수 타입상 가능하다는 추측만으로는 도달 가능성의 근거가 되지 않는다.
 2. 다음 중 하나다.
-   - CONTRACT_VIOLATION: implementation.md·approach.md 의 명시 계약 위반 — REQUIRED 결정과 다른 기법·구조, 재사용하라고 지정된 기존 유틸·참조 구현의 재구현, 문서에 열거된 분기의 누락, 지정된 계약(시그니처·반환·상태 결과)과 다른 구현.
+   - CONTRACT_VIOLATION: implementation.md·approach.md 의 명시 계약 위반 — REQUIRED 결정과 다른 기법·구조, 재사용하라고 지정된(REUSE/EXTEND 포함) 기존 유틸·참조 구현의 재구현이나 그 옆에 둔 같은 책임의 새 구조·병렬 구현(새 repository/service/helper/converter/조회·변환 경로), 문서에 열거된 분기의 누락, 지정된 계약(시그니처·반환·상태 결과)과 다른 구현.
    - UNDECLARED_BEHAVIOR: request.md·design.md·approach.md 어디에도 없는 외부 동작이나 상태 결과를 코드가 추가함 — 문서에 없는 null·빈값 방어, fallback, 호환 처리, 재시도, 타입별 분기, 미래 확장용 분기가 전형이다. "제어 흐름" 절이 있는 함수에서는 열거된 결정점 밖의 결정점 전부가 해당한다.
    - REACHABLE_BUG: 구체적으로 도달 가능한 입력·상태에서 문서가 정한 결과와 다르게 동작한다.
    - SECURITY_OR_DATA_RISK: 권한 우회, 비밀정보·개인정보 노출, 잘못된 영속 데이터·데이터 유실.

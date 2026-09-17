@@ -41,12 +41,12 @@ FIXER_CLI=""
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=11
+VALIDATOR_CONTRACT_VERSION=12
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
 # 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
-REVIEWER_CONTRACT_VERSION=8
+REVIEWER_CONTRACT_VERSION=9
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
@@ -198,8 +198,11 @@ snapshot_worktree_tree() {
   rm -f "$idx"
 }
 
-# 역할별 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
-# 라운드 사이 저장소 재탐색을 없애고 프롬프트 캐시를 살리기 위함.
+# 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
+# 세션 이름은 역할이 아니라 stage/attempt 단위다(designer-design, validator-impl, reviewer-a01, fixer-a01, worker-unit-<id>).
+# 같은 stage/attempt 안의 라운드·재시도만 이어가고(저장소 재탐색 없이 프롬프트 캐시 활용), 다른 stage/attempt 로는
+# 대화 문맥을 넘기지 않는다 — 상태 전달은 문서·JSON·체크포인트·지문으로만 한다. 넓은 세션은 turn 마다 누적 문맥을
+# 통째로 cache read 하므로 비용이 stage 수에 비례해 커진다.
 # 새 피처 시작 시 $WORK_DIR/.session-* 를 지워야 이전 피처 문맥이 섞이지 않는다.
 claude_session_args() {
   local role="$1"
@@ -282,7 +285,8 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
       local session_args conv_args=()
       [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
       session_args=$(claude_session_args "$session")
-      "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" \
+      # FEATURE_ROLE_CHILD=1: 프로젝트 UserPromptSubmit 훅(inject_conventions.sh)이 conventions 를 다시 넣지 않게 한다 — 여기서 이미 명시 전달.
+      FEATURE_ROLE_CHILD=1 "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" \
         ${conv_args[@]+"${conv_args[@]}"} \
         --tools "Read,Grep,Glob" \
         --disallowedTools "Bash,Edit,Write,NotebookEdit" \
@@ -321,7 +325,7 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
       [ -z "$schema" ] || schema_args=(--json-schema "$(cat "$schema")")
       session_args=$(claude_session_args "$session")
-      "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
+      FEATURE_ROLE_CHILD=1 "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
         ${conv_args[@]+"${conv_args[@]}"} \
         ${schema_args[@]+"${schema_args[@]}"} \
         "$@" --output-format json \
@@ -901,20 +905,35 @@ log_role_usage() { # cli role model label raw_or_log_path [exit_code] [invocatio
 
 # 파생 집계(별도 명령). legacy 행(in/out)도 읽는다. 사용: usage_summary [usage.jsonl]
 # cost_usd 는 cost 를 보고한 행의 합이며 cost_unknown_invocations(codex 등 cost null)만큼 전체 비용보다 작다.
+# by_role / by_label / by_session: 어느 역할·호출·Claude 세션이 cache read 를 만드는지 보는 그룹 합계(같은 지표 세트).
+# cache_read_per_turn = cache_read 합 / num_turns 합(num_turns 를 보고한 행만) — turn 당 다시 읽히는 문맥 크기의 근사치.
+# num_turns 가 하나도 없으면 null. 임계치·자동 판단은 두지 않는다(관측값만 제공).
 usage_summary() {
   local f="${1:-$WORK_DIR/usage.jsonl}"
   [ -s "$f" ] || { echo '{}'; return 0; }
-  jq -s '{
-    invocations: length,
-    cost_usd: (map(.cost_usd // 0) | add),
-    cost_unknown_invocations: (map(select(.cost_usd == null)) | length),
-    input_uncached: (map(.input_uncached // .in // 0) | add),
-    cache_read: (map(.cache_read // 0) | add),
-    cache_write: (map(.cache_write // 0) | add),
-    output: (map(.output // .out // 0) | add),
-    tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),
-    by_role: (group_by(.role // "legacy") | map({key: (.[0].role // "legacy"), value: {invocations: length, cost_usd: (map(.cost_usd // 0) | add), cache_read: (map(.cache_read // 0) | add)}}) | from_entries)
-  }' "$f"
+  jq -s '
+    def metrics: {
+      invocations: length,
+      cost_usd: (map(.cost_usd // 0) | add),
+      cache_read: (map(.cache_read // 0) | add),
+      num_turns: (map(.num_turns // 0) | add),
+      output: (map(.output // .out // 0) | add),
+      cache_read_per_turn: (
+        (map(select(.num_turns != null))) as $t
+        | if ($t | map(.num_turns) | add // 0) > 0
+          then (($t | map(.cache_read // 0) | add) / ($t | map(.num_turns) | add))
+          else null end)
+    };
+    def grouped(key): group_by(key) | map({key: (.[0] | key), value: metrics}) | from_entries;
+    metrics + {
+      cost_unknown_invocations: (map(select(.cost_usd == null)) | length),
+      input_uncached: (map(.input_uncached // .in // 0) | add),
+      cache_write: (map(.cache_write // 0) | add),
+      tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),
+      by_role: grouped(.role // "legacy"),
+      by_label: grouped(.label // "legacy"),
+      by_session: grouped(.session // "none")
+    }' "$f"
 }
 
 # =============================================================

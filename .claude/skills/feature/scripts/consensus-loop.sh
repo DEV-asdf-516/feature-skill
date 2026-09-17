@@ -189,7 +189,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" \
     render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT}')"$VALIDATOR_OVERLAY"
   # conventions 는 검증자 프롬프트 본문에 이미 렌더링돼 있으므로 "" 를 넘긴다.
-  run_readonly_json_role VALIDATOR validator "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
+  run_readonly_json_role VALIDATOR "validator-$TARGET" "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
     || exit 1
 
   verdict=$(jq -er '.verdict' "$review") || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
@@ -277,13 +277,13 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
 
   if [ "$next_step" = "DESIGNER_PENDING" ]; then
   # ---------- 디자이너 응답: 각 이슈 ACCEPT/REJECT + 문서 갱신 ----------
-  # 라운드 간 같은 세션을 이어가 저장소 재탐색 없이 프롬프트 캐시를 활용
+  # 같은 stage(design|impl) 의 라운드 사이에서만 세션을 이어간다 — 다른 stage 의 검증·설계 문맥은 문서/체크포인트로만 전달
   echo "--- 디자이너가 리뷰($(basename "$prev_review"))를 반영/반박합니다 ---"
   decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
   designer_result="$WORK_DIR/reviews/designer-$TARGET-round-$tag.raw"
   designer_prompt=$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
-  run_edit_role DESIGNER designer-doc "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" \
+  run_edit_role DESIGNER "designer-$TARGET" "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" \
     || { echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1; }
   echo "--- 디자이너 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'

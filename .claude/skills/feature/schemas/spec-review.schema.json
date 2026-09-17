@@ -4,7 +4,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [
-        10
+        12
       ]
     },
     "verdict": {
@@ -38,7 +38,8 @@
               "CHANGE_INTRODUCES_SECURITY_RISK",
               "CHANGE_INTRODUCES_DATA_RISK",
               "IMPLEMENTATION_IMPOSSIBLE",
-              "POLICY_UNDECIDED"
+              "POLICY_UNDECIDED",
+              "REUSE_DISCOVERY_GAP"
             ]
           },
           "change_relation": {

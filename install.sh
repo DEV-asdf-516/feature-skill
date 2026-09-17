@@ -84,6 +84,14 @@ mkdir -p "$TARGET_CLAUDE_HOOKS"
 for hook_script in inject_conventions.sh pre_bash_guard.sh; do
   install_user_editable "$SOURCE_ROOT/.claude/hooks/$hook_script" "$TARGET_CLAUDE_HOOKS/$hook_script"
 done
+# 마이그레이션: 옛 inject_conventions.sh 는 매 UserPromptSubmit 마다 conventions.md 전체를 주입하고 파이프라인 child Claude 에도
+# 중복 주입했다. 보존된 훅에 세션당 1회·child 제외 로직(FEATURE_ROLE_CHILD)이 없으면 .new 로 교체를 안내한다.
+if ! grep -q 'FEATURE_ROLE_CHILD' "$TARGET_CLAUDE_HOOKS/inject_conventions.sh"; then
+  echo "[WARN] $TARGET_CLAUDE_HOOKS/inject_conventions.sh 가 구버전(매 턴 주입)입니다."
+  echo "       매 턴·child Claude 중복 주입으로 cache read 가 커집니다. $TARGET_CLAUDE_HOOKS/inject_conventions.sh.new 로 교체하세요"
+  echo "       (커스터마이즈가 없다면 그대로 덮어써도 됩니다: 세션당 1회 주입 + FEATURE_ROLE_CHILD=1 이면 미주입)."
+  manual_steps=1
+fi
 install_user_editable "$SOURCE_ROOT/.claude/hooks/core_rules.md" "$TARGET_CLAUDE_HOOKS/core_rules.md"
 
 # ---------- 3. .claude/settings.json — 없으면 복사, 있으면 검사만 ----------

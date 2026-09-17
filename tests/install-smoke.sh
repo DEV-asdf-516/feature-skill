@@ -91,9 +91,24 @@ conventions_with_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TAR
 echo "$conventions_with_file" | grep -q '\[PROJECT CONVENTIONS\]' || fail "규칙 병합: conventions 구획 누락"
 echo "$conventions_with_file" | grep -q '프로젝트 컨벤션' || fail "규칙 병합: conventions.md 내용 누락"
 echo "$conventions_with_file" | grep -q '커스텀 규칙' && fail "규칙 분리: core_rules.md가 비워커 규칙에 포함됨"
-orchestrator_rules="$(CLAUDE_PROJECT_DIR="$TARGET" bash "$TARGET/.claude/hooks/inject_conventions.sh")"
+# 오케스트레이터 훅: 세션당 첫 프롬프트에만 주입(마커는 TMPDIR), 같은 session_id 재호출·--resume 은 무출력, 다른 세션은 다시 주입.
+# 파이프라인 child(FEATURE_ROLE_CHILD=1)는 새 세션이어도 무출력 — run_*_role 이 이미 명시 전달한다. session_id 없는 수동 실행은 매번 주입.
+HOOK_TMP="$SCRATCH/hook-tmp"; mkdir -p "$HOOK_TMP"
+run_conventions_hook() { # session-json → stdout
+  printf '%s' "$1" | CLAUDE_PROJECT_DIR="$TARGET" TMPDIR="$HOOK_TMP" bash "$TARGET/.claude/hooks/inject_conventions.sh"
+}
+orchestrator_rules="$(run_conventions_hook '{"session_id":"orch-1","prompt":"hi"}')"
 echo "$orchestrator_rules" | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: conventions.md 누락"
 echo "$orchestrator_rules" | grep -q '커스텀 규칙' && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
+[ -z "$(run_conventions_hook '{"session_id":"orch-1","prompt":"second turn"}')" ] || fail "오케스트레이터 규칙: 같은 세션 두 번째 턴에 conventions 가 다시 주입됨"
+run_conventions_hook '{"session_id":"orch-2"}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: 다른 세션에 주입되지 않음"
+[ -z "$(printf '%s' '{"session_id":"child-1"}' | FEATURE_ROLE_CHILD=1 CLAUDE_PROJECT_DIR="$TARGET" TMPDIR="$HOOK_TMP" bash "$TARGET/.claude/hooks/inject_conventions.sh")" ] \
+  || fail "child 중복 주입: FEATURE_ROLE_CHILD=1 인데 훅이 conventions 를 출력함"
+[ ! -e "$HOOK_TMP/claude-conventions-injected/child-1" ] || fail "child 중복 주입: child 호출이 세션 마커를 남김"
+run_conventions_hook '{}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: session_id 없는 호출이 주입하지 않음"
+run_conventions_hook '{}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: session_id 없는 재호출이 주입하지 않음"
+# run_*_role 의 claude 호출은 FEATURE_ROLE_CHILD=1 을 붙인다 (두 헬퍼 모두)
+[ "$(grep -c 'FEATURE_ROLE_CHILD=1 "\$CLAUDE_BIN" -p' "$TARGET_SKILL/config.sh")" = 2 ] || fail "child 중복 주입: run_readonly_json_role/run_edit_role 의 claude 호출에 FEATURE_ROLE_CHILD=1 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit.md" || fail "규칙 전달: unit 워커 프롬프트 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit-fix.md" || fail "규칙 전달: unit 수정 프롬프트 누락"
 grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
@@ -112,11 +127,14 @@ bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay'
 grep -Fq 'VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: consensus-loop 오버레이 로딩 누락"
 grep -Fq '"$VALIDATOR_OVERLAY"' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: 오버레이가 검증자 프롬프트에 붙지 않음"
 # conventions 는 역할 호출 헬퍼(config.sh)로 전달된다 — claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록.
-grep -Fq 'run_readonly_json_role REVIEWER reviewer' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+grep -Fq 'run_readonly_json_role REVIEWER "reviewer-a$attempt_tag"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
   && grep -Eq 'run_readonly_json_role REVIEWER .*"\$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && grep -Fq 'run_edit_role FIXER "fixer-a$attempt_tag"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
   && grep -Eq 'run_edit_role FIXER .*"\$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && grep -Fq 'run_readonly_json_role VALIDATOR "validator-$TARGET"' "$TARGET_SKILL/scripts/consensus-loop.sh" \
+  && grep -Fq 'run_edit_role DESIGNER "designer-$TARGET"' "$TARGET_SKILL/scripts/consensus-loop.sh" \
   && grep -Fq -- '--append-system-prompt "$conv"' "$TARGET_SKILL/config.sh" \
-  || fail "규칙 전달: 리뷰어/수정자 conventions 전달 누락"
+  || fail "규칙 전달: 리뷰어/수정자 conventions 전달 누락 또는 세션 이름이 stage/attempt 단위가 아님"
 # 역할 → CLI 라우팅: 모델 이름으로 claude/codex 를 고르고, <ROLE>_CLI 로 덮어쓸 수 있으며, 알 수 없는 이름은 실패한다.
 routing="$(bash -c 'source "$1"
   a=$(REVIEWER_MODEL=gpt-6-astra REVIEWER_CLI="" role_cli REVIEWER)
@@ -194,6 +212,20 @@ echo "$legacy_hook_output" | grep -q '레거시 inject_core_rules.sh' \
 echo "$legacy_hook_output" | grep -q 'inject_conventions.sh로 교체' \
   || fail "훅 마이그레이션: 교체 대상 안내 누락"
 echo "[OK] 5c. 레거시 core rules 훅 교체 안내"
+
+# ---------- 5d. 구버전 inject_conventions.sh(매 턴 주입) 보존 시 → 교체 경고 + .new ----------
+LEGACY_CONV_TARGET="$SCRATCH/legacy-conv"
+git init -q "$LEGACY_CONV_TARGET"
+mkdir -p "$LEGACY_CONV_TARGET/.claude/hooks"
+printf '%s\n' '#!/bin/bash' 'CONVENTIONS_FILE="$CLAUDE_PROJECT_DIR/conventions.md"' '[ -f "$CONVENTIONS_FILE" ] && cat "$CONVENTIONS_FILE"' 'exit 0' \
+  > "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh"
+legacy_conv_output="$(bash "$SOURCE_ROOT/install.sh" "$LEGACY_CONV_TARGET")"
+echo "$legacy_conv_output" | grep -q 'inject_conventions.sh 가 구버전(매 턴 주입)' || fail "훅 마이그레이션: 구버전 conventions 훅 경고 누락"
+[ -f "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh.new" ] || fail "훅 마이그레이션: inject_conventions.sh.new 미생성"
+grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh.new" || fail "훅 마이그레이션: .new 가 새 훅이 아님"
+grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh" && fail "훅 마이그레이션: 보존돼야 할 구버전 훅이 덮어써짐"
+echo "$legacy_conv_output" | grep -q '수동 병합 필요' || fail "훅 마이그레이션: 구버전 훅인데 완료 메시지가 수동 병합을 요구하지 않음"
+echo "[OK] 5d. 구버전 conventions 훅 → 교체 안내 + .new"
 
 # ---------- 6. .gitignore 중복 방지 ----------
 duplicate_count="$(grep -c '^\.agent-work/$' "$TARGET/.gitignore")"
@@ -477,6 +509,7 @@ chmod -x "$REVIEW_TARGET/feature-live"
 # 가짜 claude: FAKE_REVIEW 파일을 structured_output 으로 감싸 출력 (카운터·픽스처는 저장소 밖 — 지문 보호)
 printf '%s\n' \
   '#!/usr/bin/env bash' \
+  '[ "${FEATURE_ROLE_CHILD:-}" = 1 ] || { echo "child claude without FEATURE_ROLE_CHILD=1: $*" >&2; exit 9; }' \
   'jq -n -c --slurpfile r "$FAKE_REVIEW" '"'"'{structured_output: $r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'"'" \
   > "$REVIEW_SIDE/fake-claude"
 chmod +x "$REVIEW_SIDE/fake-claude"
@@ -510,6 +543,9 @@ run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",
 grep -q 'src/new.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" || fail "리뷰 루프: untracked 신규 파일이 리뷰 diff 에 없음"
 grep -q 'src/b.txt' "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-01/diff-round-01.patch" && fail "리뷰 루프: 기준선 이전 사용자 변경(b.txt)이 리뷰 diff 에 섞임"
 grep -q '리뷰 기준선: 워커 진입 직전 tree' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: 기준선 tree 를 쓰지 않음"
+# 세션은 stage/attempt 단위 — 리뷰어 세션 파일은 attempt 번호를 달고, 역할 전체를 잇는 옛 이름(.session-reviewer)은 생기지 않는다
+[ -f "$REVIEW_TARGET/.agent-work/.session-reviewer-a01" ] || fail "세션 범위: 리뷰어 세션이 attempt 단위(.session-reviewer-a01)가 아님"
+[ ! -e "$REVIEW_TARGET/.agent-work/.session-reviewer" ] || fail "세션 범위: 역할 전체를 잇는 .session-reviewer 가 생성됨"
 # (b) Round 1 인데 origin=FIX_REGRESSION → 연계 검사가 응답 오류로 거부 (exit 1)
 run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
 grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: origin 위반 거부 사유가 기록되지 않음"
@@ -567,6 +603,7 @@ status_before="$(cd "$REVIEW_TARGET" && git status --porcelain=v1 -- src/b.txt)"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   '# 리뷰어 호출: 1회차 FAKE_REVIEW, 2회차 FAKE_REVIEW2. 수정자 호출(--permission-mode): FAKE_FIX_CMD 를 실행하고 호출 사실을 기록' \
+  '[ "${FEATURE_ROLE_CHILD:-}" = 1 ] || { echo "child claude without FEATURE_ROLE_CHILD=1: $*" >&2; exit 9; }' \
   'case " $* " in *" --permission-mode "*) printf "fixer\n" >> "$FAKE_COUNT.fixer"; eval "${FAKE_FIX_CMD:-true}"; printf "%s\n" "{\"session_id\":\"fake\",\"total_cost_usd\":0,\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}"; exit "${FAKE_FIX_RC:-0}";; esac' \
   'n=$(( $(cat "$FAKE_COUNT" 2>/dev/null || echo 0) + 1 )); printf "%s" "$n" > "$FAKE_COUNT"' \
   'f="$FAKE_REVIEW"; [ "$n" -ge 2 ] && f="$FAKE_REVIEW2"' \
@@ -602,6 +639,10 @@ stage_rc=$?
 set -e
 [ "$stage_rc" = 1 ] || fail "index 검사: 수정자의 git add 가 중단(exit 1)으로 이어지지 않음 (exit $stage_rc)"
 grep -q '수정자가 git index 를 변경함' "$REVIEW_SIDE/run-stage.log" || fail "index 검사: 중단 사유가 기록되지 않음"
+# 수정자 세션도 attempt 단위. 이 사례의 attempt 번호는 리뷰 디렉터리에서 읽는다 (앞 사례들이 attempt 를 올렸을 수 있다)
+stage_attempt="$(ls -d "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-"* | sed 's/.*impl-attempt-//' | sort | tail -1)"
+[ -f "$REVIEW_TARGET/.agent-work/.session-fixer-a$stage_attempt" ] || fail "세션 범위: 수정자 세션이 attempt 단위(.session-fixer-a$stage_attempt)가 아님 ($(ls -a "$REVIEW_TARGET/.agent-work" | grep session | paste -sd, -))"
+[ ! -e "$REVIEW_TARGET/.agent-work/.session-fixer" ] || fail "세션 범위: 역할 전체를 잇는 .session-fixer 가 생성됨"
 [ "$(cd "$REVIEW_TARGET" && git status --porcelain=v1 -- src/b.txt)" = "M  src/b.txt" ] || fail "index 검사: 중단 시 index 를 임의로 복구함(자동 복구 금지)"
 (cd "$REVIEW_TARGET" && git restore --staged src/b.txt)   # 테스트 정리
 echo "[OK] 11b. 수정자 index 변경 → 결과 기준 중단, 자동 복구 없음"
@@ -806,7 +847,20 @@ usage_run log_role_usage claude REVIEWER claude-sonnet-5 impl-review-a01-round-0
 # 파생 집계는 writer 밖 — legacy 행(in/out)도 함께 읽는다
 printf '{"label":"legacy","session":"s","cost_usd":0.2,"in":3,"out":4,"cache_read":5,"cache_write":6}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
 [ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations]|@csv')" = "7,136,15731,1" ] || fail "usage summary: 합계 불일치: $(usage_run usage_summary)"
-echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex 최소·effective 회귀)"
+# 집계 보강: num_turns/output/cache_read_per_turn(전체·그룹), by_label·by_session 으로 어느 호출·세션이 cache read 를 만드는지 본다.
+# cache_read_per_turn 은 num_turns 를 보고한 행만으로 계산(A 1000/7, D 7/1, E 1000/7, G 2509959/12 → 2511966/27). legacy·codex 행은 num_turns 없음.
+usage_summary_json="$(usage_run usage_summary)"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[.num_turns, .cache_read, (.cache_read_per_turn|floor)]|@csv')" = "27,2512001,93035" ] \
+  || fail "usage summary: num_turns/cache_read_per_turn 불일치: $usage_summary_json"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '.by_label["lbl-a"] | [.invocations,.cache_read,.num_turns,(.cache_read_per_turn|floor)]|@csv')" = "2,2000,14,142" ] \
+  || fail "usage summary: by_label(lbl-a) 불일치: $usage_summary_json"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '.by_session["session-a"] | [.invocations,.cache_read,.num_turns,.output]|@csv')" = "3,2007,15,1006" ] \
+  || fail "usage summary: by_session(session-a) 불일치: $usage_summary_json"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[.by_session["none"].invocations, .by_session["none"].cache_read_per_turn, .by_role.VALIDATOR.cache_read_per_turn]|@csv')" = "1,," ] \
+  || fail "usage summary: num_turns 없는 그룹(codex/session null)의 cache_read_per_turn 이 null 이 아님: $usage_summary_json"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '.by_role.REVIEWER | [.invocations,((.cost_usd*10000)|round),.cache_read,.num_turns]|@csv')" = "4,38914,2511966,27" ] \
+  || fail "usage summary: by_role(REVIEWER) 불일치: $usage_summary_json"
+echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex 최소·effective 회귀) + usage_summary by_label/by_session/cache_read_per_turn"
 
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

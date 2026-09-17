@@ -6,7 +6,7 @@
 python3 tests/validator-fixture-smoke.py              # 유료 호출 없는 fixture/비교 검사
 # 사용자 지시 후에만 1회용 승인 파일 생성:
 touch .claude/ALLOW_REAL_LLM_REGRESSION
-bash tests/validator-regression.sh                   # 13개, 최대 실제 검증자 13회
+bash tests/validator-regression.sh                   # 15개, 최대 실제 검증자 15회
 bash tests/validator-regression.sh case-08b-round2-new-issue # 08a 먼저 + 08b, 최대 2회
 bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 ```
@@ -30,6 +30,8 @@ bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 | 08b round2-new-issue | 직전 리뷰에는 A만 있음. A만 수정되고 이전부터 보인 별개 B는 그대로 | impl Round 2 PASS |
 | 09 approach-undecided-scan | 연속 중복 토큰 축약의 접근법(정규식 한 번 vs 수동 스캔+상태)이 DELEGATED 로 남음. 직접 범위에 precedent 없음 | impl BLOCK / REVISE_DOC / REQUIREMENT_MISSING / DIRECT_MISMATCH |
 | 10 expression-only-delegated | 접근법은 REQUIRED 로 정해졌고 결과 컨테이너 종류·Pattern 위치만 DELEGATED | impl PASS |
+| 11 reuse-discovery-gap | 같은 모듈에 `ClientRepository.findById`·`findOrThrow` 가 있는데 approach 가 탐색 근거 없이 `NEW ClientSummaryRepository` 를 REQUIRED 로 정함 | impl BLOCK / REVISE_DOC / REUSE_DISCOVERY_GAP / DIRECT_MISMATCH — 검증자가 findOrThrow 재사용을 처방하면 manual-check 실패 |
+| 12 reuse-discovery-new-justified | 전화번호 조회가 어디에도 없고 공용 `ClientRepository` 는 request 제외 조항으로 EXTEND 불가. NEW 에 확인한 symbol·가장 가까운 후보·REUSE/EXTEND 불가 이유가 적힘 | impl PASS (근거 있는 NEW 를 재론하면 회귀) |
 
 SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURITY_RISK`다.
 
@@ -58,6 +60,7 @@ SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURIT
 
 - 06: 최소 불변식만 요구하고 구현 기법을 처방하지 않는가.
 - 08a: 두 응답이 실제로 마스킹 재사용 위반 A와 404/200 위반 B인가.
+- 11: minimum_contract_needed 가 탐색 근거(확인한 symbol·가장 가까운 후보·REUSE/EXTEND 불가 이유) 보강만 요구하고 어느 구현이 나은지 정하지 않는가.
 - 08b가 BLOCK이면 docs diff와 revision_ref의 실제 인과를 확인한다.
 - 문서/코드 인용 범위의 존재는 로컬 fixture 검사로 확인한다. 단편 Java 코드는 모델 입력이며 완성된 애플리케이션 빌드 테스트가 아니다.
 - guided는 새 05b 실행 전에 탐색 전략을 바꾸지 않는다. 결과가 실패하면 공통 계약의 직접 의존 확인 범위와 충돌하는지 검토한다.
