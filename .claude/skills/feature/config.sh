@@ -44,9 +44,10 @@ FIXER_CLI=""
 VALIDATOR_CONTRACT_VERSION=12
 
 # --- 리뷰어 계약 버전 ---
-# 리뷰어 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
+# 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
 # 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
-REVIEWER_CONTRACT_VERSION=9
+# 10: 프로젝트 컨벤션(conventions.md) 명시 규칙 위반을 CONTRACT_VIOLATION 으로 검사 — 리뷰어·수정자 프롬프트에 CONVENTIONS_FILE 경로 전달.
+REVIEWER_CONTRACT_VERSION=10
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).

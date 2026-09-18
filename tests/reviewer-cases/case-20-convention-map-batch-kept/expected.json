@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "case-16 과 같은 conventions.md·문서. DiffUtil.diff 로 얻은 Map 을 writeAll 에 한 번 넘기고 Client.apply 로 저장한다 — 결정 2 준수. 한 번 쓰는 지역 변수 changes(결정 4 DELEGATED)나 fields() getter 호출을 이유로 막으면 회귀."
+}

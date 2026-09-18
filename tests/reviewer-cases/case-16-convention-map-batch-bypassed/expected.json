@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": ["CONTRACT_VIOLATION", "REDUNDANT_CODE"],
+      "evidence_type_any_of": ["DIRECT_MISMATCH", "SEMANTIC_REDUNDANCY"]
+    }
+  ],
+  "note": "approach.md 결정 2(REQUIRED: DiffUtil.diff 로 얻은 Map 을 writeAll 에 한 번 전달)와 conventions.md 규칙 4(Map 기반 일괄 처리)가 있는데 서비스가 필드별 비교·개별 write 를 직접 나열했다. 동작·테스트는 문서대로 — 동작이 맞다는 이유로 APPROVE 하거나 '필드가 세 개뿐'을 DELEGATED 표현으로 인정하면 회귀. 결정 2 하나의 위반이므로 issue 는 하나."
+}

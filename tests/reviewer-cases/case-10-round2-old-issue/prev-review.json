@@ -1,5 +1,5 @@
 {
-  "schema_version": 7,
+  "schema_version": 10,
   "verdict": "REQUEST_CHANGES",
   "issues": [
     {
@@ -8,7 +8,7 @@
       "category": "UNDECLARED_BEHAVIOR",
       "evidence_type": "DIRECT_MISMATCH",
       "basis_refs": [
-        "approach.md:L9-L13",
+        "approach.md:L7-L11",
         "design.md:L6"
       ],
       "code_refs": [

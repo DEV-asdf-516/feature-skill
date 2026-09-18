@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "case-18 과 같은 conventions.md·문서. 서비스 진입점에서 ClientPatch.parse 가 검증과 동시에 불변 VO 를 만들고 Client.updated 는 그 VO 만 받는다. VO 내부가 Map 이라는 이유(규칙 3 의 'raw Map' 은 외부 입력을 뜻한다)나 VO 신설(결정 3 이 NEW 를 허용)을 이유로 반려하면 회귀. 검증이 서비스 본문이 아니라 parse 안에 있는 것도 design 계약(같은 예외·순서)을 지킨다."
+}

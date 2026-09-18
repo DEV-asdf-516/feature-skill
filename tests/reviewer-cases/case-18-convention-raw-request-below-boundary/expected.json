@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category": "CONTRACT_VIOLATION",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ],
+  "note": "conventions.md 규칙 3(경계에서 검증과 동시에 불변 VO 로 변환, 경계 아래에 *Request DTO 를 넘기지 않음)이 있고 approach.md 결정 3 은 전달 형태를 DELEGATED 로 뒀다. 서비스가 검증한 뒤 mutable ClientUpdateRequest 를 Client.updated 에 그대로 넘긴다 — 동작·테스트는 문서대로. DELEGATED 라는 이유로 APPROVE 하면 회귀."
+}

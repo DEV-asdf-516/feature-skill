@@ -1,0 +1,13 @@
+{
+  "round": 2,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": ["CONTRACT_VIOLATION", "REDUNDANT_CODE"],
+      "origin": "UNRESOLVED_PREVIOUS",
+      "previous_issue_id": "R-01"
+    }
+  ],
+  "note": "Round 1 R-01 을 수정자가 ACCEPT 했지만 같은 필드별 비교 나열을 private collectChanges 로 옮겨 Map 에 담고 writeAll 을 부를 뿐 DiffUtil.diff 는 여전히 쓰지 않는다. Map 선언·private 메서드 이동·writeAll 호출만으로 해결로 판정하면 회귀. 별개의 새 문제를 제기해도 회귀(종결 검토)."
+}
