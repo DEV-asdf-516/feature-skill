@@ -17,6 +17,9 @@ set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 PROJECT_CONVENTIONS="$(load_project_conventions)"
+# 컨벤션 본문은 위 PROJECT_CONVENTIONS 로 한 번만 전달한다(claude --append-system-prompt / codex 프롬프트 앞 블록).
+# 프롬프트에는 경로만 추가로 넣어 리뷰어·수정자가 basis_refs 에 실제 규칙 파일·줄을 인용할 수 있게 한다. 파일이 없으면 빈 값 = 컨벤션 검사 없음.
+CONVENTIONS_REF=""; [ -f "$CONVENTIONS_FILE" ] && CONVENTIONS_REF="$CONVENTIONS_FILE"
 
 # stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
 # EOF 를 기다리며 무기한 대기한다. 호출부가 어떤 형태로 이 스크립트를 묶어
@@ -220,8 +223,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   fi
 
   reviewer_prompt="$(REFERENCE_CODE="$(load_reference_code)" DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
-       WORKER_RESULT="$WORK_DIR/worker-result.json" PREV_CONTEXT="$prev_context" REVIEWER_CONTRACT_VERSION="$REVIEWER_CONTRACT_VERSION" \
-      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION}')"
+       WORKER_RESULT="$WORK_DIR/worker-result.json" PREV_CONTEXT="$prev_context" REVIEWER_CONTRACT_VERSION="$REVIEWER_CONTRACT_VERSION" CONVENTIONS_FILE="$CONVENTIONS_REF" \
+      render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION} ${CONVENTIONS_FILE}')"
   # 리뷰어 CLI 는 REVIEWER_MODEL 로 라우팅. 결과 JSON 은 $review, 원문은 $review.raw(claude) / $review.log(codex).
   run_readonly_json_role REVIEWER "reviewer-a$attempt_tag" "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
     || exit 1
@@ -329,8 +332,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   scope_hash_before=$(feature_scope_hash)
   # 소유권 기준선은 시작 시 읽은 BASELINE_TREE 를 쓴다(호출 후 파일을 다시 읽지 않는다). 파일 자체가 바뀌었는지도 본다.
   baseline_file_before=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_before="$(cat "$WORK_DIR/worker-baseline.tree")"
-  fixer_prompt="$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" \
-      render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE}')"
+  fixer_prompt="$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" CONVENTIONS_FILE="$CONVENTIONS_REF" \
+      render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE} ${CONVENTIONS_FILE}')"
   set +e
   # 수정자 CLI 는 FIXER_MODEL 로 라우팅(codex 는 --sandbox workspace-write, claude 는 acceptEdits + Bash 허용).
   run_edit_role FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"

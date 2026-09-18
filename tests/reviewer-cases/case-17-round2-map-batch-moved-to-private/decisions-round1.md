@@ -1,0 +1,1 @@
+- [fix round 1] R-01 ACCEPT: src/ClientService.java:L11-L26 변경을 Map 으로 모아 writeAll 에 한 번 전달

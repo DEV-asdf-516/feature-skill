@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category": "CONTRACT_VIOLATION",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ],
+  "note": "conventions.md 규칙 2(응답 DTO 는 값만 담고 변환은 서비스가 한다)를 implementation.md 는 반복하지 않는다. DTO 형태는 DELEGATED 지만 ClientSummary.from 이 MaskingUtil 을 호출해 변환 책임을 DTO 로 옮겼다. 동작·테스트는 문서대로."
+}

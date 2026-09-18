@@ -135,6 +135,14 @@ grep -Fq 'run_readonly_json_role REVIEWER "reviewer-a$attempt_tag"' "$TARGET_SKI
   && grep -Fq 'run_edit_role DESIGNER "designer-$TARGET"' "$TARGET_SKILL/scripts/consensus-loop.sh" \
   && grep -Fq -- '--append-system-prompt "$conv"' "$TARGET_SKILL/config.sh" \
   || fail "규칙 전달: 리뷰어/수정자 conventions 전달 누락 또는 세션 이름이 stage/attempt 단위가 아님"
+# 컨벤션 파일 경로는 본문과 별개로 리뷰어·수정자 프롬프트에 치환된다(basis_refs 인용용). 본문은 여전히 PROJECT_CONVENTIONS 한 번만.
+grep -Fq '${CONVENTIONS_FILE}' "$TARGET_SKILL/prompts/reviewer.md" || fail "컨벤션 경로: reviewer.md 에 \${CONVENTIONS_FILE} 없음"
+grep -Fq '${CONVENTIONS_FILE}' "$TARGET_SKILL/prompts/fixer.md" || fail "컨벤션 경로: fixer.md 에 \${CONVENTIONS_FILE} 없음"
+grep -Fq 'CONVENTIONS_FILE="$CONVENTIONS_REF"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
+  && [ "$(grep -c 'CONVENTIONS_FILE="$CONVENTIONS_REF"' "$TARGET_SKILL/scripts/impl-review-loop.sh")" = 2 ] \
+  || fail "컨벤션 경로: impl-review-loop 가 리뷰어·수정자 render_prompt 에 CONVENTIONS_FILE 을 넘기지 않음"
+grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/reviewer.md" && fail "컨벤션 중복 주입: reviewer.md 가 본문을 다시 치환함"
+grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/fixer.md" && fail "컨벤션 중복 주입: fixer.md 가 본문을 다시 치환함"
 # 역할 → CLI 라우팅: 모델 이름으로 claude/codex 를 고르고, <ROLE>_CLI 로 덮어쓸 수 있으며, 알 수 없는 이름은 실패한다.
 routing="$(bash -c 'source "$1"
   a=$(REVIEWER_MODEL=gpt-6-astra REVIEWER_CLI="" role_cli REVIEWER)

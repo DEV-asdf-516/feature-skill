@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "case-14 와 같은 conventions.md·문서. 마스킹은 서비스가 하고 DTO 는 값만 받는다 — 서비스가 Client 의 getter 세 개를 읽어 DTO 를 조립하는 것을 규칙 4 위반으로 올리면 회귀(비교·판단이 아니다)."
+}
