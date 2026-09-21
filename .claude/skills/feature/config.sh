@@ -276,11 +276,25 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
+      # invocation 전용 임시 -o 경로: 이번 호출이 만든 파일은 이것 하나뿐이다. 이전 실행·픽스처가 $out 에 남긴 파일을 이번 결과로 오인하지 않고,
+      # 내용·mtime 으로 provenance 를 추론하지도 않는다(같은 JSON 을 다시 써도 새 결과다). usable 할 때만 $out 으로 atomic move.
+      local tmp_out="$out.invocation-$inv.tmp"
+      rm -f "$tmp_out"
       "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
-        --output-schema "$schema" -o "$out" \
+        --output-schema "$schema" -o "$tmp_out" \
         "$prompt" > "$out.log" 2>&1 || rc=$?
-      log_role_usage codex "$role" "$model" "$label" "$out.log" "$rc" "$inv"
-      [ "$rc" -eq 0 ] || { echo "[FAIL] codex 실행 실패 (모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1; }
+      log_role_usage codex "$role" "$model" "$label" "$out.log" "$rc" "$inv"   # raw exit code 그대로 (exit_code/success 위조 없음)
+      if ! { [ -s "$tmp_out" ] && jq -e 'type=="object"' "$tmp_out" >/dev/null 2>&1; }; then
+        rm -f "$tmp_out"
+        echo "[FAIL] codex 실행 실패 또는 결과 JSON 없음 (exit $rc, 모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1
+      fi
+      if [ "$rc" -ne 0 ]; then
+        # rc ≠ 0 이어도 이번 호출이 파싱 가능한 결과 JSON 을 썼으면 즉시 폐기하지 않는다 — 호출자의 schema/contract 검사가 최종 게이트다.
+        # (codex 는 작업을 정상 완료한 뒤 프로세스 종료코드가 간헐적으로 1 이 되는 사례가 있다.)
+        echo "[WARN] CLI_EXIT_STATUS_MISMATCH: $role codex exited $rc, but current invocation produced a JSON result ($tmp_out); using it subject to the caller's schema/contract checks" >&2
+        record_cli_anomaly "$role" codex "$label" "$rc" STRUCTURED_RESULT "$out"
+      fi
+      mv "$tmp_out" "$out"
       ;;
     claude)
       local session_args conv_args=()
@@ -492,6 +506,78 @@ require_baseline_guard_resolved() {
     return 1
   fi
   jq '.active = false' "$BASELINE_GUARD" > "$BASELINE_GUARD.tmp" && mv "$BASELINE_GUARD.tmp" "$BASELINE_GUARD"
+}
+# =============================================================
+# CLI 종료 코드 ≠ 의미적 완료
+#   편집 역할이 작업 트리·문서를 이미 바꾼 뒤 비정상 종료코드를 돌려줄 수 있다(codex 가 task_complete 뒤 프로세스 exit 1 을 내는 간헐 사례).
+#   raw exit code 는 usage.jsonl 에 관측값 그대로 남기고(위조 없음), 호출자가 raw rc + 이번 invocation 의 기계 판독 결과 +
+#   호출 전후 변경 + 기존 index/manifest/baseline/write-set 게이트 + 다음 독립 검증 게이트(검증자·리뷰어·targeted test)로 재실행 여부를 정한다.
+#   불변식: 편집 역할이 한번 변경을 만들고 종료했으면, 성공 여부가 불명확하다는 이유만으로 같은 편집 호출을 자동 반복하지 않는다.
+#   복구된 경우는 숨기지 않는다 — [WARN] CLI_EXIT_STATUS_MISMATCH 로그 + append-only cli-anomalies.jsonl.
+# =============================================================
+CLI_ANOMALY_LOG="$WORK_DIR/cli-anomalies.jsonl"
+record_cli_anomaly() { # role cli label raw_exit_code recovery(STRUCTURED_RESULT|FORWARD_TO_VALIDATOR|FORWARD_TO_REVIEWER) evidence
+  jq -nc --arg role "$1" --arg cli "$2" --arg label "$3" --argjson rc "$4" --arg recovery "$5" --arg evidence "$6" --arg now "$(date '+%FT%T%z')" \
+    '{timestamp:$now, kind:"CLI_EXIT_STATUS_MISMATCH", role:$role, cli:$cli, label:$label, raw_exit_code:$rc, recovery:$recovery, evidence:$evidence}' \
+    >> "$CLI_ANOMALY_LOG"
+}
+cli_anomaly_count() { if [ -f "$CLI_ANOMALY_LOG" ]; then grep -c . "$CLI_ANOMALY_LOG" || true; else echo 0; fi; }
+# 워커 결과 JSON 이 러너가 실제로 쓰는 계약을 만족하는가 — 파일 존재만으로 성공 취급하지 않는다.
+#   JSON parse / status ∈ {DONE,UNDECIDED} / undecided·delegated_choices·tests 배열 / context_updates.upsert·remove 배열(unit 의 rolling context 가 읽는다) /
+#   undecided 항목의 kind·location·decision_needed / DONE+undecided>0 · UNDECIDED+undecided==0 모순.
+worker_result_valid() { # result.json
+  [ -s "$1" ] || return 1
+  jq -e '
+    type=="object"
+    and (.status=="DONE" or .status=="UNDECIDED")
+    and (.undecided|type)=="array" and (.delegated_choices|type)=="array" and (.tests|type)=="array"
+    and (.context_updates|type)=="object" and (.context_updates.upsert|type)=="array" and (.context_updates.remove|type)=="array"
+    and all(.undecided[]; (.kind=="DOC_GAP" or .kind=="USER_DECISION") and (.location|type)=="string" and (.decision_needed|type)=="string")
+    and ((.status=="DONE" and (.undecided|length)==0) or (.status=="UNDECIDED" and (.undecided|length)>0))
+  ' "$1" >/dev/null 2>&1
+}
+# 디자이너 범위 가드: 디자이너(편집 역할)가 합의 단계에서 문서 밖 source 작업 트리를 바꾸면 rc 와 무관하게 DESIGNER_SCOPE_VIOLATION 으로 중단한다.
+# 검증자는 설계 문서를 검증하는 역할이지 디자이너가 바꾼 구현 코드를 승인하는 역할이 아니므로 VALIDATOR_PENDING 으로 넘기지 않는다.
+# 호출 전 tree(expected)를 남겨, 사용자가 작업 트리를 되돌리기 전에는 재실행이 모델 호출 0회로 같은 사유로 다시 멈춘다(자동 원복·자동 재호출 없음).
+DESIGNER_SCOPE_GUARD="$WORK_DIR/designer-scope.guard.json"
+record_designer_scope_guard() { # expected(before-tree) observed(after-tree) target round raw_exit_code
+  jq -n --arg expected "$1" --arg observed "$2" --arg target "$3" --argjson round "$4" --argjson rc "$5" --arg now "$(date '+%FT%T%z')" \
+    '{active:true, expected:$expected, observed:$observed, target:$target, round:$round, raw_exit_code:$rc, recorded_at:$now}' \
+    > "$DESIGNER_SCOPE_GUARD.tmp" && mv "$DESIGNER_SCOPE_GUARD.tmp" "$DESIGNER_SCOPE_GUARD"
+}
+require_designer_scope_guard_resolved() {
+  local expected current
+  [ -f "$DESIGNER_SCOPE_GUARD" ] || return 0
+  jq -e '.active == true' "$DESIGNER_SCOPE_GUARD" >/dev/null 2>&1 || return 0
+  expected="$(jq -r '.expected' "$DESIGNER_SCOPE_GUARD")"
+  current="$(snapshot_worktree_tree)" || return 1
+  if [ "$current" != "$expected" ]; then
+    echo "[STOP] 직전 디자이너 호출($(jq -r '.target' "$DESIGNER_SCOPE_GUARD") round $(jq -r '.round' "$DESIGNER_SCOPE_GUARD"))이 문서 밖 source 파일을 바꿨고 작업 트리가 호출 전 tree 로 복구되지 않음 — 기대: $expected / 현재: $current. 자동 복구하지 않음." >&2
+    return 1
+  fi
+  jq '.active = false' "$DESIGNER_SCOPE_GUARD" > "$DESIGNER_SCOPE_GUARD.tmp" && mv "$DESIGNER_SCOPE_GUARD.tmp" "$DESIGNER_SCOPE_GUARD"
+}
+# 워커 결과 불확실 가드: 워커가 작업 트리를 바꿨는데 결과 JSON 이 없거나 깨졌고 rc ≠ 0 이면 WORKER_OUTCOME_UNCERTAIN 으로 중단한다.
+# 호출 전 tree(expected)를 남겨, 사용자가 작업 트리를 그 tree 로 명시적으로 되돌리기 전에는 재실행이 모델 호출 0회로 같은 사유로 다시 멈춘다.
+# 자동 restore/reset/checkout/stash 없음. worker-baseline.guard.json 과 같은 fail-closed 패턴이며 워커 전용의 최소 구현이다.
+WORKER_OUTCOME_GUARD="$WORK_DIR/worker-outcome.guard.json"
+record_worker_outcome_guard() { # expected(before-tree) observed(after-tree) role label raw_exit_code result_path
+  jq -n --arg expected "$1" --arg observed "$2" --arg role "$3" --arg label "$4" --argjson rc "$5" --arg result "$6" --arg now "$(date '+%FT%T%z')" \
+    '{active:true, expected:$expected, observed:$observed, role:$role, label:$label, raw_exit_code:$rc, result:$result, recorded_at:$now}' \
+    > "$WORKER_OUTCOME_GUARD.tmp" && mv "$WORKER_OUTCOME_GUARD.tmp" "$WORKER_OUTCOME_GUARD"
+}
+# 활성 가드가 있으면 현재 작업 트리가 expected(호출 전 tree)와 같아야 통과(가드 비활성화). 다르면 1 — 호출자가 모델 호출 없이 중단.
+require_worker_outcome_guard_resolved() {
+  local expected current
+  [ -f "$WORKER_OUTCOME_GUARD" ] || return 0
+  jq -e '.active == true' "$WORKER_OUTCOME_GUARD" >/dev/null 2>&1 || return 0
+  expected="$(jq -r '.expected' "$WORKER_OUTCOME_GUARD")"
+  current="$(snapshot_worktree_tree)" || return 1
+  if [ "$current" != "$expected" ]; then
+    echo "[STOP] 직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"), exit $(jq -r '.raw_exit_code' "$WORKER_OUTCOME_GUARD"))의 완료 여부가 불확실한데 작업 트리가 호출 전 tree 로 복구되지 않음 — 기대: $expected / 현재: $current. 자동 복구하지 않음." >&2
+    return 1
+  fi
+  jq '.active = false' "$WORKER_OUTCOME_GUARD" > "$WORKER_OUTCOME_GUARD.tmp" && mv "$WORKER_OUTCOME_GUARD.tmp" "$WORKER_OUTCOME_GUARD"
 }
 feature_scope_violations() { # before-tree after-tree [ownership-baseline-tree]
   # --no-renames: rename 을 삭제+추가로 분해한다. 아니면 범위 밖 파일을 범위 안 경로로 옮겼을 때 목적지만 보여

@@ -36,7 +36,7 @@
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
-#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED)
+#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION)
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING | APPROACH_GAP)
 #   1 ENV_ERROR   환경·CLI 오류
 #
@@ -300,6 +300,10 @@ fi
 # 테스트만 통과하면 DONE 이 된다. run_worker 안의 검사는 이 전역 검사 뒤 다른 세션이 기준선을 바꾸는 경우를 호출 직전에 다시 막는다.
 require_baseline_guard_resolved \
   || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음 (stage $STAGE 재개 전 전역 검사)"
+# 직전 워커 호출의 완료 여부가 불확실(결과 JSON 없음/깨짐 + 작업 트리 변경 + rc≠0)한 채 멈췄으면, 사용자가 작업 트리를 호출 전 tree 로
+# 되돌리기 전에는 stage 와 무관하게 모델·테스트 호출 0회로 다시 멈춘다 — 같은 편집을 정상 반영된 작업 위에 반복하지 않는다.
+require_worker_outcome_guard_resolved \
+  || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))이 작업 트리를 바꿨지만 유효한 결과 JSON 없이 exit $(jq -r '.raw_exit_code' "$WORKER_OUTCOME_GUARD") 로 끝났고, 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 변경 내용을 확인한 뒤 ① 호출 전 tree 로 명시적으로 되돌리고 재실행(워커 재호출) 하거나 ② 변경을 유지하려면 사용자가 직접 정리. 자동 원복·자동 재호출 없음 (stage $STAGE 재개 전 전역 검사)"
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
 # 합의 PASS 판정은 config.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
 # 현재 입력 지문(request/design/impl docs + 그 target 범위의 [USER-QUESTION][scope=…])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
@@ -350,6 +354,9 @@ run_worker() { # prompt-file [unit-dir]
   # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
   require_baseline_guard_resolved \
     || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음"
+  # 직전 워커 호출 결과가 불확실한 채 남은 변경 위에 같은 워커를 다시 부르지 않는다(사용자가 호출 전 tree 로 복구한 뒤에만)
+  require_worker_outcome_guard_resolved \
+    || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))의 완료 여부가 불확실한데 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 되돌린 뒤 재실행. 자동 원복·자동 재호출 없음"
   # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다
   worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
   # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
@@ -417,9 +424,24 @@ run_worker() { # prompt-file [unit-dir]
       stop_need_user UNIT_SCOPE_VIOLATION "unit $unit_id 의 scope 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)). 과잉 구현이면 되돌릴지, unit 분할이 잘못됐으면 implementation-units.json 을 고쳐 impl 재합의할지 사용자가 결정. 자동 원복 금지, 다음 unit 으로 가지 않음"
     fi
   fi
+  # ---------- CLI/result 판정 (위 index → manifest → 기준선 → write-set 게이트를 모두 지난 뒤에만) ----------
+  # raw rc 는 usage.jsonl 에 그대로 남는다. 호출 직전 $result 를 지웠으므로 지금 있는 $result 는 이번 invocation 의 산출물이다.
+  #   rc≠0 + 유효한 결과 JSON(worker_result_valid: parse·필드 구조·DONE/UNDECIDED 모순) → CLI 종료코드 불일치로 기록하고 재실행 없이 계속
+  #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 없음 → 기존 실행 실패(재실행해도 같은 편집이 중복될 위험이 없다)
+  #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 있음 → WORKER_OUTCOME_UNCERTAIN 으로 중단, 가드 기록, 자동 원복·자동 재호출 없음
   if [ "$worker_rc" -ne 0 ]; then
-    tail -20 "$raw" >&2
-    env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
+    local worker_cli; worker_cli="$(role_cli WORKER)"
+    if worker_result_valid "$result"; then
+      log "[WARN] CLI_EXIT_STATUS_MISMATCH: WORKER $worker_cli exited $worker_rc, but current invocation produced a valid worker result ($result); continuing without replay"
+      record_cli_anomaly WORKER "$worker_cli" "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" STRUCTURED_RESULT "$result" || env_error "cli-anomalies.jsonl 기록 실패"
+    elif [ "$after_tree" = "$before_tree" ]; then
+      tail -20 "$raw" >&2
+      env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
+    else
+      record_worker_outcome_guard "$before_tree" "$after_tree" WORKER "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" "$result" || env_error "worker-outcome 가드 기록 실패"
+      tail -20 "$raw" >&2
+      stop_need_user WORKER_OUTCOME_UNCERTAIN "워커${unit_id:+ (unit $unit_id)} $worker_cli 가 exit $worker_rc 로 끝났고 유효한 결과 JSON($result)이 없는데 작업 트리는 바뀜(전: $before_tree / 후: $after_tree). 완료 여부를 알 수 없으므로 같은 워커를 자동 재호출하지 않고 변경도 원복하지 않음 — 사용자가 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리면 재실행 시 워커가 다시 돈다(worker-outcome.guard.json)"
+    fi
   fi
   jq -e '.status' "$result" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $result"
   local status; status="$(jq -r '.status' "$result")"
@@ -620,6 +642,8 @@ while :; do
 
     done)
       write_state done DONE "" "Phase 3 승인 + 전체 테스트 통과. 커밋은 사용자 지시 시에만."
+      anomaly_n="$(cli_anomaly_count)"
+      [ "$anomaly_n" -eq 0 ] || log "[WARN] CLI 종료코드 불일치 복구 $anomaly_n 건 — $CLI_ANOMALY_LOG (raw exit code 는 usage.jsonl 에 그대로)"
       log "DONE"
       exit 0;;
 

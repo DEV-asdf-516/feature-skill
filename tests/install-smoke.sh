@@ -13,15 +13,27 @@ fail() { echo "[FAIL] $1" >&2; exit 1; }
 VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
 REVIEWER_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
 # 합의 PASS 픽스처: 러너의 stage 결정은 파일명이 아니라 consensus-<target>.json 체크포인트(+입력 지문·리뷰 내용)를 본다.
-# 가짜 PASS 리뷰 파일을 두고 합의 루프를 한 번 돌려 체크포인트를 만든다 (대상 config 의 CODEX_BIN 이 "true" 여야 한다 — 리뷰 파일을 덮어쓰지 않도록).
+# 가짜 검증자(codex)가 PASS 리뷰를 실제 -o 경로에 쓰게 해 합의 루프를 한 번 돌려 체크포인트를 만든다.
+# (read-only 헬퍼는 invocation 전용 임시 -o 만 이번 결과로 인정하므로 미리 깔아 둔 파일·no-op codex 로는 PASS 가 만들어지지 않는다.)
+FAKE_PASS_CODEX="$SCRATCH/fake-codex-pass"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
+  '[ -n "$out" ] || exit 9' \
+  'printf '\''{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n'\'' "$FAKE_PASS_CONTRACT" > "$out"' \
+  > "$FAKE_PASS_CODEX"
+chmod +x "$FAKE_PASS_CODEX"
 fake_consensus_pass() { # target-root design|impl
-  local root="$1" t="$2"
+  local root="$1" t="$2" cfg
+  cfg="$root/.claude/skills/feature/config.sh"
   mkdir -p "$root/.agent-work/reviews"
   # impl 은 구현 단위 manifest 가 러너의 진입 조건이다 — 없으면 feature-scope.json 전체를 unit 하나로 두는 최소 manifest 를 만든다
   [ "$t" != impl ] || [ -f "$root/.agent-work/implementation-units.json" ] || fake_units "$root"
-  printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$VALIDATOR_CONTRACT" > "$root/.agent-work/reviews/validator-$t-round-01.json"
-  (cd "$root" && FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
-    || fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"
+  cp "$cfg" "$cfg.fixture-keep"
+  sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$cfg" && rm -f "$cfg.sedbak"
+  (cd "$root" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
+    || { mv "$cfg.fixture-keep" "$cfg"; fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"; }
+  mv "$cfg.fixture-keep" "$cfg"
 }
 # 피처 범위 manifest 픽스처 (워커 진입에 필수)
 fake_scope() { # target-root file...
@@ -299,10 +311,10 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
-printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$VALIDATOR_CONTRACT" \
-  > "$LOG_TARGET/.agent-work/reviews/validator-design-round-01.json"
+# 설계 검증자는 PASS 를 실제 -o 경로에 쓰는 가짜 codex 로 돈다(미리 깔아 둔 리뷰 파일은 이번 invocation 의 결과로 인정되지 않는다)
+sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 set +e
-(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+(cd "$LOG_TARGET" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 resume_rc=$?
 set -e
 [ "$resume_rc" = 3 ] || fail "중첩 tee: 설계 합의 후 구현 문서 대기 종료 코드가 3이 아님 ($resume_rc)"
@@ -323,7 +335,7 @@ impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/l
 printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
 printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
 fake_scope "$LOG_TARGET" src/x.txt            # impl PASS 지문에 manifest 가 들어가므로 합의보다 먼저 둔다
-fake_consensus_pass "$LOG_TARGET" impl        # CODEX_BIN 이 아직 "true" 인 동안 체크포인트를 만든다
+fake_consensus_pass "$LOG_TARGET" impl
 # 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
 FAKE_CODEX="$LOG_TARGET/fake-codex"
 printf '%s\n' \
