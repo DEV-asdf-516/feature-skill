@@ -334,6 +334,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   baseline_file_before=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_before="$(cat "$WORK_DIR/worker-baseline.tree")"
   fixer_prompt="$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" CONVENTIONS_FILE="$CONVENTIONS_REF" \
       render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE} ${CONVENTIONS_FILE}')"
+  # 호출 전 지문(작업 트리 범위 + decisions.md). rc≠0 이어도 허용 범위 안 변경이 있으면 같은 수정자를 다시 부르지 않는다.
+  fix_fp_before="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 전 지문 계산 실패" >&2; exit 1; }
   set +e
   # 수정자 CLI 는 FIXER_MODEL 로 라우팅(codex 는 --sandbox workspace-write, claude 는 acceptEdits + Bash 허용).
   run_edit_role FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
@@ -374,11 +376,21 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
       stop_with 2 SCOPE_VIOLATION --arg files "$(printf '%s' "$violations" | paste -sd, -)" --arg review "$prev_review" --arg step "fixer round $round"
     fi
   fi
-  [ "$fixer_rc" -eq 0 ] || { echo "[FAIL] 수정자 실행 실패 (모델 '$FIXER_MODEL' 확인). 재실행 시 attempt $attempt round $round / FIXER_PENDING 부터 재개" >&2; exit 1; }
+  # ---------- CLI 판정 (위 index → manifest → 기준선 → write-set 게이트를 모두 지난 뒤에만) ----------
+  if [ "$fixer_rc" -ne 0 ]; then
+    fix_fp_after="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 후 지문 계산 실패" >&2; exit 1; }
+    if [ "$fix_fp_after" = "$fix_fp_before" ]; then
+      # 코드·decisions 변경 없음 → 기존 실패. 같은 수정자 재실행은 안전하다(체크포인트 FIXER_PENDING 그대로).
+      echo "[FAIL] 수정자 실행 실패 (모델 '$FIXER_MODEL' 확인). 재실행 시 attempt $attempt round $round / FIXER_PENDING 부터 재개" >&2; exit 1
+    fi
+    # 허용 범위 안 변경 있음 → '수정자 성공' 으로 간주하는 것이 아니다. 같은 수정을 반복하지 않고 다음 리뷰어가 partial/incomplete fix 를 독립 판정한다.
+    echo "[WARN] CLI_EXIT_STATUS_MISMATCH: FIXER $(role_cli FIXER) exited $fixer_rc, but current invocation changed the working tree/decisions within scope; forwarding to the reviewer instead of replaying the fixer"
+    record_cli_anomaly FIXER "$(role_cli FIXER)" "impl-fix-a$attempt_tag-round-$tag" "$fixer_rc" FORWARD_TO_REVIEWER "$fix_result"
+  fi
   echo "--- 수정자 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'
 
-  # 수정자 성공 → 다음 라운드 리뷰 대기 상태로 전환
+  # 수정자 성공(또는 변경 있음 + rc 불일치) → 다음 라운드 리뷰 대기 상태로 전환
   round=$((round + 1))
   next_step="REVIEWER_PENDING"
   save_review_checkpoint "$attempt" "$round" "$next_step" "$prev_review" "$prev_tree" "$(compute_fixer_resume_fingerprint)"

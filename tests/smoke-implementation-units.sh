@@ -8,7 +8,7 @@
 #   A. units 가 01 → 02 → 03 순서로만 호출된다
 #   B. 동시에 워커가 둘 이상 실행되지 않는다 (호출 겹침 감지)
 #   C. Unit 01 실패(USER_DECISION) 시 Unit 02 는 호출되지 않는다
-#   D. Unit 01/02 완료 후 러너 재실행 시 Unit 03 부터 재개한다 (01/02 워커 재호출 없음)
+#   D. Unit 01/02 완료 후 러너 재실행 시 Unit 03 부터 재개한다 (01/02 워커 재호출 없음) — 03 의 실패는 변경 없는 실행 실패(exit 7, 결과 없음)
 #   E. unit manifest 가 lock 이후 변경되면 워커 호출 0회로 중단한다 (UNITS_MANIFEST_CHANGED)
 #   F. unit 워커가 자기 unit scope 밖(전체 범위 안)을 수정하면 다음 unit 으로 가지 않는다 (UNIT_SCOPE_VIOLATION, 원복 없음)
 #   G. unit 사이에는 리뷰어·수정자 호출이 없다 — 리뷰어 호출은 모든 unit 뒤 전체 review 한 번뿐
@@ -53,7 +53,7 @@ printf '{"version":1,"files":["src/u01.txt","src/u02.txt","src/u03.txt","src/sha
 RUN=".claude/skills/feature/scripts/feature-run.sh"
 CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
 REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1
+export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT"
 mkdir -p "$MOCK_STATE"
 
 # 3 unit manifest: 01 → 02(공유 파일 순차 수정) → 03. targeted test 는 unit 별 스크립트(플래그 파일로 통과/실패 제어)
@@ -72,12 +72,12 @@ EOF
 }
 write_units
 
-# --- fake codex: 검증자(read-only) 는 아무것도 하지 않음(리뷰 파일은 픽스처). 워커(workspace-write) 는 unit id 를 프롬프트에서 읽어 기록·수정 ---
+# --- fake codex: 검증자(read-only) 는 PASS 픽스처를 실제 -o 경로에 쓴다. 워커(workspace-write) 는 unit id 를 프롬프트에서 읽어 기록·수정 ---
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 out=""; readonly_sb=0; prompt=""
 while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --sandbox) [ "$2" = read-only ] && readonly_sb=1; shift 2;; *) prompt="$1"; shift;; esac; done
-[ "$readonly_sb" = 1 ] && exit 0
+if [ "$readonly_sb" = 1 ]; then printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$MOCK_VALIDATOR_CONTRACT" > "$out"; exit 0; fi
 unit="$(printf '%s' "$prompt" | grep -oE '"id": *"[0-9]+-[a-z0-9-]+"' | head -1 | sed -E 's/.*"([0-9]+-[a-z0-9-]+)"/\1/')"
 kind=worker; printf '%s' "$prompt" | grep -qE 'targeted-test-[0-9]+\.log' && kind=test-fix   # 수정 프롬프트에만 실패 로그 경로(${TEST_LOG})가 있다
 # 동시 실행 감지: 이미 다른 워커가 실행 중이면 즉시 실패
@@ -95,6 +95,8 @@ case "$kind-$n" in
 esac
 case "$kind" in
   worker)
+    # 실행 실패(exit 7)는 작업 트리를 바꾸기 전에 낸다 — 변경 뒤 non-zero 는 결과 JSON 이 없으면 WORKER_OUTCOME_UNCERTAIN(자동 재실행 금지)이며 tests/smoke-cli-exit-mismatch.sh 가 본다
+    if [ -f "$MOCK_STATE/crash-$n" ]; then rm -f "$MOCK_STATE/crash-$n"; rmdir "$MOCK_STATE/worker.lock"; exit 7; fi
     [ -n "$unit" ] && echo "worker $unit" >> "src/u$n.txt"
     [ "$n" = 01 ] || [ "$n" = 02 ] && echo "shared by $unit" >> src/shared.txt
     [ "$n" = 02 ] && mkdir -p src/gen && echo "gen by 02" > src/gen/new.txt
@@ -104,7 +106,6 @@ case "$kind" in
       printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[]}' "$n" > "$out"
       rmdir "$MOCK_STATE/worker.lock"; exit 0
     fi
-    if [ -f "$MOCK_STATE/crash-$n" ]; then rm -f "$MOCK_STATE/crash-$n"; rmdir "$MOCK_STATE/worker.lock"; exit 7; fi
     printf '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u%s.txt","technique":"t","basis":"b"}],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":%s}' "$n" "$n" "$ctx" > "$out";;
   test-fix)
     echo "test-fix $unit" >> "src/u$n.txt"
@@ -143,8 +144,7 @@ chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
 export MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 
 # --- 합의 PASS 픽스처: 가짜 PASS 리뷰를 두고 합의 루프를 돌려 체크포인트를 만든다 (codex 검증자는 아무것도 쓰지 않는다) ---
-fake_pass() { # design|impl
-  printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$CONTRACT" > ".agent-work/reviews/validator-$1-round-01.json"
+fake_pass() { # design|impl — 가짜 검증자가 PASS 를 -o 에 쓴다
   bash .claude/skills/feature/scripts/consensus-loop.sh "$1" > "$TMP/consensus-$1.log" 2>&1 || { cat "$TMP/consensus-$1.log"; fail "픽스처: $1 합의 PASS 체크포인트 생성 실패"; }
 }
 fake_pass design; fake_pass impl

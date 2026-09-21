@@ -44,10 +44,10 @@ RUN=".claude/skills/feature/scripts/feature-run.sh"
 LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
 CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
 CHECKPOINT_VERSION="$(grep -E '^CONSENSUS_CHECKPOINT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-export MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1
+export MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT"
 : > "$MOCK_LOG"
 
-# --- fake codex: 모든 호출을 기록한다. 검증자(read-only)는 대상별로 기록만 하고 리뷰 파일은 픽스처를 쓴다. 워커는 USER_DECISION 으로 멈춘다 ---
+# --- fake codex: 모든 호출을 기록한다. 검증자(read-only)는 대상별로 기록하고 PASS 를 -o 에 쓴다. 워커는 USER_DECISION 으로 멈춘다 ---
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 out=""; readonly_sb=0; prompt=""
@@ -56,6 +56,7 @@ if [ "$readonly_sb" = 1 ]; then
   if printf '%s' "$prompt" | grep -q '설계 검증자'; then echo "validator design" >> "$MOCK_LOG"
   elif printf '%s' "$prompt" | grep -q '구현 문서 검증자'; then echo "validator impl" >> "$MOCK_LOG"
   else echo "readonly unknown" >> "$MOCK_LOG"; fi
+  printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$MOCK_VALIDATOR_CONTRACT" > "$out"
   exit 0
 fi
 echo "worker" >> "$MOCK_LOG"
@@ -70,8 +71,7 @@ EOF
 chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
 
 # --- 합의 PASS 픽스처: 가짜 PASS 리뷰를 두고 합의 루프를 돌려 체크포인트를 만든다 ---
-fake_pass() { # design|impl
-  printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$CONTRACT" > ".agent-work/reviews/validator-$1-round-01.json"
+fake_pass() { # design|impl — 가짜 검증자가 PASS 를 -o 에 쓴다
   bash "$LOOP" "$1" > "$TMP/consensus-$1.log" 2>&1 || { cat "$TMP/consensus-$1.log"; fail "픽스처: $1 합의 PASS 체크포인트 생성 실패"; }
 }
 current() { ( source "$CFG"; consensus_pass_current "$1" ) && echo true || echo false; }

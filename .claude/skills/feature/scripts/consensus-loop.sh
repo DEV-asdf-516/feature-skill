@@ -5,7 +5,7 @@
 # 사용법: consensus-loop.sh [design|impl]  (저장소 루트에서 실행)
 #   design: $WORK_DIR/design.md 합의 (오케스트레이터가 초안을 먼저 작성)
 #   impl  : $WORK_DIR/implementation.md(무엇) + approach.md(어떻게) 합의 (design 합의 후 실행)
-# 종료 코드: 0=PASS 수렴, 2=라운드 초과/교착, 1=환경 오류
+# 종료 코드: 0=PASS 수렴, 2=라운드 초과/교착/ASK_USER/DESIGNER_SCOPE_VIOLATION(디자이너가 문서 밖 source 를 변경 — fail-closed), 1=환경 오류
 # 리뷰는 MAX_SPEC_ROUNDS+1 회 — 마지막 수정도 반드시 재검증한다.
 # 재개: $WORK_DIR/consensus-<target>.json 에 round/next_step(VALIDATOR_PENDING|DESIGNER_PENDING|PASS)·
 #   리뷰·스냅샷 경로·입력 지문을 남긴다. 디자이너 호출이 실패하면 재실행 시 검증자를 다시 부르지 않고
@@ -70,6 +70,11 @@ unscoped_decisions="$(consensus_unscoped_user_decisions)"
 
 SCHEMA_FILE="$SKILL_DIR/schemas/spec-review.schema.json"
 [ -f "$SCHEMA_FILE" ] || { echo "[FAIL] 스키마 없음: $SCHEMA_FILE" >&2; exit 1; }
+# 직전 디자이너 호출이 source 작업 트리를 바꿔 멈췄으면, 복구 전에는 검증자·디자이너를 부르지 않는다(모델 호출 0회, 자동 원복 없음)
+if ! require_designer_scope_guard_resolved; then
+  jq -n --arg t "$TARGET" --arg e "$(jq -r .expected "$DESIGNER_SCOPE_GUARD")" '{phase:$t, status:"DESIGNER_SCOPE_VIOLATION", expected:$e}' > "$WORK_DIR/state.json"
+  exit 2
+fi
 # Round 2+ 입력용: 디자이너 수정 전 문서를 보관하고, 다음 라운드에 현재 문서와의 diff 를 검증자에게 준다.
 # 파일 목록은 config.sh 의 consensus_docs_for — 스냅샷·diff·변경 파일·재개 지문이 같은 집합을 본다.
 consensus_docs() { consensus_docs_for "$TARGET"; }
@@ -283,12 +288,35 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   designer_result="$WORK_DIR/reviews/designer-$TARGET-round-$tag.raw"
   designer_prompt=$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
-  run_edit_role DESIGNER "designer-$TARGET" "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" \
-    || { echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1; }
+  # 호출 전 문서 상태(합의 대상 문서 + decisions.md = editable 지문)와 source 작업 트리(WORK_DIR 제외 tree). 디자이너는 편집 역할이라 문서 밖 파일도 쓸 수 있다.
+  designer_docs_before="$(consensus_editable_fingerprint "$TARGET")"
+  designer_tree_before="$(snapshot_worktree_tree)" || { echo "[FAIL] 디자이너 호출 전 tree 스냅샷 실패" >&2; exit 1; }
+  designer_rc=0
+  run_edit_role DESIGNER "designer-$TARGET" "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" || designer_rc=$?
+  designer_tree_after="$(snapshot_worktree_tree)" || { echo "[FAIL] 디자이너 호출 후 tree 스냅샷 실패" >&2; exit 1; }
+  if [ "$designer_tree_after" != "$designer_tree_before" ]; then
+    # 합의 단계에서 구현 파일이 바뀌었다 — rc 와 무관하게 디자이너 허용 범위 위반. 자동 원복 없음, 같은 디자이너 자동 재호출 없음, 검증자에게 넘기지 않음.
+    record_designer_scope_guard "$designer_tree_before" "$designer_tree_after" "$TARGET" "$round" "$designer_rc" || { echo "[FAIL] designer-scope 가드 기록 실패" >&2; exit 1; }
+    echo "[STOP] DESIGNER_SCOPE_VIOLATION: 디자이너($TARGET round $round, exit $designer_rc)가 합의 문서 밖 source 작업 트리를 바꿈(전: $designer_tree_before / 후: $designer_tree_after). 자동 원복하지 않음 — 변경을 확인한 뒤 호출 전 tree 로 되돌리기 전에는 재실행이 모델 호출 0회로 같은 사유로 멈춘다(designer-scope.guard.json)." >&2
+    git diff --stat "$designer_tree_before" "$designer_tree_after" -- >&2 || true
+    jq -n --arg t "$TARGET" --arg r "$round" --arg b "$designer_tree_before" --arg a "$designer_tree_after" --argjson rc "$designer_rc" \
+      '{phase:$t, status:"DESIGNER_SCOPE_VIOLATION", round:($r|tonumber), before_tree:$b, after_tree:$a, designer_exit_code:$rc}' > "$WORK_DIR/state.json"
+    exit 2
+  fi
+  if [ "$designer_rc" -ne 0 ]; then
+    if [ "$(consensus_editable_fingerprint "$TARGET")" = "$designer_docs_before" ]; then
+      # 문서·decisions 변경 없음 → 기존 실패. 같은 디자이너 재실행은 안전하다(체크포인트 DESIGNER_PENDING 그대로).
+      echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1
+    fi
+    # 문서 또는 decisions 변경 있음 → '디자이너 성공' 으로 간주하는 것이 아니다. 편집 결과는 있지만 CLI 완료 신호가 불확실하므로
+    # 같은 편집을 반복하지 않고 독립 검증자에게 넘겨 판정시킨다(부분 수정이면 BLOCK 으로 기존 루프에 돌아오고, 충분하면 PASS).
+    echo "[WARN] CLI_EXIT_STATUS_MISMATCH: DESIGNER $(role_cli DESIGNER) exited $designer_rc, but current invocation changed the $TARGET docs/decisions; forwarding to the validator instead of replaying the designer"
+    record_cli_anomaly DESIGNER "$(role_cli DESIGNER)" "$TARGET-designer-round-$tag" "$designer_rc" FORWARD_TO_VALIDATOR "$designer_result"
+  fi
   echo "--- 디자이너 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'
 
-  # 디자이너 성공 → 다음 라운드 검증 대기 상태로 전환
+  # 디자이너 성공(또는 변경 있음 + rc 불일치) → 다음 라운드 검증 대기 상태로 전환
   round=$((round + 1))
   next_step="VALIDATOR_PENDING"
   save_consensus_checkpoint "$round" "$next_step" "$prev_review" "$prev_snapshot"

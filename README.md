@@ -81,7 +81,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 |---|---|---|
 | 0 | `DONE` | 승인 + 전체 테스트 통과 |
 | 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING` / `APPROACH_GAP`: 오케스트레이터가 문서를 쓰거나 보강할 차례 |
-| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) |
+| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
 `DONE` 뒤 별도 명령 `--feature <id> --finalize`(사용자 승인 뒤에만, 아래 "사용")의 종료 코드는 0 `FINALIZED`(또는 already finalized) / 2 `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE`(사용자 확인) / 1 거부·오류(원본·worktree 불변) 다.
@@ -151,6 +151,7 @@ tests/
 ├── smoke-foreign-change.sh      # 범위 밖 변경 원복 금지·범위 가드 회귀 (mock claude)
 ├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩·finalize 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건·3-way 반영·충돌·archive·정리
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
+├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 15개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
@@ -255,6 +256,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION][scope=design|impl]` 기록 |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / invocation 별 usage telemetry / 실시간 로그 |
+| `cli-anomalies.jsonl` / `worker-outcome.guard.json` / `designer-scope.guard.json` | CLI 종료코드 불일치 복구 기록(append-only: role·cli·label·raw_exit_code·recovery=STRUCTURED_RESULT\|FORWARD_TO_VALIDATOR\|FORWARD_TO_REVIEWER·evidence; `usage.jsonl` 의 raw exit_code/success 는 그대로) / 결과 없는 불확실 워커 변경의 fail-closed 가드(호출 전 tree) / 디자이너의 문서 밖 source 변경 가드(호출 전 tree). codex read-only 결과는 invocation 전용 임시 `-o`(`<out>.invocation-<id>.tmp`)에만 쓰이고 usable 할 때만 `<out>` 으로 옮겨진다 |
 | `archive/` | 이전 피처 산출물 보관 (새 피처 시작 시 자동 이동) |
 | `feature.json` | (피처 worktree) 부트스트랩 기록 — version 2: branch·worktree·source_root·head·`snapshot_tree`·`bootstrap_tree`(finalize 기준선 B)·mode·created_at |
 | `archive/worktree/<id>/<timestamp>/` | (원본) finalize 기록 — `manifest.json`·`feature.patch`(B→F)·`finalize.json`(status·B/O/F/merge tree·`source_after_tree`·cleanup·충돌 목록)·`agent-work/`(worktree 산출물 사본) |
@@ -304,6 +306,7 @@ bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 �
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음
 bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음
 bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지문·stage 회귀·DECISION_SCOPE_REQUIRED. LLM 호출 없음
+bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
