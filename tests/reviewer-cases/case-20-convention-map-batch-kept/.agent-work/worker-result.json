@@ -1,0 +1,15 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientService.java update",
+      "technique": "diff 결과를 지역 변수 changes 에 받아 writeAll 에 전달",
+      "basis": "결정 4(변수명·지역 변수) DELEGATED"
+    }
+  ],
+  "tests": [
+    { "name": "update_logsChangedFieldsOnly", "result": "PASS" },
+    { "name": "update_unknownId_throwsNotFound", "result": "PASS" }
+  ]
+}

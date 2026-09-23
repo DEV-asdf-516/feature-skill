@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category": "CONTRACT_VIOLATION",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ],
+  "note": "approach.md 결정 3 이 참조 profile 과 같은 두 줄 구조·helper 없음을 REQUIRED 로 정했는데 워커가 기능상 동일한 private toSummary 를 추출했다. 동작·테스트는 문서대로."
+}

@@ -3,3 +3,5 @@
 .claude/ALLOW_COMMIT
 _workspace/
 .claude/ALLOW_REAL_LLM_REGRESSION
+# 회귀 픽스처의 합의 문서(tests/<세트>/<case>/.agent-work/)는 산출물이 아니라 입력이다 — 위 .agent-work/ 무시에서 제외
+!tests/*/*/.agent-work/

@@ -4,7 +4,7 @@
 # 파일 경로: .claude/skills/feature/scripts/impl-review-loop.sh
 # 사용법: impl-review-loop.sh  (메인 작성자 워커의 구현이 끝난 뒤에만 실행)
 # 종료 코드: 0=승인, 2=사용자 판단(DEADLOCK | MAX_ROUNDS_EXCEEDED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED),
-#            3=문서 보강(DOC_GAP), 1=환경·응답 오류
+#            3=리뷰어 DOC_GAP(사용자 결정 — doc-gap-resume.json 기록, 러너가 NEED_USER/REVIEW_DOC_GAP), 1=환경·응답 오류
 # 각 라운드 = 읽기 전용 리뷰 → (FIX_CODE 이슈 있으면) 수정자가 직접 수정 → 다음
 # 라운드에서 종결 검토. 리뷰는 MAX_IMPL_ROUNDS+1 회 — 마지막 수정도 재검증한다.
 # Round 1 은 입장 조건을 만족하는 issue 를 전부, Round 2+ 는 직전 이슈의 해결 여부와
@@ -61,7 +61,7 @@ save_review_checkpoint() { # attempt round next_step review tree worktree_finger
       review:$review, tree:$tree, worktree_fingerprint:$worktree_fingerprint, updated_at:$now}' \
     > "$RESUME_STATE.tmp" && mv "$RESUME_STATE.tmp" "$RESUME_STATE"
 }
-# 사용자 판단·문서 보강으로 넘어가는 종료(DEADLOCK/MAX_ROUNDS/DOC_GAP)는 코드나 문서가 바뀐 뒤 재진입하므로
+# 사용자 판단으로 넘어가는 종료(DEADLOCK/MAX_ROUNDS/DOC_GAP)는 코드나 문서가 바뀐 뒤 재진입하므로
 # 라운드 중간이 아니라 새 attempt 의 Round 1 부터 시작해야 한다 — 체크포인트를 초기 상태로 되돌린다(파일 삭제 대신 덮어쓰기).
 reset_review_checkpoint() { save_review_checkpoint "${attempt:-0}" 0 NONE "" "" ""; }
 
@@ -225,7 +225,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   reviewer_prompt="$(REFERENCE_CODE="$(load_reference_code)" DIFF_FILE="$diff_file" STATUS_FILE="$status_file" WORK_DIR="$WORK_DIR" \
        WORKER_RESULT="$WORK_DIR/worker-result.json" PREV_CONTEXT="$prev_context" REVIEWER_CONTRACT_VERSION="$REVIEWER_CONTRACT_VERSION" CONVENTIONS_FILE="$CONVENTIONS_REF" \
       render_prompt "$SKILL_DIR/prompts/reviewer.md" '${REFERENCE_CODE} ${DIFF_FILE} ${STATUS_FILE} ${WORK_DIR} ${WORKER_RESULT} ${PREV_CONTEXT} ${REVIEWER_CONTRACT_VERSION} ${CONVENTIONS_FILE}')"
-  # 리뷰어 CLI 는 REVIEWER_MODEL 로 라우팅. 결과 JSON 은 $review, 원문은 $review.raw(claude) / $review.log(codex).
+  # 리뷰어 CLI 는 REVIEWER_MODEL 로 라우팅. 결과 JSON 은 $review, 원문은 $review.raw(claude) / $review.events.jsonl + $review.stderr.log(codex).
   run_readonly_json_role REVIEWER "reviewer-a$attempt_tag" "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
     || exit 1
   jq -e '.verdict' "$review" >/dev/null 2>&1 \
@@ -247,6 +247,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
       (.evidence_type=="SEMANTIC_REDUNDANCY" and (.reachable_scenario!="" or (.category!="REDUNDANT_CONTROL_FLOW" and .category!="REDUNDANT_CODE"))) or
       ((.category=="REDUNDANT_CONTROL_FLOW" or .category=="REDUNDANT_CODE") and .evidence_type!="SEMANTIC_REDUNDANCY") or
       (.category=="UNDECIDED_APPROACH" and (.action!="DOC_GAP" or .evidence_type!="DIRECT_MISMATCH" or (.code_refs|length)==0)) or
+      (.action=="DOC_GAP" and ((.user_question // "")=="" or ((.options // [])|length)<2)) or
+      (.action=="FIX_CODE" and ((.user_question // "")!="" or ((.options // [])|length)>0)) or
       (.required_outcome=="") or
       (($round|tonumber)==1 and (.origin!="ROUND_1" or .previous_issue_id!="" or .fix_ref!="")) or
       (($round|tonumber)>1 and (
@@ -284,11 +286,14 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
     exit 0
   fi
 
-  # DOC_GAP: 코드가 아니라 approach.md 가 비어 있다 — 수정자를 부르지 않고 문서 단계로.
-  # 제품 정책 선택이라 사용자에게 가야 하는지는 재합의 때 문서 검증자(ASK_USER/POLICY_UNDECIDED)가 판정한다.
+  # DOC_GAP: 구현 중 드러난 solution-shape 미결정 — 사용자 판단이다. 수정자도 impl 재합의도 부르지 않고 리뷰 전체를 체크포인트(doc-gap-resume.json,
+  # source tree 포함)한 뒤 사용자에게 돌려보낸다. 같은 리뷰의 FIX_CODE 는 사용자가 답한 뒤 review-gap 워커 1회가 DOC_GAP 결정과 함께 처리한다
+  # (수정자를 먼저 돌리지 않는다). exit 3 = 러너가 NEED_USER(REVIEW_DOC_GAP) 로 반환.
   doc_ids=$(jq -r '[.issues[] | select(.action=="DOC_GAP") | .id] | join(",")' "$review")
   if [ -n "$doc_ids" ]; then
-    echo "[STOP] 리뷰어가 문서 공백을 보고함($doc_ids). approach.md 보강 후 재실행(검증자 재합의 → 워커 재개)." >&2
+    doc_gap_record_review "$review" "$attempt" "$round" "$cur_tree" || { echo "[FAIL] doc-gap-resume.json 기록 실패" >&2; exit 1; }
+    echo "[STOP] 리뷰어 DOC_GAP($doc_ids) — 사용자 결정 필요. 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행(검증자·디자이너 없이 review-gap 워커 → 리뷰)." >&2
+    jq -r '.issues[] | select(.action=="DOC_GAP") | "  [\(.id)] \(.user_question)\n      선택지: \(.options | join(" | "))"' "$review" >&2
     stop_with 3 DOC_GAP --arg issues "$doc_ids" --arg review "$review"
   fi
 

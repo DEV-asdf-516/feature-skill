@@ -1,0 +1,21 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientService.java ClientSummaryRepository",
+      "technique": "summary 전용 조회를 담당하는 중첩 repository 클래스",
+      "basis": "요약 조회 경로를 기존 get 경로와 분리해 두기 위해"
+    }
+  ],
+  "tests": [
+    {
+      "name": "summary_returnsThreeFields",
+      "result": "PASS"
+    },
+    {
+      "name": "summary_unknownId_throwsNotFound",
+      "result": "PASS"
+    }
+  ]
+}

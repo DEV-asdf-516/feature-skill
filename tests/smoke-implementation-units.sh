@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================
-# 스모크: 구현 단위(implementation unit) 직렬 실행 — 실제 LLM 호출 없음 (mock claude / fake codex), 임시 저장소
+# 스모크: 구현 단위(implementation unit) 직렬 실행 — 실제 LLM 호출 없음 (공용 mock CLI: 역할은 스키마로 판별, 모델→CLI 매핑 무관), 임시 저장소
 # 파일 경로: tests/smoke-implementation-units.sh
 # 사용법: bash tests/smoke-implementation-units.sh   (어디서든 실행 가능)
 #
@@ -72,17 +72,65 @@ EOF
 }
 write_units
 
-# --- fake codex: 검증자(read-only) 는 PASS 픽스처를 실제 -o 경로에 쓴다. 워커(workspace-write) 는 unit id 를 프롬프트에서 읽어 기록·수정 ---
-cat > "$TMP/bin/codex" <<'EOF'
+# --- 공용 mock CLI: bin/claude 와 bin/codex 는 같은 스크립트의 사본이다 ---
+# 역할(검증자·리뷰어·워커·수정자)은 호출된 CLI 가 아니라 **스키마 내용**으로 판별한다. production config 의 모델→CLI 매핑
+# (REVIEWER_MODEL/VALIDATOR_MODEL/WORKER_MODEL 이 claude 든 codex 든)을 전제하지 않으므로 사용자가 역할별 모델을 바꿔도 깨지지 않는다.
+#   spec-review 스키마(blocking_issues) → 검증자 PASS / impl-review 스키마(issues) → 최종 리뷰어 APPROVE
+#   worker-result 스키마(context_updates) → 워커(unit id 는 프롬프트에서) / 스키마 없는 편집 호출 → 수정자
+#   unit_id 스키마 → 존재하지 않는 unit 리뷰어이므로 즉시 실패
+# 출력 규약만 CLI 별로 다르다: codex 는 -o 경로에 JSON, claude 는 stdout 에 {"structured_output":…, usage}.
+cat > "$TMP/bin/mock-cli" <<'EOF'
 #!/usr/bin/env bash
-out=""; readonly_sb=0; prompt=""
-while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --sandbox) [ "$2" = read-only ] && readonly_sb=1; shift 2;; *) prompt="$1"; shift;; esac; done
-if [ "$readonly_sb" = 1 ]; then printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$MOCK_VALIDATOR_CONTRACT" > "$out"; exit 0; fi
+cli="$(basename "$0")"   # claude | codex — 출력 규약 선택에만 쓴다
+out=""; schema=""; prompt=""; session_flag=""; editing=0
+while [ "$#" -gt 0 ]; do case "$1" in
+  exec|-p) shift;;
+  -o) out="$2"; shift 2;;
+  --output-schema) schema="$(cat "$2")"; shift 2;;            # codex: 스키마 파일 경로
+  --json-schema) schema="$2"; shift 2;;                         # claude: 스키마 본문
+  --sandbox) [ "$2" = workspace-write ] && editing=1; shift 2;;
+  --permission-mode) editing=1; shift 2;;
+  --session-id|--resume) session_flag="$1"; shift 2;;
+  -m|-c|--model|--effort|--output-format|--tools|--allowedTools|--disallowedTools|--append-system-prompt) shift 2;;
+  *) prompt="$1"; shift;;
+esac; done
+usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
+emit() { # 결과 JSON 을 호출된 CLI 의 규약대로 돌려준다
+  if [ "$cli" = codex ]; then
+    if [ -n "$out" ]; then printf '%s\n' "$1" > "$out"; else printf '%s\n' "$1"; fi
+  else
+    printf '{"structured_output":%s,%s}\n' "$1" "$usage"
+  fi
+}
+role=""
+case "$schema" in
+  *'"unit_id"'*) role=unit-reviewer;;
+  *'"blocking_issues"'*) role=validator;;
+  *'"issues"'*) role=reviewer;;
+  *'"context_updates"'*) role=worker;;
+  "") [ "$editing" = 1 ] && role=fixer;;
+esac
+[ -n "$role" ] || { echo "UNKNOWN-ROLE cli=$cli editing=$editing" >> "$MOCK_LOG"; exit 1; }
+
+case "$role" in
+  unit-reviewer) echo "UNIT-REVIEWER-CALLED" >> "$MOCK_LOG"; exit 1;;
+  validator) emit "{\"schema_version\":$MOCK_VALIDATOR_CONTRACT,\"verdict\":\"PASS\",\"blocking_issues\":[]}"; exit 0;;
+  reviewer) echo "final-review" >> "$MOCK_LOG"; emit "{\"schema_version\":$MOCK_REVIEW_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}"; exit 0;;
+  fixer)
+    unit="$(printf '%s' "$prompt" | grep -oE '"id": *"[0-9]+-[a-z0-9-]+"' | head -1 | sed -E 's/.*"([0-9]+-[a-z0-9-]+)"/\1/')"
+    echo "fixer ${unit:-none}" >> "$MOCK_LOG"
+    if [ "$cli" = codex ]; then echo ok; else printf '{"result":"ok",%s}\n' "$usage"; fi
+    exit 0;;
+esac
+
+# ---- 워커 / test-fix (CLI 무관하게 같은 동작) ----
 unit="$(printf '%s' "$prompt" | grep -oE '"id": *"[0-9]+-[a-z0-9-]+"' | head -1 | sed -E 's/.*"([0-9]+-[a-z0-9-]+)"/\1/')"
 kind=worker; printf '%s' "$prompt" | grep -qE 'targeted-test-[0-9]+\.log' && kind=test-fix   # 수정 프롬프트에만 실패 로그 경로(${TEST_LOG})가 있다
 # 동시 실행 감지: 이미 다른 워커가 실행 중이면 즉시 실패
 mkdir "$MOCK_STATE/worker.lock" 2>/dev/null || { echo "CONCURRENT WORKER" >> "$MOCK_LOG"; exit 9; }
+release() { rmdir "$MOCK_STATE/worker.lock"; }
 echo "$kind ${unit:-none}" >> "$MOCK_LOG"
+[ "$cli" = claude ] && [ "$kind" = worker ] && echo "claude-worker $unit $session_flag" >> "$MOCK_LOG"   # 사례 T: fresh 세션 플래그 기록
 sleep 0.2
 n="${unit%%-*}"
 # 프롬프트의 [IMPLEMENTATION CONTEXT] 블록을 보존해 사례 X 가 검사한다
@@ -96,51 +144,26 @@ esac
 case "$kind" in
   worker)
     # 실행 실패(exit 7)는 작업 트리를 바꾸기 전에 낸다 — 변경 뒤 non-zero 는 결과 JSON 이 없으면 WORKER_OUTCOME_UNCERTAIN(자동 재실행 금지)이며 tests/smoke-cli-exit-mismatch.sh 가 본다
-    if [ -f "$MOCK_STATE/crash-$n" ]; then rm -f "$MOCK_STATE/crash-$n"; rmdir "$MOCK_STATE/worker.lock"; exit 7; fi
+    if [ -f "$MOCK_STATE/crash-$n" ]; then rm -f "$MOCK_STATE/crash-$n"; release; exit 7; fi
     [ -n "$unit" ] && echo "worker $unit" >> "src/u$n.txt"
     [ "$n" = 01 ] || [ "$n" = 02 ] && echo "shared by $unit" >> src/shared.txt
     [ "$n" = 02 ] && mkdir -p src/gen && echo "gen by 02" > src/gen/new.txt
     if [ -f "$MOCK_STATE/outside-$n" ]; then echo "outside by $unit" >> src/outside.txt; fi          # 전체 범위 밖
     if [ -f "$MOCK_STATE/unitscope-$n" ]; then echo "unit-scope leak by $unit" >> src/u03.txt; fi   # 전체 범위 안, unit scope 밖 (01/02 에서)
     if [ -f "$MOCK_STATE/undecided-$n" ]; then
-      printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[]}' "$n" > "$out"
-      rmdir "$MOCK_STATE/worker.lock"; exit 0
+      emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[]}' "$n")"
+      release; exit 0
     fi
-    printf '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u%s.txt","technique":"t","basis":"b"}],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":%s}' "$n" "$n" "$ctx" > "$out";;
+    emit "$(printf '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u%s.txt","technique":"t","basis":"b"}],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":%s}' "$n" "$n" "$ctx")";;
   test-fix)
     echo "test-fix $unit" >> "src/u$n.txt"
-    printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":%s}' "$ctx" > "$out";;
+    emit "$(printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":%s}' "$ctx")";;
 esac
-rmdir "$MOCK_STATE/worker.lock"
+release
 exit 0
 EOF
-# --- mock claude: --tools → 최종 리뷰어(항상 APPROVE) / --permission-mode → 편집 역할(스키마 있으면 claude 워커, 없으면 수정자) ---
-# unit 별 리뷰어는 존재하지 않는다 — 리뷰어 호출 프롬프트에 unit JSON 이 들어 있으면 unit 리뷰로 보고 즉시 실패시킨다.
-cat > "$TMP/bin/claude" <<'EOF'
-#!/usr/bin/env bash
-is_reviewer=0; is_editor=0; schema=""; prompt=""; session_flag=""
-while [ "$#" -gt 0 ]; do case "$1" in --tools) is_reviewer=1; shift 2;; --permission-mode) is_editor=1; shift 2;; --json-schema) schema="$2"; shift 2;; --session-id|--resume) session_flag="$1"; shift 2;; -p|--model|--effort|--output-format|--allowedTools|--disallowedTools|--append-system-prompt) [ "$1" = -p ] && shift || shift 2;; *) prompt="$1"; shift;; esac; done
-usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
-if [ "$is_reviewer" = 1 ]; then
-  if printf '%s' "$schema" | grep -q '"unit_id"'; then
-    echo "UNIT-REVIEWER-CALLED" >> "$MOCK_LOG"; exit 1
-  fi
-  echo "final-review" >> "$MOCK_LOG"
-  printf '{"structured_output":{"schema_version":%s,"verdict":"APPROVE","issues":[]},%s}' "$MOCK_REVIEW_CONTRACT" "$usage"
-elif [ "$is_editor" = 1 ]; then
-  unit="$(printf '%s' "$prompt" | grep -oE '"id": *"[0-9]+-[a-z0-9-]+"' | head -1 | sed -E 's/.*"([0-9]+-[a-z0-9-]+)"/\1/')"
-  if [ -n "$schema" ]; then
-    # claude 로 라우팅된 워커 (사례 T): 세션 플래그만 기록하고 DONE
-    echo "claude-worker $unit $session_flag" >> "$MOCK_LOG"
-    n="${unit%%-*}"; echo "claude worker $unit" >> "src/u$n.txt"
-    printf '{"structured_output":{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}},%s}' "$usage"
-  else
-    echo "fixer ${unit:-none}" >> "$MOCK_LOG"
-    printf '{"result":"ok",%s}' "$usage"
-  fi
-fi
-EOF
-chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
+chmod +x "$TMP/bin/mock-cli"
+cp "$TMP/bin/mock-cli" "$TMP/bin/claude"; cp "$TMP/bin/mock-cli" "$TMP/bin/codex"
 export MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 
 # --- 합의 PASS 픽스처: 가짜 PASS 리뷰를 두고 합의 루프를 돌려 체크포인트를 만든다 (codex 검증자는 아무것도 쓰지 않는다) ---
@@ -160,7 +183,8 @@ reset_tree() { # 소스 파일을 기준선으로, unit 산출물·lock·체크�
   git checkout -q -- src; rm -rf src/gen
   rm -f "$MOCK_STATE"/ctx-*.txt
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json .agent-work/feature-scope.lock.json .agent-work/worker-baseline.tree .agent-work/worker-baseline.guard.json \
-    .agent-work/worker-result.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-*
+    .agent-work/worker-result.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* \
+    .agent-work/doc-gap-resume.json   # 사례 C 의 UNDECIDED 가 남긴 사용자 대기 체크포인트(tests/smoke-doc-gap.sh 가 검증) — 다음 사례는 pending 없이 시작
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }
 
@@ -384,9 +408,9 @@ grep -q 'src/outside.txt' .agent-work/run-state.json || fail "S: 부분집합 �
 cp "$TMP/units.keep" .agent-work/implementation-units.json; fake_pass impl
 pass "S: manifest 스키마·중복·순번·금지 필드·부분집합 검증"
 
-# ===== 사례 T: claude 로 라우팅된 워커는 unit 마다 fresh 세션 =====
+# ===== 사례 T: claude 로 라우팅된 워커는 unit 마다 fresh 세션 (라우팅은 WORKER_CLI 로 명시 고정 — 모델 이름 추론에 의존하지 않는다) =====
 reset_tree
-sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="claude-worker-x"/' "$CFG" && rm -f "$CFG.bak"
+sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="claude-worker-x"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "T: exit 0 기대, 실제 $rc"; }
 [ "$(seq_of '^claude-worker ')" = "claude-worker 01-intake --session-id claude-worker 02-drop --session-id claude-worker 03-reassign --session-id" ] \

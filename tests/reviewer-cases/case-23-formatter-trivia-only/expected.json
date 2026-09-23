@@ -1,0 +1,6 @@
+{
+  "round": 1,
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "심볼·순서·helper 없음·지역 변수 이름 client 까지 blueprint 그대로다. 줄바꿈·빈 줄·인자 개행·import 순서만 참조 코드와 다르며 이는 formatter·import 정렬 도구가 정하는 차이(결정 5 DELEGATED)다."
+}

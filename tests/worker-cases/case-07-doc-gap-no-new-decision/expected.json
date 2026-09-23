@@ -1,0 +1,24 @@
+{
+  "expected_status": "UNDECIDED",
+  "expected_exit": 2,
+  "undecided_kinds": [
+    "DOC_GAP"
+  ],
+  "allowed_new_files": [],
+  "files_must_exist": [
+    "src/ClientService.java"
+  ],
+  "files_must_not_exist": [
+    "src/ClientSummary.java",
+    "src/Summary.java",
+    "src/ClientSummaryDto.java"
+  ],
+  "must_contain": {},
+  "must_not_contain": {
+    "src/ClientService.java": [
+      "\\bsummary\\s*\\(",
+      "\\b(class|record|interface|enum)\\s+\\w*Summary"
+    ]
+  },
+  "run_targeted_test": false
+}

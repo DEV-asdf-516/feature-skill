@@ -26,18 +26,22 @@
 #            병렬·DAG·우선순위 없음. 재실행은 첫 미완료 unit 부터. 모든 unit 완료 후 unit 결과를 worker-result.json 으로 합쳐
 #            기존 전체 review 로 — 기존 `run_worker worker-implement.md` 1회를 unit 별 fresh 워커 여러 회로 바꾼 것뿐이다.
 #   review : impl-review-loop.sh (리뷰어 게이트 → FIX_CODE 만 수정자 → 종결 검토)
-#            DOC_GAP → impl(문서 보강), DEADLOCK/MAX_ROUNDS → 사용자
+#            DOC_GAP → 사용자(REVIEW_DOC_GAP, doc-gap-resume.json), DEADLOCK/MAX_ROUNDS → 사용자
+#   doc-gap: 구현 후 DOC_GAP 재개 경로(doc-gap-resume.json 이 pending 인 동안 impl 지문 추론보다 우선). impl consensus 는 최초 워커 진입 전
+#            사전 게이트일 뿐이고, 워커·리뷰어가 구현 중 발견한 DOC_GAP/USER_DECISION 은 사용자 결정이 최종이다 — 검증자·디자이너 재호출 없음.
+#            WAITING_USER(답 전 — 모델 0회) → 답·approach 동기화·source tree 불변 확인 → WORKER_PENDING(unit 이면 그 unit 부터 worker stage,
+#            리뷰 이슈면 review-gap 워커 1회가 DOC_GAP 결정 + 같은 리뷰의 FIX_CODE 를 함께) → REVIEW_PENDING → review → RESOLVED.
 #   verify : 승인 지문 → TEST_CMD → LINT_CMD → 지문 재확인
 #            실패 → worker-fix(최대 MAX_TEST_RETRIES) → review → verify
 #            지문 STALE → review (연속 2회면 사용자 반환)
 #
 # 종료 코드 / run-state.json status:
 #   0 DONE        완료
-#   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED |
+#   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED(워커 DOC_GAP/USER_DECISION) | REVIEW_DOC_GAP | DOC_GAP_SOURCE_CHANGED | DOC_GAP_SCOPE_EXCEEDED |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
 #                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION)
-#   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING | APPROACH_GAP)
+#   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING)
 #   1 ENV_ERROR   환경·CLI 오류
 #
 # 자동 복구 금지: 여기서 허용하는 자동 루프는 성공 조건이 기계적으로 명확한
@@ -214,8 +218,9 @@ require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst g
 for f in consensus-loop.sh impl-review-loop.sh; do
   [ -x "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음/실행권한 없음: $f"
 done
+[ -f "$SKILL_DIR/scripts/worker-invoke.sh" ] || env_error "스크립트 없음: worker-invoke.sh (run_worker)"
 [ -f "$WORKER_SCHEMA" ] || env_error "스키마 없음: $WORKER_SCHEMA"
-for p in worker-unit.md worker-unit-fix.md worker-fix.md; do
+for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
   [ -f "$SKILL_DIR/prompts/$p" ] || env_error "프롬프트 없음: $p"
 done
 
@@ -293,7 +298,8 @@ if [ -f "$STATE" ]; then
   hinted="$(jq -r '.stage' "$STATE")"
   hinted_status="$(jq -r '.status' "$STATE")"
   [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; exit 0; }
-  case "$hinted" in preflight|"") STAGE=design;; *) STAGE="$hinted";; esac
+  # doc-gap 힌트인데 체크포인트가 더 이상 pending 이 아니면(RESOLVED 직후 죽음) worker 부터 — 완료 unit 은 건너뛰고 review 로 간다
+  case "$hinted" in preflight|"") STAGE=design;; doc-gap) STAGE=worker;; *) STAGE="$hinted";; esac
 fi
 # 활성 기준선 가드는 stage 와 관계없이 파이프라인 전체를 막는다 — 특히 verify 단계의 worker-fix 가 기준선을 바꿔 멈춘 뒤
 # verify 로 재진입하는 경로: exact files 범위에서는 범위 밖 변경·기준선 변경이 승인 지문에 안 잡혀 리뷰 루프·run_worker 를 거치지 않고
@@ -315,9 +321,15 @@ case "$STAGE" in
   impl|worker|review|verify|done)
     consensus_pass_current design || { log "design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터"; STAGE=design; };;
 esac
+# 구현 후 DOC_GAP 체크포인트가 pending 이면 impl 지문 추론보다 먼저 doc-gap 경로로 간다 — 사용자가 답을 decisions.md/approach.md 에 적으면
+# impl PASS 지문은 당연히 stale 이 되지만 그것은 새 구현 제안이 아니라 pending gap 의 해결이다(검증자 재승인 없음). design PASS 는 위에서 이미 확인.
+if [ "$STAGE" != design ] && doc_gap_pending; then
+  log "DOC_GAP 재개 체크포인트 pending ($(doc_gap_next_step), origin $(doc_gap_field .origin)) — doc-gap 경로 우선"; STAGE=doc-gap
+fi
 case "$STAGE" in
   worker|review|verify|done)
-    consensus_pass_current impl || { log "impl 합의 PASS 가 현재 입력에 대해 유효하지 않음 — impl 부터"; STAGE=impl; };;
+    # impl PASS 가 stale 이어도 사용자가 해결한 gap 의 지문(doc-gap-resume.json)이 현재 입력과 같으면 impl 로 되돌리지 않는다(impl_docs_accepted)
+    impl_docs_accepted || { log "impl 합의 PASS 가 현재 입력에 대해 유효하지 않음 — impl 부터"; STAGE=impl; };;
 esac
 case "$STAGE" in
   review|verify|done)
@@ -335,133 +347,8 @@ fi
 log "시작 stage: $STAGE (test_retries=$TEST_RETRIES)"
 
 # ---------- 워커 호출 ----------
-# run_worker <prompt-file> [unit-dir]
-#   unit-dir 없음: 전체 피처 호출(현재는 verify 의 worker-fix.md 만). 결과 $WORKER_RESULT, tree 는 $WORK_DIR/worker-*.tree.
-#   unit-dir 있음: 구현 단위 호출. unit-dir/unit.json 을 ${UNIT_JSON} 으로 렌더링하고, 결과·tree·원문 로그를 unit-dir/<RUN_TAG>-* 에 남기며,
-#                  전체 범위 검사 뒤에 unit-dir/scope.json 으로 같은 write-set 검사를 한 번 더 한다(UNIT_SCOPE_VIOLATION). units manifest 불변도 본다.
-#   RUN_TAG (기본 worker): 산출물 접두(unit 의 test-fix 호출은 test-fix-NN). TEST_LOG 는 템플릿 변수로만 쓰인다.
-# 세션: 전체 호출은 worker, unit 호출은 worker-unit-<id> — unit 마다 fresh 세션이며 이전 unit 의 문맥을 잇지 않는다(잇는 것은 worktree 뿐).
-run_worker() { # prompt-file [unit-dir]
-  local prompt_file="$1" unit_dir="${2:-}" tag="${RUN_TAG:-worker}"
-  local prompt worker_rules result out_dir tree_prefix unit_json="" unit_id="" unit_scope="" session
-  if [ -n "$unit_dir" ]; then
-    unit_json="$(cat "$unit_dir/unit.json")" && unit_id="$(jq -er '.id' "$unit_dir/unit.json")" || env_error "unit.json 읽기 실패: $unit_dir"
-    out_dir="$unit_dir"; result="$unit_dir/$tag-result.json"; tree_prefix="$unit_dir/$tag"; unit_scope="$unit_dir/scope.json"
-    session="worker-unit-$unit_id"
-  else
-    out_dir="$WORK_DIR/reviews"; result="$WORKER_RESULT"; tree_prefix="$WORK_DIR/worker"; session=worker
-  fi
-  # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
-  require_baseline_guard_resolved \
-    || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음"
-  # 직전 워커 호출 결과가 불확실한 채 남은 변경 위에 같은 워커를 다시 부르지 않는다(사용자가 호출 전 tree 로 복구한 뒤에만)
-  require_worker_outcome_guard_resolved \
-    || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))의 완료 여부가 불확실한데 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 되돌린 뒤 재실행. 자동 원복·자동 재호출 없음"
-  # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다
-  worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
-  # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
-  local impl_context=""
-  if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
-  prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$(load_reference_code)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
-    UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" \
-    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT}')" \
-    || env_error "워커 프롬프트 렌더링 실패"
-  local stamp raw; stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
-  mkdir -p "$out_dir"
-  rm -f "$result"
-  local index_before index_after worker_rc before_tree after_tree violations scope_hash_before scope_hash_after baseline_before baseline_after units_hash_before=""
-  index_before="$(compute_index_fingerprint)" || env_error "워커 호출 전 git index 지문 계산 실패"
-  scope_hash_before="$(feature_scope_hash)"
-  [ -z "$unit_dir" ] || units_hash_before="$(units_manifest_hash)"
-  # 소유권 기준선은 호출 전에 확정해 사후 판정에 그대로 넘긴다 — 파일은 워커가 쓸 수 있는 .agent-work 안에 있다
-  baseline_before="$(read_worker_baseline_tree)" || env_error "worker-baseline.tree 가 유효한 tree 를 가리키지 않음"
-  [ -n "$baseline_before" ] || log "[WARN] worker-baseline.tree 없음 — new_file_roots 아래는 신규 생성(A)만 허용하는 규칙으로 검사"
-  before_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 전 tree 스냅샷 실패"
-  printf '%s\n' "$before_tree" > "$tree_prefix-before.tree"
-  set +e
-  # 워커 CLI 는 WORKER_MODEL 로 라우팅. 프롬프트에 conventions·core_rules 가 이미 있으므로 conventions 는 "".
-  run_edit_role WORKER "$session" "$tag-$stamp" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$result" --allowedTools "Bash"
-  worker_rc=$?
-  set -e
-  # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료하면 가드가 남지 않아
-  # 사용자가 보고된 문제만 고치고 재실행할 때 변조된 기준선이 새 기준선으로 읽힌다. 종료 우선순위(index → manifest → 기준선)는 그대로.
-  local baseline_changed=0
-  baseline_after=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_after="$(cat "$WORK_DIR/worker-baseline.tree")"
-  if [ "$baseline_after" != "$baseline_before" ]; then
-    record_baseline_guard "$baseline_before" "$baseline_after" worker || env_error "worker-baseline 가드 기록 실패"
-    baseline_changed=1
-  fi
-  # 사후 조건을 CLI 성공 여부보다 먼저 본다 — 워커는 작업 트리만 바꿀 수 있고, index 가 바뀌었으면
-  # (worker_guard 정규식을 우회한 git add 등) 실패한 실행이라도 복구하지 않고 그 사실부터 보고한다
-  index_after="$(compute_index_fingerprint)" || env_error "워커 호출 후 git index 지문 계산 실패"
-  [ "$index_after" = "$index_before" ] \
-    || env_error "워커가 git index 를 변경함 — 자동 복구하지 않음. git status 로 확인 후 재실행"
-  # manifest 불변 검사: 워커가 원본이나 lock 을 고쳐 범위를 넓히면 write-set 검사가 무력화된다 — CLI 성공 여부보다 먼저 본다
-  scope_hash_after="$(feature_scope_hash)"
-  [ "$scope_hash_after" = "$scope_hash_before" ] \
-    || stop_need_user SCOPE_MANIFEST_CHANGED "워커 호출 중 feature-scope.json 또는 feature-scope.lock.json 이 바뀜 — 자동 복구하지 않음. 원본과 lock 을 확인하고, 의도한 범위 변경이면 lock 을 지운 뒤 재실행(impl 재합의)"
-  # units manifest 불변 검사(unit 호출): 워커가 원본이나 lock 을 고쳐 unit 범위·순서를 바꾸면 이후 unit 검사가 무력화된다
-  if [ -n "$unit_dir" ] && [ "$(units_manifest_hash)" != "$units_hash_before" ]; then
-    stop_need_user UNITS_MANIFEST_CHANGED "unit $unit_id 호출 중 implementation-units.json 또는 implementation-units.lock.json 이 바뀜 — 자동 복구하지 않음. 원본과 lock 을 확인하고, 의도한 분할 변경이면 lock 을 지운 뒤 재실행(impl 재합의 후 새 lock 확정)"
-  fi
-  # write-set 검사: 호출 전후 tree 사이 변경이 feature-scope.json 범위를 벗어나면 자동 원복 없이 보존하고 중단.
-  # (같은 working tree 의 다른 세션 변경도 여기 잡힐 수 있다 — 그래서 원복하지 않고 사람이 본다)
-  after_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 후 tree 스냅샷 실패"
-  printf '%s\n' "$after_tree" > "$tree_prefix-after.tree"
-  # 기준선 불변 검사: 워커가 worker-baseline.tree 를 바꾸면(예: 빈 tree) roots 아래 기존 파일이 전부 '피처가 만든 것'으로 보인다 (가드는 위에서 이미 기록)
-  [ "$baseline_changed" -eq 0 ] \
-    || stop_need_user SCOPE_BASELINE_CHANGED "워커 호출 중 worker-baseline.tree 가 변경됨(전: ${baseline_before:-없음} / 후: ${baseline_after:-없음}) — 자동 복구하지 않음. 파일을 원래 값으로 되돌리고 워커 변경을 확인한 뒤 재실행"
-  violations="$(feature_scope_violations "$before_tree" "$after_tree" "$baseline_before")"
-  if [ -n "$violations" ]; then
-    log "[SCOPE_VIOLATION] 워커 호출 중 범위 밖 경로 변경 — 자동 원복하지 않음:"; printf '  %s\n' $violations
-    stop_need_user SCOPE_VIOLATION "feature-scope.json 범위 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)). 워커 과잉 변경이면 범위를 넓히거나 되돌릴지 사용자가 결정, 다른 세션 변경이면 보존. 자동 원복 금지"
-  fi
-  # unit 범위 검사: 전체 범위 안이라도 현재 unit 의 scope 밖이면 같은 규칙(같은 함수, manifest 만 unit scope)으로 위반이다 — 원복 없이 중단
-  if [ -n "$unit_scope" ]; then
-    violations="$(SCOPE_MANIFEST_OVERRIDE="$unit_scope" feature_scope_violations "$before_tree" "$after_tree" "$baseline_before")"
-    if [ -n "$violations" ]; then
-      log "[UNIT_SCOPE_VIOLATION] unit $unit_id 호출 중 unit scope 밖 경로 변경 — 자동 원복하지 않음:"; printf '  %s\n' $violations
-      stop_need_user UNIT_SCOPE_VIOLATION "unit $unit_id 의 scope 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)). 과잉 구현이면 되돌릴지, unit 분할이 잘못됐으면 implementation-units.json 을 고쳐 impl 재합의할지 사용자가 결정. 자동 원복 금지, 다음 unit 으로 가지 않음"
-    fi
-  fi
-  # ---------- CLI/result 판정 (위 index → manifest → 기준선 → write-set 게이트를 모두 지난 뒤에만) ----------
-  # raw rc 는 usage.jsonl 에 그대로 남는다. 호출 직전 $result 를 지웠으므로 지금 있는 $result 는 이번 invocation 의 산출물이다.
-  #   rc≠0 + 유효한 결과 JSON(worker_result_valid: parse·필드 구조·DONE/UNDECIDED 모순) → CLI 종료코드 불일치로 기록하고 재실행 없이 계속
-  #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 없음 → 기존 실행 실패(재실행해도 같은 편집이 중복될 위험이 없다)
-  #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 있음 → WORKER_OUTCOME_UNCERTAIN 으로 중단, 가드 기록, 자동 원복·자동 재호출 없음
-  if [ "$worker_rc" -ne 0 ]; then
-    local worker_cli; worker_cli="$(role_cli WORKER)"
-    if worker_result_valid "$result"; then
-      log "[WARN] CLI_EXIT_STATUS_MISMATCH: WORKER $worker_cli exited $worker_rc, but current invocation produced a valid worker result ($result); continuing without replay"
-      record_cli_anomaly WORKER "$worker_cli" "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" STRUCTURED_RESULT "$result" || env_error "cli-anomalies.jsonl 기록 실패"
-    elif [ "$after_tree" = "$before_tree" ]; then
-      tail -20 "$raw" >&2
-      env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
-    else
-      record_worker_outcome_guard "$before_tree" "$after_tree" WORKER "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" "$result" || env_error "worker-outcome 가드 기록 실패"
-      tail -20 "$raw" >&2
-      stop_need_user WORKER_OUTCOME_UNCERTAIN "워커${unit_id:+ (unit $unit_id)} $worker_cli 가 exit $worker_rc 로 끝났고 유효한 결과 JSON($result)이 없는데 작업 트리는 바뀜(전: $before_tree / 후: $after_tree). 완료 여부를 알 수 없으므로 같은 워커를 자동 재호출하지 않고 변경도 원복하지 않음 — 사용자가 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리면 재실행 시 워커가 다시 돈다(worker-outcome.guard.json)"
-    fi
-  fi
-  jq -e '.status' "$result" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $result"
-  local status; status="$(jq -r '.status' "$result")"
-  local n; n="$(jq '.undecided|length' "$result")"
-  if { [ "$status" = DONE ] && [ "$n" -gt 0 ]; } || { [ "$status" = UNDECIDED ] && [ "$n" -eq 0 ]; }; then
-    env_error "모순된 워커 결과: status=$status / undecided=$n"
-  fi
-  log "워커${unit_id:+ (unit $unit_id)} status: $status / undecided: $n / delegated_choices: $(jq '.delegated_choices|length' "$result")"
-  jq -r '.undecided[]? | "  [UNDECIDED] \(.location): \(.decision_needed)"' "$result"
-  if [ "$status" = UNDECIDED ]; then
-    # 문서 누락(DOC_GAP)은 오케스트레이터가 approach.md 를 보강할 일이고, 제품 정책(USER_DECISION)만 사용자에게 간다.
-    local user_n; user_n="$(jq '[.undecided[] | select(.kind=="USER_DECISION")] | length' "$result")"
-    if [ "$user_n" -gt 0 ]; then
-      stop_need_user UNDECIDED "$result 의 USER_DECISION 항목을 사용자에게 질문 → decisions.md 에 '- [USER-QUESTION][scope=impl] <질문> → <답>' 기록 → approach.md 반영 후 재실행 (DOC_GAP 항목은 오케스트레이터가 함께 보강)"
-    fi
-    # stage 힌트를 impl 로 되돌려 재실행 시 보강된 approach.md 가 검증자 재합의를 거치게 한다
-    STAGE=impl
-    stop_need_docs APPROACH_GAP "$result 의 DOC_GAP 항목대로 approach.md 를 보강한 뒤 재실행 (검증자 재합의 후 워커 재개${unit_id:+ — 완료된 unit 은 건너뛰고 unit $unit_id 부터})"
-  fi
-}
+# run_worker 는 scripts/worker-invoke.sh 에 있다(본문 그대로 분리 — tests/worker-regression.sh 가 같은 경로로 production 워커 1회를 호출한다).
+source "$SKILL_DIR/scripts/worker-invoke.sh"
 
 # ---------- 구현 단위 하나 실행 ----------
 # fresh 워커 → targeted test(실패 시 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json. unit 별 리뷰·수정자는 없다 —
@@ -600,17 +487,79 @@ while :; do
         | jq -s '{status:"DONE", undecided:[], delegated_choices:(map(.delegated_choices[])), tests:(map(.tests[])), context_updates:{upsert:[],remove:[]}}' > "$WORKER_RESULT.tmp" \
         && mv "$WORKER_RESULT.tmp" "$WORKER_RESULT" || env_error "unit 결과 합치기 실패"
       log "모든 구현 단위 완료 (delegated_choices $(jq '.delegated_choices|length' "$WORKER_RESULT")건) — 전체 review 로"
+      # unit 워커 DOC_GAP 을 사용자가 해결한 뒤 그 unit 부터 다시 돌아 전부 끝났다 → 사용자 해결 provenance 는 RESOLVED 로 남는다(지문은 그대로 유효)
+      if [ "$(doc_gap_next_step)" = WORKER_PENDING ] && [ -n "$(doc_gap_field '.unit_id')" ]; then doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"; fi
       STAGE=review;;
+
+    doc-gap)
+      # 사용자 답 전에는 모델을 부르지 않는다. 답이 오면 검증자·디자이너 없이 워커 → 리뷰. 어느 substep 에서 죽어도 여기서 이어간다.
+      gap_step="$(doc_gap_next_step)"; gap_unit="$(doc_gap_field '.unit_id')"; gap_review="$(doc_gap_field '.review')"
+      gap_reason=UNDECIDED; [ "$(doc_gap_field '.origin')" != review ] || gap_reason=REVIEW_DOC_GAP
+      # 수리된 단계(WORKER_PENDING/REVIEW_PENDING)라도 provenance 다섯 조건이 지금 깨져 있으면(답 삭제·frozen 문서 변경·밑바탕 PASS 무효) 모델 0회로 멈춘다
+      if [ "$gap_step" != WAITING_USER ] && ! doc_gap_resolved_current; then
+        stop_need_user DOC_GAP_SCOPE_EXCEEDED "사용자 해결 체크포인트($gap_step)의 provenance 가 현재 상태와 맞지 않는다 — 답 줄 삭제, implementation.md/units/scope 변경, decisions.md 기존 줄 수정, 또는 impl consensus PASS 무효. 해당 변경을 되돌리고 재실행하거나, 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의). 자동 복구 없음"
+      fi
+      case "$gap_step" in
+        WAITING_USER)
+          unanswered="$(doc_gap_unanswered)"
+          if [ -n "$unanswered" ]; then
+            log "사용자 결정 대기 중 — 답 없는 gap: $(printf '%s' "$unanswered" | paste -sd, -)"; doc_gap_report
+            stop_need_user "$gap_reason" "구현 중 발견된 미결정 사항 — 사용자 결정이 최종이며 검증자·디자이너를 다시 부르지 않는다. 각 gap 의 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>'(빈 답 불가) 으로 기록하고 approach.md 에 그 결정을 최소한으로 반영한 뒤 재실행. 답 없는 gap: $(printf '%s' "$unanswered" | paste -sd, -). 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")))"] | join(" ; ")')"
+          fi
+          doc_gap_approach_synced \
+            || stop_need_user "$gap_reason" "모든 gap 에 답은 있지만 approach.md 가 DOC_GAP 발생 시점과 같다 — 사용자 결정을 approach.md 에 반영(동기화)한 뒤 재실행. 러너·디자이너가 대신 쓰지 않는다"
+          doc_gap_source_unchanged \
+            || stop_need_user DOC_GAP_SOURCE_CHANGED "사용자 결정을 기다리는 동안 source worktree 가 DOC_GAP 발생 시점 tree($(doc_gap_field '.source_tree'))와 달라졌다 — 기존 리뷰·워커 결과를 조용히 재사용하지 않는다. 변경을 확인한 뒤 ① 그 tree 로 명시적으로 되돌리고 재실행하거나 ② 변경을 유지하려면 doc-gap-resume.json 을 치우고 재실행(새 리뷰가 필요). 자동 원복 없음"
+          # 해결 범위 밖 변경(implementation.md/units/scope 변경, decisions.md 기존 줄 삭제·수정)은 gap 해결이 아니라 새 제안 — 사용자 해결 경로로 우회하지 않는다
+          if doc_gap_accept; then :; else
+            case $? in
+              2) stop_need_user DOC_GAP_SCOPE_EXCEEDED "gap 해결 범위(approach.md 반영 + decisions.md 추가) 밖의 impl 입력이 바뀌었다(implementation.md/implementation-units.json/feature-scope.json 변경 또는 decisions.md 기존 줄 삭제·수정). 사용자 해결 경로로는 impl 재합의를 우회할 수 없다 — 의도한 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의), 아니면 그 문서를 gap 발생 시점으로 되돌리고 재실행";;
+              *) env_error "doc-gap-resume.json 의 밑바탕 impl consensus PASS 가 유효하지 않거나 수리 기록 실패 — 체크포인트·consensus-impl.json 을 손으로 고치지 않는다";;
+            esac
+          fi
+          log "DOC_GAP 사용자 결정 확인 ($(doc_gap_field '[.gaps[].key] | join(",")')) — approach 동기화·source tree 불변 — 검증자·디자이너 없이 워커로"
+          continue;;
+        WORKER_PENDING)
+          if [ -n "$gap_unit" ]; then
+            # unit 워커 DOC_GAP: 그 unit 은 완료 처리되지 않았으므로 일반 worker stage 가 첫 미완료 unit(= 그 unit)부터 직렬로 이어간다
+            log "unit $gap_unit 부터 워커 재개(앞선 완료 unit 은 건너뜀)"; STAGE=worker; continue
+          fi
+          if [ -z "$gap_review" ]; then
+            # verify 의 worker-fix 가 낸 미결정: 결정이 approach.md 에 반영됐으므로 verify 로 돌아가 테스트 → 필요하면 worker-fix 가 다시 돈다
+            doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"; STAGE=verify; continue
+          fi
+          # 리뷰 DOC_GAP: review-gap 워커 1회. 재시작 안전성 — 워커가 이미 끝났으면(after tree == 현재, 유효 DONE 결과) 재호출 없이 리뷰로,
+          # source tree 가 기록과 다르면(외부 변경) fail closed. 모델 호출 없이 판정.
+          cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
+          if [ -f "$WORK_DIR/review-gap-after.tree" ] && [ "$(cat "$WORK_DIR/review-gap-after.tree")" = "$cur_tree" ] \
+             && worker_result_valid "$WORK_DIR/review-gap-result.json" && jq -e '.status=="DONE"' "$WORK_DIR/review-gap-result.json" >/dev/null 2>&1; then
+            log "review-gap 워커 결과가 이미 현재 작업 트리와 일치 — 재호출 없이 리뷰로"
+            doc_gap_set_step REVIEW_PENDING "$cur_tree" || env_error "doc-gap-resume.json 갱신 실패"; STAGE=review; continue
+          fi
+          [ "$cur_tree" = "$(doc_gap_field '.source_tree')" ] \
+            || stop_need_user DOC_GAP_SOURCE_CHANGED "review-gap 워커 호출 전 source worktree 가 기록된 tree($(doc_gap_field '.source_tree'))와 다르다 — 조용히 진행하지 않는다. 그 tree 로 되돌리고 재실행하거나 doc-gap-resume.json 을 치우고 새 리뷰. 자동 원복 없음"
+          write_state doc-gap RUNNING "" "review-gap worker ($(basename "$gap_review"))"
+          log "=== review-gap 워커: DOC_GAP 사용자 결정 + 같은 리뷰의 FIX_CODE 를 함께 구현 ($(basename "$gap_review")) ==="
+          RUN_TAG=review-gap REVIEW_FILE="$gap_review" DOC_GAP_REVIEW="$gap_review" \
+            GAP_CONTEXT="$(printf '리뷰 JSON: %s\n리뷰 당시 diff: %s\n\n미결정 항목과 사용자 결정:\n%s' "$gap_review" "$(dirname "$gap_review")/diff-round-$(printf '%02d' "$(doc_gap_field '.round')").patch" "$(doc_gap_prompt_block)")" \
+            run_worker worker-review-gap.md
+          doc_gap_set_step REVIEW_PENDING "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패"
+          STAGE=review; continue;;
+        REVIEW_PENDING) STAGE=review; continue;;
+        *) STAGE=worker; continue;;
+      esac;;
 
     review)
       set +e; bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
       case $rc in
-        0) STAGE=verify;;
+        0)
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"
+          STAGE=verify;;
         2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 리뷰 중단 — state.json.review 의 남은 이슈를 사용자에게 보고";;
         3)
-          # 리뷰어 DOC_GAP: 코드가 아니라 approach.md 가 비어 있다. 워커 DOC_GAP 과 같은 경로로 문서 단계 재진입.
-          STAGE=impl
-          stop_need_docs APPROACH_GAP "$(jq -r '.review' "$WORK_DIR/state.json") 의 DOC_GAP 이슈(required_outcome)대로 approach.md 를 보강한 뒤 재실행 (검증자 재합의 후 워커 재개)";;
+          # 리뷰어 DOC_GAP: 사용자 결정. 루프가 doc-gap-resume.json(WAITING_USER, 리뷰·source tree 포함)을 남겼다 — impl 재합의 없음.
+          log "리뷰어 DOC_GAP — 사용자 결정 필요:"; doc_gap_report
+          stop_need_user REVIEW_DOC_GAP "리뷰어가 구현 중 미결정 solution shape 를 보고함($(jq -r '.issues' "$WORK_DIR/state.json")) — 사용자 결정이 최종이며 검증자·디자이너·impl 재합의 없이 review-gap 워커 1회(DOC_GAP 결정 + 같은 리뷰의 FIX_CODE $(jq -r '[.issues[] | select(.action=="FIX_CODE") | .id] | join(",")' "$(jq -r '.review' "$WORK_DIR/state.json")")) → 리뷰로 간다. 각 issue 의 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행. 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); refs: \(.refs|join(", ")); impact: \(.impact))"] | join(" ; ")')";;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
 

@@ -4,7 +4,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [
-        10
+        14
       ]
     },
     "verdict": {
@@ -95,6 +95,16 @@
           },
           "fix_ref": {
             "type": "string"
+          },
+          "user_question": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         "required": [
@@ -110,7 +120,9 @@
           "required_outcome",
           "origin",
           "previous_issue_id",
-          "fix_ref"
+          "fix_ref",
+          "user_question",
+          "options"
         ],
         "additionalProperties": false
       }

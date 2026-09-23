@@ -1,0 +1,17 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientPatch.java",
+      "technique": "검증을 통과한 값만 담는 불변 타입 ClientPatch(parse 정적 팩토리, 내부는 unmodifiable Map)",
+      "basis": "결정 3 DELEGATED + NEW 허용 — 컨벤션 규칙 3 에 따라 경계에서 변환"
+    }
+  ],
+  "tests": [
+    { "name": "update_savesUpdatedClient", "result": "PASS" },
+    { "name": "update_rejectsBlankName", "result": "PASS" },
+    { "name": "update_rejectsNonDigitPhone", "result": "PASS" },
+    { "name": "update_unknownId_throwsNotFound", "result": "PASS" }
+  ]
+}

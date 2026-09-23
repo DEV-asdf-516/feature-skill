@@ -1,0 +1,21 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/TagMerger.java missing",
+      "technique": "incoming 각 항목마다 existing.contains 로 선형 판별",
+      "basis": "표준 List API 이며 추가 구조물이 없다"
+    }
+  ],
+  "tests": [
+    {
+      "name": "missing_returnsIncomingNotInExisting",
+      "result": "PASS"
+    },
+    {
+      "name": "missing_emptyIncoming_returnsEmpty",
+      "result": "PASS"
+    }
+  ]
+}

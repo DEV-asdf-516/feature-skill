@@ -1,0 +1,29 @@
+{
+ "version": 1,
+ "units": [
+  {
+   "id": "01-tag-formatter",
+   "title": "태그 포매터와 태그 한 줄",
+   "goal": "NEW TagFormatter.joinUpper 를 정확히 만들고 ClientService.tagLine 이 그것을 쓴다",
+   "requirements": [
+    "implementation.md#변경-파일",
+    "implementation.md#테스트"
+   ],
+   "scope": {
+    "files": [
+     "src/ClientService.java",
+     "src/TagFormatter.java",
+     "src/test/ClientServiceTest.java"
+    ]
+   },
+   "references": [
+    "implementation.md",
+    "approach.md#결정-1",
+    "approach.md#결정-2",
+    "approach.md#결정-3",
+    "approach.md#결정-4"
+   ],
+   "targeted_test": "bash run-tests.sh ClientServiceTest"
+  }
+ ]
+}

@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 14,
   "verdict": "REQUEST_CHANGES",
   "issues": [
     {
@@ -20,7 +20,9 @@
       "required_outcome": "ClientService.update 의 변경 감지가 approach.md 결정 2 가 지정한 DiffUtil.diff 를 거쳐 Map<String, FieldChange> 로 일괄 수집되고, 그 Map 이 ChangeLogWriter.writeAll 에 한 번 전달된다. 서비스에는 필드별 비교·개별 기록이 남지 않는다.",
       "origin": "ROUND_1",
       "previous_issue_id": "",
-      "fix_ref": ""
+      "fix_ref": "",
+      "user_question": "",
+      "options": []
     }
   ]
 }

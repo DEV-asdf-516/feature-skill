@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 14,
   "verdict": "REQUEST_CHANGES",
   "issues": [
     {
@@ -19,7 +19,9 @@
       "required_outcome": "전화번호 마스킹이 approach.md 결정 2 가 지정한 MaskingUtil.maskPhone 을 거친다",
       "origin": "ROUND_1",
       "previous_issue_id": "",
-      "fix_ref": ""
+      "fix_ref": "",
+      "user_question": "",
+      "options": []
     }
   ]
 }
