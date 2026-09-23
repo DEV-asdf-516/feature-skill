@@ -37,6 +37,10 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 sed -i.bak 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TMP/repo/.claude/skills/feature/config.sh"
+# 이 스모크의 mock 은 claude 형태(--tools / --permission-mode)뿐이다. production config 의 REVIEWER/FIXER 모델이 codex 로 라우팅되면
+# PATH 의 가짜 claude 가 아니라 실제 codex 가 호출되므로(유료), 역할 CLI 를 여기서 claude 로 고정하고 CODEX_BIN 은 실행 불가로 막는다.
+sed -i.bak "s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^FIXER_CLI=.*/FIXER_CLI=\"claude\"/; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-never\"|" "$TMP/repo/.claude/skills/feature/config.sh"
+printf '#!/usr/bin/env bash\necho "codex must not be called in this smoke: $*" >&2; exit 9\n' > "$TMP/bin/codex-never"; chmod +x "$TMP/bin/codex-never"
 cd "$TMP/repo" || exit 1
 git init -q
 printf '.agent-work/\n.claude/\n' > .gitignore

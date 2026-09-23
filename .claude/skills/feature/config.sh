@@ -12,15 +12,15 @@
 # 어느 CLI 로 돌릴지는 모델 ID 로 정한다(claude* → claude, gpt-*/o*/codex* → codex). 아래 "역할 → CLI 라우팅" 참고.
 DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자
 DESIGNER_EFFORT="low"
-VALIDATOR_MODEL="gpt-5.6-sol"     # 명세 검증자
+VALIDATOR_MODEL="gpt-6-sol"     # 명세 검증자
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 VALIDATOR_PROFILE=""      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 빈 값 = 모델별 기본값(validator_profile 헬퍼). compact | guided | conservative | none
-WORKER_MODEL="gpt-5.6-luna"       # 구현 담당
+WORKER_MODEL="gpt-6-luna"       # 구현 담당
 WORKER_EFFORT="max"
-REVIEWER_MODEL="claude-sonnet-5"  # 구현 리뷰 담당
-REVIEWER_EFFORT="medium"
+REVIEWER_MODEL="gpt-6-astra"  # 구현 리뷰 담당
+REVIEWER_EFFORT="low"
 FIXER_MODEL="claude-sonnet-5"     # 리뷰 이슈 수정 담당
-FIXER_EFFORT="medium"
+FIXER_EFFORT="low"
 
 # --- CLI 실행 형식 ---
 # Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
@@ -41,13 +41,16 @@ FIXER_CLI=""
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
-VALIDATOR_CONTRACT_VERSION=12
+# 13: implementation.md+approach.md 를 코드 사양서로 판정 — CODE_SPEC_GAP(문서가 두 가지 이상의 non-trivial 코드 구조를 허용) 추가, DELEGATED 는 formatter/import/compiler 세부와 저장소 단일 표현뿐.
+VALIDATOR_CONTRACT_VERSION=14
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
 # 루프는 리뷰 JSON 의 schema_version 이 이 값과 다르면 응답 오류로 중단한다.
 # 10: 프로젝트 컨벤션(conventions.md) 명시 규칙 위반을 CONTRACT_VIOLATION 으로 검사 — 리뷰어·수정자 프롬프트에 CONVENTIONS_FILE 경로 전달.
-REVIEWER_CONTRACT_VERSION=10
+# 11: code-spec 수준 REQUIRED(호출 순서·helper 분해·naming·local 구조·reference pattern) 이탈을 동작이 같아도 CONTRACT_VIOLATION 으로 검사. 제외는 formatter/import/compiler 세부뿐.
+# 14: DOC_GAP issue 에 user_question(비어 있지 않음)·options(≥2) 필수, FIX_CODE 는 둘 다 빈 값 — 리뷰어 DOC_GAP 은 impl 재합의가 아니라 사용자 결정으로 간다(doc-gap-resume.json).
+REVIEWER_CONTRACT_VERSION=14
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
@@ -101,6 +104,7 @@ render_prompt() {
 validator_profile() {
   if [ -n "${VALIDATOR_PROFILE:-}" ]; then printf '%s' "$VALIDATOR_PROFILE"; return 0; fi
   case "${VALIDATOR_MODEL:-}" in
+    gpt-6-sol)   printf 'compact' ;;
     gpt-5.6-sol)   printf 'compact' ;;
     gpt-5.6-astra) printf 'guided' ;;
     *)             printf 'conservative' ;;
@@ -266,7 +270,7 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
 }
 
 # 읽기 전용·스키마 강제 JSON 역할(검증자·리뷰어).
-#   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.log(stdout/stderr).
+#   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.events.jsonl(--json stdout) + $out.stderr.log.
 #   conventions: 프롬프트에 이미 들어 있으면 "" 를 넘긴다. claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록으로 붙인다.
 #   claude 는 세션(session_name)을 라운드 간 이어간다(codex exec 는 무상태). 두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
@@ -280,13 +284,15 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
       # 내용·mtime 으로 provenance 를 추론하지도 않는다(같은 JSON 을 다시 써도 새 결과다). usable 할 때만 $out 으로 atomic move.
       local tmp_out="$out.invocation-$inv.tmp"
       rm -f "$tmp_out"
-      "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
+      # --json: stdout 은 이벤트 JSONL(usage telemetry 원천, $out.events.jsonl), stderr 는 진단($out.stderr.log) — 한 파일에 섞으면 JSONL 이 깨진다.
+      # structured result 는 계속 invocation 전용 -o 파일만 인정한다(telemetry 와 result provenance 는 별개).
+      "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
         --output-schema "$schema" -o "$tmp_out" \
-        "$prompt" > "$out.log" 2>&1 || rc=$?
-      log_role_usage codex "$role" "$model" "$label" "$out.log" "$rc" "$inv"   # raw exit code 그대로 (exit_code/success 위조 없음)
+        "$prompt" > "$out.events.jsonl" 2> "$out.stderr.log" || rc=$?
+      log_role_usage codex "$role" "$model" "$label" "$out.events.jsonl" "$rc" "$inv"   # raw exit code 그대로 (exit_code/success 위조 없음)
       if ! { [ -s "$tmp_out" ] && jq -e 'type=="object"' "$tmp_out" >/dev/null 2>&1; }; then
         rm -f "$tmp_out"
-        echo "[FAIL] codex 실행 실패 또는 결과 JSON 없음 (exit $rc, 모델 '$model', $role 확인)" >&2; tail -20 "$out.log" >&2; return 1
+        echo "[FAIL] codex 실행 실패 또는 결과 JSON 없음 (exit $rc, 모델 '$model', $role 확인)" >&2; tail -20 "$out.stderr.log" >&2; return 1
       fi
       if [ "$rc" -ne 0 ]; then
         # rc ≠ 0 이어도 이번 호출이 파싱 가능한 결과 JSON 을 썼으면 즉시 폐기하지 않는다 — 호출자의 schema/contract 검사가 최종 게이트다.
@@ -317,7 +323,7 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
   esac
 }
 
-# 편집 역할(디자이너·수정자·워커). 원문 출력을 $raw 에 남기고 CLI 종료 코드를 그대로 돌려준다(호출자가 set +e 로 받는다).
+# 편집 역할(디자이너·수정자·워커). 원문 출력을 $raw(claude) 또는 $raw.events.jsonl + $raw.stderr.log(codex) 에 남기고 CLI 종료 코드를 그대로 돌려준다(호출자가 set +e 로 받는다).
 #   schema_file/out_json 이 비어 있지 않으면 스키마 강제 JSON 을 out_json 에 남긴다(워커). claude 는 structured_output 을 추출한다.
 #   conventions 는 run_readonly_json_role 과 같다. 나머지 인자는 claude 에만 붙는 추가 플래그(예: --allowedTools Bash).
 run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions schema_file out_json [claude_extra_args...]
@@ -330,10 +336,10 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
       local schema_args=()
       [ -z "$schema" ] || schema_args=(--output-schema "$schema" -o "$out")
-      "$CODEX_BIN" exec -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
-        ${schema_args[@]+"${schema_args[@]}"} "$prompt" 2>&1 \
-        | tee "$raw" || rc=$?
-      log_role_usage codex "$role" "$model" "$label" "$raw" "$rc" "$inv"
+      # --json stdout(이벤트 JSONL) 과 stderr 를 분리한다 — tee 로 합치면 JSONL 이 깨지고 pipe rc 가 섞인다. raw codex rc 를 그대로 돌려준다.
+      "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
+        ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+      log_role_usage codex "$role" "$model" "$label" "$raw.events.jsonl" "$rc" "$inv"
       ;;
     claude)
       local session_args conv_args=() schema_args=()
@@ -355,6 +361,10 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       ;;
   esac
   return "$rc"
+}
+# 편집 역할 실패 진단용 tail: codex 는 $raw.stderr.log, claude 는 $raw.
+role_raw_diag_tail() { # raw
+  if [ -f "$1.stderr.log" ]; then tail -20 "$1.stderr.log"; elif [ -f "$1" ]; then tail -20 "$1"; fi
 }
 
 # SHA-256 해시 (Linux sha256sum / macOS shasum 겸용)
@@ -891,6 +901,139 @@ impl_approval_current() {
   valid_impl_approve_review "$review"
 }
 
+# =============================================================
+# 구현 후 DOC_GAP 재개 체크포인트 — $WORK_DIR/doc-gap-resume.json
+#   impl consensus 는 최초 워커 진입 전의 사전 게이트다. 그 뒤 워커(unit)·리뷰어·review-gap 워커가 발견한 DOC_GAP/USER_DECISION 은
+#   impl 재합의로 돌아가지 않고 사용자에게 직접 간다: NEED_USER → 사용자가 decisions.md + approach.md 에 결정 기록 → 검증자·디자이너 없이 워커 → 리뷰.
+#   사용자 결정이 그 gap 의 최종 결정이며 validator PASS 와는 다른 provenance 다 — consensus-impl.json 을 위조하거나 PASS 지문을 덮어쓰지 않는다.
+#   대신 이 파일이 "이미 PASS 한 impl 문서(base_consensus_review) + 사용자가 답한 gap + 동기화된 approach" 의 지문(resolved_impl_fingerprint)을 들고,
+#   러너는 consensus_pass_current impl 이 stale 이어도 그 지문이 현재 입력과 같으면 impl 단계로 되돌리지 않는다(impl_docs_accepted).
+#   next_step: WAITING_USER(사용자 답 전 — 모델 호출 0회) → WORKER_PENDING(답·동기화·source tree 확인됨) → REVIEW_PENDING(review-gap 워커 완료) → RESOLVED.
+#   gaps[].tag 는 decisions.md 의 답 줄이 달아야 하는 태그다: `- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>`
+#     리뷰어 issue  → review-issue=<issue id>          워커 undecided → worker-gap=<unit id | review-gap>#<n>
+#   기존 [USER-QUESTION][scope=impl] 의미는 그대로다(impl 지문에 들어가고 design PASS 를 깨지 않는다). 태그가 붙은 줄만 pending gap 의 답으로 인정한다.
+# =============================================================
+DOC_GAP_RESUME="$WORK_DIR/doc-gap-resume.json"
+DOC_GAP_RESUME_VERSION=1
+_doc_gap_docs_hash() { _fingerprint_files "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/decisions.md" | sha256_stdin; }
+_doc_gap_approach_hash() { if [ -f "$WORK_DIR/approach.md" ]; then sha256_stdin < "$WORK_DIR/approach.md"; else printf 'MISSING'; fi; }
+# 해결 과정에서 바뀌어도 되는 것은 approach.md 와 decisions.md 의 **추가** 뿐이다. 그 밖의 impl 입력(implementation.md·implementation-units.json·feature-scope.json)은
+# gap 기록 시점 그대로여야 한다 — 바뀌었으면 gap 해결이 아니라 새 구현 제안이므로 사용자 해결 경로로 우회할 수 없다(impl 재합의).
+_doc_gap_frozen_hash() { _fingerprint_files "$WORK_DIR/implementation.md" "$WORK_DIR/implementation-units.json" "$WORK_DIR/feature-scope.json" | sha256_stdin; }
+_doc_gap_decisions_lines() { if [ -f "$WORK_DIR/decisions.md" ]; then wc -l < "$WORK_DIR/decisions.md" | tr -d ' '; else echo 0; fi; }
+_doc_gap_decisions_prefix_hash() { # n → decisions.md 앞 n 줄의 해시
+  if [ -f "$WORK_DIR/decisions.md" ]; then head -n "$1" "$WORK_DIR/decisions.md" | sha256_stdin; else printf 'MISSING'; fi
+}
+# 해결 범위 검사: frozen 문서 불변 + decisions.md 는 기록 시점 내용을 prefix 로 유지(append-only). 0 = OK, 1 = 범위 밖 변경.
+doc_gap_resolution_scope_ok() {
+  [ "$(_doc_gap_frozen_hash)" = "$(doc_gap_field '.frozen_docs_hash')" ] || return 1
+  local n; n="$(doc_gap_field '.decisions_lines')"
+  [ "$(_doc_gap_decisions_lines)" -ge "$n" ] && [ "$(_doc_gap_decisions_prefix_hash "$n")" = "$(doc_gap_field '.decisions_prefix_hash')" ]
+}
+_doc_gap_write() { # gaps-json origin review attempt round unit_id result source_tree
+  # 전제: 지금 impl 문서가 승인된 상태(최초 validator PASS 유효 또는 직전 gap 의 사용자 해결 지문 유효)여야 gap 을 기록할 수 있다 —
+  # 승인되지 않은 문서 위의 gap 은 존재할 수 없고, 이 전제가 provenance 체인(PASS → 해결 → 해결 …)의 귀납 조건이다.
+  impl_docs_accepted || { echo "[FAIL] doc-gap 기록 거부 — impl 문서가 승인된 상태가 아님(consensus-impl.json PASS 도 사용자 해결 지문도 현재 입력에 유효하지 않음)" >&2; return 1; }
+  local base_review="" base_round=0 base_fp=""
+  if [ -f "$WORK_DIR/consensus-impl.json" ]; then
+    base_review="$(jq -r '.review // ""' "$WORK_DIR/consensus-impl.json")"; base_round="$(jq -r '.round // 0' "$WORK_DIR/consensus-impl.json")"
+    base_fp="$(jq -r '.input_fingerprint // ""' "$WORK_DIR/consensus-impl.json")"
+  fi
+  local n; n="$(_doc_gap_decisions_lines)"
+  jq -n --argjson v "$DOC_GAP_RESUME_VERSION" --argjson gaps "$1" --arg origin "$2" --arg review "$3" --arg attempt "${4:-0}" --arg round "${5:-0}" \
+    --arg unit "$6" --arg result "$7" --arg tree "$8" --arg docs "$(_doc_gap_docs_hash)" --arg approach "$(_doc_gap_approach_hash)" \
+    --arg base "$base_review" --arg base_round "$base_round" --arg base_fp "$base_fp" --arg gap_fp "$(consensus_pass_fingerprint impl)" \
+    --arg frozen "$(_doc_gap_frozen_hash)" --arg dl "$n" --arg dh "$(_doc_gap_decisions_prefix_hash "$n")" --arg now "$(date '+%FT%T%z')" \
+    '{version:$v, origin:$origin, next_step:"WAITING_USER", review:$review, attempt:($attempt|tonumber), round:($round|tonumber), unit_id:$unit, result:$result,
+      gaps:$gaps, source_tree:$tree, docs_fingerprint:$docs, approach_hash:$approach,
+      base_consensus_review:$base, base_consensus_round:($base_round|tonumber), base_pass_fingerprint:$base_fp, gap_impl_fingerprint:$gap_fp,
+      frozen_docs_hash:$frozen, decisions_lines:($dl|tonumber), decisions_prefix_hash:$dh,
+      resolved_impl_fingerprint:"", recorded_at:$now, updated_at:$now}' > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+# 리뷰어 DOC_GAP issue → 체크포인트(WAITING_USER). 리뷰 루프가 수정자 호출 전에 부른다(같은 리뷰의 FIX_CODE 는 review-gap 워커가 함께 처리).
+doc_gap_record_review() { # review attempt round source_tree
+  local gaps
+  gaps="$(jq -c '[.issues[] | select(.action=="DOC_GAP") | {key:.id, tag:("review-issue=" + .id), question:.user_question, options:.options,
+    refs:(.basis_refs + .code_refs), impact:.impact, location:(.code_refs|join(", "))}]' "$1")"
+  _doc_gap_write "$gaps" review "$1" "$2" "$3" "" "" "$4"
+}
+# 워커 undecided(DOC_GAP·USER_DECISION 모두 — 구현 시점의 solution-shape 선택은 둘 다 사용자 판단) → 체크포인트(WAITING_USER).
+# unit 호출이면 unit_id, review-gap 워커면 review 경로를 남겨 재개 시 같은 워커를 다시 부른다. key 는 <unit|review-gap>#<n>(스키마에 id 없음).
+doc_gap_record_worker() { # result unit_id review source_tree
+  local gaps prefix="${2:-review-gap}"
+  gaps="$(jq -c --arg p "$prefix" '[.undecided | to_entries[] | ($p + "#" + ((.key + 1)|tostring)) as $k
+    | {key:$k, tag:("worker-gap=" + $k), question:.value.decision_needed, options:.value.options, refs:[.value.location], impact:.value.kind, location:.value.location}]' "$1")"
+  _doc_gap_write "$gaps" worker "$3" 0 0 "$2" "$1" "$4"
+}
+doc_gap_field() { jq -r "$1" "$DOC_GAP_RESUME"; }
+doc_gap_next_step() { [ -f "$DOC_GAP_RESUME" ] && jq -r --argjson v "$DOC_GAP_RESUME_VERSION" 'if .version==$v then .next_step else "" end' "$DOC_GAP_RESUME" || printf ''; }
+doc_gap_pending() { case "$(doc_gap_next_step)" in WAITING_USER|WORKER_PENDING|REVIEW_PENDING) return 0;; *) return 1;; esac; }
+doc_gap_set_step() { # next_step [source_tree]
+  jq --arg s "$1" --arg t "${2:-}" --arg now "$(date '+%FT%T%z')" '.next_step=$s | (if $t != "" then .source_tree=$t else . end) | .updated_at=$now' \
+    "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+_doc_gap_tag_regex() { printf '%s' "$1" | sed 's/[][\.*^$/]/\\&/g'; }
+# tag 의 답 줄(scope=impl + tag + 비어 있지 않은 답). 빈 답은 답이 아니다.
+doc_gap_answer_line() { # tag
+  grep -E "^[[:space:]]*- \[USER-QUESTION\]\[scope=impl\]\[$(_doc_gap_tag_regex "$1")\] .*→[[:space:]]*[^[:space:]]" "$WORK_DIR/decisions.md" 2>/dev/null | tail -1
+}
+doc_gap_unanswered() { # → 답 없는 gap 의 tag, 한 줄 하나
+  local tag
+  while IFS= read -r tag; do [ -n "$(doc_gap_answer_line "$tag")" ] || printf '%s\n' "$tag"; done < <(doc_gap_field '.gaps[].tag')
+}
+doc_gap_approach_synced() { [ "$(_doc_gap_approach_hash)" != "$(doc_gap_field '.approach_hash')" ]; }
+doc_gap_source_unchanged() { [ "$(snapshot_worktree_tree)" = "$(doc_gap_field '.source_tree')" ]; }
+# 체크포인트의 밑바탕이 실제 impl consensus PASS 인가: base_consensus_review 가 지금 consensus-impl.json(포맷·계약 버전·target·PASS)이 가리키는
+# 그 round 의 리뷰이고, 그 PASS 의 입력 지문(base_pass_fingerprint)이 체크포인트에 그대로이며, 리뷰 파일이 현재 계약의 실제 PASS 다.
+doc_gap_base_consensus_valid() {
+  local ck="$WORK_DIR/consensus-impl.json"
+  [ -f "$ck" ] || return 1
+  jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" --argjson cv "$CONSENSUS_CHECKPOINT_VERSION" \
+    '.version==$cv and .target=="impl" and .contract_version==$v and .next_step=="PASS"' "$ck" >/dev/null 2>&1 || return 1
+  [ "$(jq -r '.review // ""' "$ck")" = "$(doc_gap_field '.base_consensus_review')" ] || return 1
+  [ -n "$(doc_gap_field '.base_pass_fingerprint')" ] && [ "$(jq -r '.input_fingerprint // ""' "$ck")" = "$(doc_gap_field '.base_pass_fingerprint')" ] || return 1
+  [ "$(doc_gap_field '.base_consensus_review')" = "$WORK_DIR/reviews/validator-impl-round-$(printf '%02d' "$(doc_gap_field '.base_consensus_round')").json" ] || return 1
+  valid_spec_pass_review "$(doc_gap_field '.base_consensus_review')"
+}
+# 사용자 답 수리: 답·approach 동기화·source tree 는 호출자가 확인했다. 여기서는 해결 범위(frozen 문서 불변·decisions append-only)와 밑바탕 PASS 를 다시 확인한 뒤
+# 지금의 impl 입력 지문(문서 + [scope=impl] 결정)을 사용자 해결 provenance 로 고정하고 WORKER_PENDING 으로. 반환: 0 수리, 2 해결 범위 밖 변경, 1 밑바탕 무효/기록 실패.
+doc_gap_accept() {
+  doc_gap_base_consensus_valid || return 1
+  doc_gap_resolution_scope_ok || return 2
+  [ -z "$(doc_gap_unanswered)" ] || return 2
+  jq --arg fp "$(consensus_pass_fingerprint impl)" --arg now "$(date '+%FT%T%z')" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING" | .updated_at=$now' \
+    "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+# 사용자 해결 provenance 가 현재 입력에 유효한가 — 다섯 가지를 모두 만족할 때만 true(어느 하나라도 깨지면 일반 impl 재합의로 돌아간다):
+#   ① 활성 체크포인트(포맷 버전, 수리된 단계 WORKER_PENDING/REVIEW_PENDING/RESOLVED, 수리 지문 존재)
+#   ② 밑바탕이 실제 impl consensus PASS(doc_gap_base_consensus_valid)
+#   ③ 모든 pending gap 에 사용자 답이 지금도 존재
+#   ④ 해결 범위 안의 변경뿐(frozen 문서 불변, decisions append-only)
+#   ⑤ 수리 시점에 고정한 impl 입력 지문 == 현재 impl 입력 지문(그 뒤 approach/decisions 를 또 고쳤으면 무효)
+# approach.md 가 바뀌었다는 사실만으로는 어느 조건도 만족하지 않는다 — 수리 지문은 doc_gap_accept 만 쓴다.
+doc_gap_resolved_current() {
+  [ -f "$DOC_GAP_RESUME" ] || return 1
+  jq -e --argjson v "$DOC_GAP_RESUME_VERSION" '.version==$v and (.next_step=="WORKER_PENDING" or .next_step=="REVIEW_PENDING" or .next_step=="RESOLVED") and .resolved_impl_fingerprint!=""' \
+    "$DOC_GAP_RESUME" >/dev/null 2>&1 || return 1
+  doc_gap_base_consensus_valid || return 1
+  [ -z "$(doc_gap_unanswered)" ] || return 1
+  doc_gap_resolution_scope_ok || return 1
+  [ "$(doc_gap_field '.resolved_impl_fingerprint')" = "$(consensus_pass_fingerprint impl)" ]
+}
+# 워커 이상으로 가도 되는 impl 문서 상태: 최초 validator PASS 가 현재 입력에 유효하거나, 그 PASS 위에 사용자가 gap 을 해결한 지문이 현재 입력과 같다.
+impl_docs_accepted() { consensus_pass_current impl || doc_gap_resolved_current; }
+# 사용자 보고문: gap 마다 id·질문·선택지·근거/코드 위치·영향 + 답을 적을 decisions.md 형식.
+doc_gap_report() {
+  jq -r '.gaps[] | "  [\(.key)] \(.question)\n      선택지: \(.options | join(" | "))\n      근거·코드: \(.refs | join(", "))\n      영향: \(.impact)\n      답 형식: - [USER-QUESTION][scope=impl][\(.tag)] \(.question) → <선택한 option>"' "$DOC_GAP_RESUME"
+}
+# review-gap 워커 프롬프트 블록: pending gap + 사용자가 decisions.md 에 적은 답 줄.
+doc_gap_prompt_block() {
+  local tag
+  jq -r '.gaps[] | "- gap \(.key) (\(.location)): \(.question)\n  options: \(.options | join(" | "))"' "$DOC_GAP_RESUME"
+  printf '\n사용자 결정(decisions.md):\n'
+  while IFS= read -r tag; do printf '%s\n' "$(doc_gap_answer_line "$tag")"; done < <(doc_gap_field '.gaps[].tag')
+}
+
 # 마지막 APPROVE 시점 지문과 현재 작업 트리를 비교. 다르면 승인 무효(APPROVAL_STALE).
 # Phase 4 진입 직전과 커밋 위임 직전, 두 지점에서 반드시 호출한다.
 verify_approved_fingerprint() {
@@ -910,12 +1053,36 @@ verify_approved_fingerprint() {
 # usage telemetry — $WORK_DIR/usage.jsonl
 #   한 행 = CLI invocation 한 번의 관측값(세션 누계 아님). 같은 session 이 여러 행에 나와도 각 행은 독립된 실행 결과다.
 #   writer 는 append-only 원시 기록만 한다 — session 별 delta·누적 total·가격 추정은 하지 않는다(집계는 usage_summary 참고).
-#   null = "관측 불가"(0 이 아님). CLI 마다 노출 가능한 필드가 달라 codex 는 tokens_total 만 채운다.
+#   null = "관측 불가"(0 이 아님).
 #   input_effective = input_uncached + cache_read + cache_write — 진단용 파생값이지 provider billing 공식 필드가 아니다.
 #   cache_read 는 invocation 안의 model turn 들에서 읽힌 cache 누계일 수 있으므로 num_turns 와 함께 해석한다.
-#   CLI 종료 성공/실패와 무관하게 파싱 가능한 telemetry 가 있으면 기록한다(exit_code/success). 파싱 불가면 WARN 후 생략.
+#   CLI 종료 성공/실패와 무관하게 파싱 가능한 telemetry 가 있으면 기록한다(exit_code/success). 파싱 불가면 WARN 후 생략 —
+#   telemetry 는 best effort 이며 파싱 실패로 작업을 실패시키거나 같은 유료 invocation 을 재실행하지 않는다.
+#   비용 필드는 provenance 로 나눈다(섞지 않는다):
+#     cost_usd           = provider 가 직접 보고한 비용(claude total_cost_usd). codex 는 항상 null.
+#     estimated_cost_usd = 토큰 관측값 × 명시적 가격표(codex_model_pricing) 추정치. claude 는 null. 가격표에 없는 모델은 null.
+#     cost_kind          = reported | estimated | unknown,  pricing_basis = 추정에 쓴 가격표 기준(estimated 일 때만).
+#   codex(v3): `codex exec --json` 이벤트 JSONL 의 turn.completed.usage 를 invocation 안에서 합산한다 —
+#     input_total=Σinput_tokens(cached 포함), cache_read=Σcached_input_tokens, cache_write=Σcache_write_input_tokens, output=Σoutput_tokens,
+#     reasoning_output=Σreasoning_output_tokens(output 의 부분집합 — total/cost 에 다시 더하지 않음), num_turns=turn.completed 개수.
+#     input_uncached = input_total − cache_read − cache_write (진단 partition), input_effective = 그 셋의 합 = input_total, tokens_total = input_total + output.
+#   schema_version 3: codex 행에 input/cache/output/reasoning_output/num_turns 채움, cost_kind/estimated_cost_usd/pricing_basis 추가. usage_summary 는 v2·legacy 행도 읽는다.
 # =============================================================
-USAGE_SCHEMA_VERSION=2
+USAGE_SCHEMA_VERSION=3
+
+# codex 모델 가격표 — per 1M tokens USD: "<input> <cached input> <output>". 한 곳에만 둔다(파서 안에 숫자를 흩뿌리지 않는다).
+# 기준: 2026-09-23 공개 standard token rate(사용자 제공 표: GPT-5.6/6 Sol·Luna). 실제 청구(월정액·long-context·특수 billing)가 아니라 모델/루프 비용 비교용 추정치다.
+# 실제로 쓰는 모델만 둔다 — 여기 없는 모델은 estimated_cost_usd=null, cost_kind=unknown 으로 집계된다(추측 가격 금지).
+CODEX_PRICING_BASIS="openai-standard-token-rate-2026-09-23"
+codex_model_pricing() { # model → "input cached output" (per 1M USD) / 가격표에 없으면 1
+  case "$1" in
+    gpt-5.6-sol)  printf '4.00 0.40 20.00';;
+    gpt-6-sol)    printf '2.00 0.20 10.00';;
+    gpt-5.6-luna) printf '0.20 0.02 1.20';;
+    gpt-6-luna)   printf '0.10 0.01 0.50';;
+    *) return 1;;
+  esac
+}
 
 new_invocation_id() { # 호출 직전 생성. 같은 label 재시도를 구분한다
   if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'
@@ -938,10 +1105,13 @@ log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
       label: $label, role: $role, cli: "claude", model: $model,
       session: (.session_id // null),
       cost_usd: (.total_cost_usd // null),
+      cost_kind: (if .total_cost_usd != null then "reported" else "unknown" end),
+      estimated_cost_usd: null, pricing_basis: null,
       input_uncached: (.usage.input_tokens // null),
       cache_read: (.usage.cache_read_input_tokens // 0),
       cache_write: (.usage.cache_creation_input_tokens // 0),
       output: (.usage.output_tokens // null),
+      reasoning_output: null,
       input_effective: ((.usage.input_tokens // 0) + (.usage.cache_read_input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
       tokens_total: null,
       num_turns: (.num_turns // null),
@@ -953,29 +1123,43 @@ log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
     }' "$result_file" >> "$WORK_DIR/usage.jsonl"
 }
 
-# codex exec 로그(stdout/stderr) → 행 1개. 안정적으로 파싱되는 값은 "tokens used" 다음 줄의 총합뿐이라 tokens_total 만 채우고
-# input/output/cache 는 null 로 둔다(regex 로 의미를 추측하지 않는다). 마지막 "tokens used" 블록을 쓴다.
-log_codex_usage() { # label role model log_file [exit_code] [invocation_id]
-  local label="$1" role="$2" model="$3" log_file="$4" rc="${5:-0}" inv="${6:-}" total
+# codex exec --json 이벤트 JSONL → 행 1개. invocation 의 모든 turn.completed.usage 를 합산한다(위 v3 매핑). 깨진 줄은 건너뛰고,
+# turn.completed 가 하나도 없으면 WARN 후 생략(작업 실패 아님·재실행 없음). plain "tokens used" 텍스트는 더 이상 읽지 않는다.
+log_codex_usage() { # label role model events_jsonl [exit_code] [invocation_id]
+  local label="$1" role="$2" model="$3" events="$4" rc="${5:-0}" inv="${6:-}" agg rates='null' basis='null'
   [ -n "$inv" ] || inv="$(new_invocation_id)"
-  total="$(grep -A1 -x 'tokens used' "$log_file" 2>/dev/null | grep -v -x 'tokens used' | grep -v '^--$' | tail -1 | tr -d ', \r')"
-  if ! printf '%s' "$total" | grep -Eq '^[0-9]+$'; then
-    echo "[WARN] codex 로그에 'tokens used' 없음 — 기록 생략: $log_file" >&2
+  agg="$(jq -R -c 'fromjson? | select(type=="object" and .type=="turn.completed" and (.usage|type)=="object") | .usage' "$events" 2>/dev/null \
+    | jq -s -c 'map({i:(.input_tokens // 0), c:(.cached_input_tokens // 0), w:(.cache_write_input_tokens // 0), o:(.output_tokens // 0), r:(.reasoning_output_tokens // 0)})
+        | {turns:length, input_total:(map(.i)|add // 0), cache_read:(map(.c)|add // 0), cache_write:(map(.w)|add // 0), output:(map(.o)|add // 0), reasoning:(map(.r)|add // 0)}' 2>/dev/null)"
+  if [ -z "$agg" ] || [ "$(printf '%s' "$agg" | jq -r '.turns')" = 0 ]; then
+    echo "[WARN] codex 이벤트 JSONL 에 turn.completed usage 없음 — 기록 생략: $events" >&2
     return 0
   fi
-  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" \
-    --argjson total "$total" --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
-    {
+  if rates="$(codex_model_pricing "$model")"; then
+    rates="$(printf '%s' "$rates" | awk '{printf "{\"input\":%s,\"cached\":%s,\"output\":%s}", $1, $2, $3}')"; basis="\"$CODEX_PRICING_BASIS\""
+  else
+    rates='null'
+  fi
+  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson a "$agg" --argjson rates "$rates" --argjson basis "$basis" \
+    --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
+    ($a.input_total - $a.cache_read - $a.cache_write) as $uncached
+    | (if $rates == null then null
+       else ((($a.input_total - $a.cache_read) * $rates.input + $a.cache_read * $rates.cached + $a.output * $rates.output) / 1000000) end) as $est
+    | {
       schema_version: $v,
       invocation_id: $inv,
       label: $label, role: $role, cli: "codex", model: $model,
       session: null,
       cost_usd: null,
-      input_uncached: null, cache_read: null, cache_write: null, output: null, input_effective: null,
-      tokens_total: $total,
-      num_turns: null, duration_ms: null, duration_api_ms: null,
+      cost_kind: (if $est == null then "unknown" else "estimated" end),
+      estimated_cost_usd: $est, pricing_basis: $basis,
+      input_uncached: $uncached, cache_read: $a.cache_read, cache_write: $a.cache_write, output: $a.output,
+      reasoning_output: $a.reasoning,
+      input_effective: ($uncached + $a.cache_read + $a.cache_write),
+      tokens_total: ($a.input_total + $a.output),
+      num_turns: $a.turns, duration_ms: null, duration_api_ms: null,
       exit_code: $rc, success: ($rc == 0),
-      source: "codex-log",
+      source: "codex-events",
       recorded_at: $now
     }' >> "$WORK_DIR/usage.jsonl"
 }
@@ -990,8 +1174,12 @@ log_role_usage() { # cli role model label raw_or_log_path [exit_code] [invocatio
   esac
 }
 
-# 파생 집계(별도 명령). legacy 행(in/out)도 읽는다. 사용: usage_summary [usage.jsonl]
-# cost_usd 는 cost 를 보고한 행의 합이며 cost_unknown_invocations(codex 등 cost null)만큼 전체 비용보다 작다.
+# 파생 집계(별도 명령). legacy 행(in/out, v2 codex tokens_total 만 있는 행)도 읽는다. 사용: usage_summary [usage.jsonl]
+# 비용은 provenance 별로 따로 낸다 — 섞은 값은 이름에 estimate 를 붙인다:
+#   reported_cost_usd        = provider 가 보고한 cost_usd 의 합(claude)            / cost_usd = 같은 값(외부 호환용 옛 이름, 의미 불변)
+#   estimated_cost_usd       = 가격표 추정치 estimated_cost_usd 의 합(codex)
+#   combined_cost_usd_estimate = reported + estimated (실제 청구액이 아니라 비교용 추정치)
+#   cost_unknown_invocations = 둘 다 null 인 행 수(가격표에 없는 codex 모델, telemetry 없는 행 등)
 # by_role / by_label / by_session: 어느 역할·호출·Claude 세션이 cache read 를 만드는지 보는 그룹 합계(같은 지표 세트).
 # cache_read_per_turn = cache_read 합 / num_turns 합(num_turns 를 보고한 행만) — turn 당 다시 읽히는 문맥 크기의 근사치.
 # num_turns 가 하나도 없으면 null. 임계치·자동 판단은 두지 않는다(관측값만 제공).
@@ -1002,9 +1190,14 @@ usage_summary() {
     def metrics: {
       invocations: length,
       cost_usd: (map(.cost_usd // 0) | add),
+      reported_cost_usd: (map(.cost_usd // 0) | add),
+      estimated_cost_usd: (map(.estimated_cost_usd // 0) | add),
+      combined_cost_usd_estimate: (map((.cost_usd // 0) + (.estimated_cost_usd // 0)) | add),
+      cost_unknown_invocations: (map(select(.cost_usd == null and .estimated_cost_usd == null)) | length),
       cache_read: (map(.cache_read // 0) | add),
       num_turns: (map(.num_turns // 0) | add),
       output: (map(.output // .out // 0) | add),
+      reasoning_output: (map(.reasoning_output // 0) | add),
       cache_read_per_turn: (
         (map(select(.num_turns != null))) as $t
         | if ($t | map(.num_turns) | add // 0) > 0
@@ -1013,7 +1206,6 @@ usage_summary() {
     };
     def grouped(key): group_by(key) | map({key: (.[0] | key), value: metrics}) | from_entries;
     metrics + {
-      cost_unknown_invocations: (map(select(.cost_usd == null)) | length),
       input_uncached: (map(.input_uncached // .in // 0) | add),
       cache_write: (map(.cache_write // 0) | add),
       tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),

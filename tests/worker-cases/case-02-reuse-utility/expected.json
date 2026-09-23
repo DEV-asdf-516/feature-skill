@@ -1,0 +1,32 @@
+{
+  "expected_status": "DONE",
+  "expected_exit": 0,
+  "undecided_kinds": [],
+  "allowed_new_files": [],
+  "files_must_exist": [
+    "src/ClientService.java"
+  ],
+  "files_must_not_exist": [],
+  "must_contain": {
+    "src/ClientService.java": [
+      "MaskingUtil\\.maskPhone\\("
+    ],
+    "src/test/ClientServiceTest.java": [
+      "exportLine_returnsCsvWithMaskedPhone",
+      "exportLine_unknownId_throwsNotFound"
+    ]
+  },
+  "must_not_contain": {
+    "src/ClientService.java": [
+      "\\*\\*\\*\\*",
+      "substring\\(",
+      "\\.repeat\\(",
+      "replace\\(",
+      "charAt\\(",
+      "String\\.format\\(",
+      "String\\.join\\(",
+      "StringBuilder"
+    ]
+  },
+  "run_targeted_test": true
+}

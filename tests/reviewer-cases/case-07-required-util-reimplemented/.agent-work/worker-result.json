@@ -1,0 +1,21 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientSummary.java",
+      "technique": "final 필드 + 접근자 메서드의 불변 클래스",
+      "basis": "기존 Client.java 와 같은 형태"
+    }
+  ],
+  "tests": [
+    {
+      "name": "summary_returnsThreeFields",
+      "result": "PASS"
+    },
+    {
+      "name": "summary_unknownId_throwsNotFound",
+      "result": "PASS"
+    }
+  ]
+}

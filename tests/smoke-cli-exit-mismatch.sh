@@ -32,6 +32,9 @@ mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/ski
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
 sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
+# 이 스모크의 사례는 CLI 별 종료코드·결과 전달 규약(codex: -o 결과 / claude: structured_output)을 검증하므로 역할별 CLI 를 여기서 고정한다.
+# production config 의 모델→CLI 매핑(REVIEWER_MODEL 등)이 바뀌어도 사례 의미가 유지된다.
+sed -i.bak 's/^VALIDATOR_CLI=.*/VALIDATOR_CLI="codex"/; s/^WORKER_CLI=.*/WORKER_CLI="codex"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 cd "$TMP/repo" || exit 1
 git init -q
 printf '.agent-work/\n.claude/\n' > .gitignore
@@ -68,9 +71,11 @@ EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 #     FAKE_WORKER_EXTRA(index|outside|baseline|manifest): valid 에 더해 기존 안전 게이트 위반을 만든다
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
+case " $* " in *" --json "*) ;; *) echo "codex without --json: $*" >&2; exit 9;; esac   # usage telemetry 는 --json 이벤트 JSONL 에서만 읽는다
 out=""; readonly_sb=0; prompt=""
 while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --sandbox) [ "$2" = read-only ] && readonly_sb=1; shift 2;; *) prompt="$1"; shift;; esac; done
-printf 'tokens used\n123\n'   # usage.jsonl 행이 기록되게(codex 로그 파서)
+printf '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":3,"output_tokens":10,"reasoning_output_tokens":4}}\n'   # usage.jsonl 행이 기록되게(stdout JSONL)
+echo "diagnostic line" >&2
 if [ "$readonly_sb" = 1 ]; then
   echo "validator" >> "$MOCK_LOG"
   case "${FAKE_VALIDATOR_MODE:-}" in

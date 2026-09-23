@@ -1,0 +1,19 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [],
+  "tests": [
+    {
+      "name": "summary_returnsThreeFields",
+      "result": "PASS"
+    },
+    {
+      "name": "summary_unknownId_throwsNotFound",
+      "result": "PASS"
+    }
+  ],
+  "context_updates": {
+    "upsert": [],
+    "remove": []
+  }
+}

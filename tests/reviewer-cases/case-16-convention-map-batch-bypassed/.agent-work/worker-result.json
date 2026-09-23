@@ -1,0 +1,15 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientService.java update",
+      "technique": "필드마다 값을 비교해 바뀐 것만 ChangeLogWriter.write 로 기록",
+      "basis": "결정 4(순회 형태) DELEGATED — 필드가 세 개뿐이라 직접 나열"
+    }
+  ],
+  "tests": [
+    { "name": "update_logsChangedFieldsOnly", "result": "PASS" },
+    { "name": "update_unknownId_throwsNotFound", "result": "PASS" }
+  ]
+}

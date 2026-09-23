@@ -1,0 +1,5 @@
+build/
+.agent-work/
+.claude/
+.codex/
+feature-live

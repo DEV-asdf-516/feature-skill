@@ -1,0 +1,21 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/ClientSummary.java from",
+      "technique": "Client 에서 DTO 를 만드는 정적 팩토리",
+      "basis": "결정 3(DTO 형태·필드 매핑) DELEGATED — 매핑을 DTO 옆에 둔다"
+    }
+  ],
+  "tests": [
+    {
+      "name": "summary_returnsThreeFields",
+      "result": "PASS"
+    },
+    {
+      "name": "summary_unknownId_throwsNotFound",
+      "result": "PASS"
+    }
+  ]
+}

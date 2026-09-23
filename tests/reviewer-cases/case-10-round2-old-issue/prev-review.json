@@ -1,5 +1,5 @@
 {
-  "schema_version": 10,
+  "schema_version": 14,
   "verdict": "REQUEST_CHANGES",
   "issues": [
     {
@@ -20,7 +20,9 @@
       "required_outcome": "ClientService.summary 에 문서에 없는 phone null 방어 분기가 없다",
       "origin": "ROUND_1",
       "previous_issue_id": "",
-      "fix_ref": ""
+      "fix_ref": "",
+      "user_question": "",
+      "options": []
     }
   ]
 }

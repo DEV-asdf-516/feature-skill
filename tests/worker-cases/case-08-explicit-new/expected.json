@@ -1,0 +1,34 @@
+{
+  "expected_status": "DONE",
+  "expected_exit": 0,
+  "undecided_kinds": [],
+  "allowed_new_files": [
+    "src/TagFormatter.java"
+  ],
+  "files_must_exist": [
+    "src/TagFormatter.java",
+    "src/ClientService.java"
+  ],
+  "files_must_not_exist": [
+    "src/test/TagFormatterTest.java"
+  ],
+  "must_contain": {
+    "src/ClientService.java": [
+      "TagFormatter\\.joinUpper\\("
+    ],
+    "src/test/ClientServiceTest.java": [
+      "tagLine_joinsUpperCaseTags",
+      "tagLine_noTags_returnsEmpty",
+      "tagLine_unknownId_throwsNotFound"
+    ]
+  },
+  "must_not_contain": {
+    "src/ClientService.java": [
+      "\\bfor\\s*\\(",
+      "\\.stream\\(",
+      "String\\.join\\(",
+      "StringBuilder"
+    ]
+  },
+  "run_targeted_test": true
+}

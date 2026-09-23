@@ -1,0 +1,29 @@
+{
+ "version": 1,
+ "units": [
+  {
+   "id": "01-summary",
+   "title": "요약 조회",
+   "goal": "ClientService.summary 가 기존 profile 구조로 ClientSummary 를 반환한다",
+   "requirements": [
+    "implementation.md#변경-파일",
+    "implementation.md#테스트"
+   ],
+   "scope": {
+    "files": [
+     "src/ClientService.java",
+     "src/test/ClientServiceTest.java"
+    ]
+   },
+   "references": [
+    "implementation.md",
+    "approach.md#결정-1",
+    "approach.md#결정-2",
+    "approach.md#결정-3",
+    "approach.md#결정-4",
+    "approach.md#결정-5"
+   ],
+   "targeted_test": "bash run-tests.sh ClientServiceTest"
+  }
+ ]
+}

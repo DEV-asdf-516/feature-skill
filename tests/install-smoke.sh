@@ -336,7 +336,10 @@ printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
 printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
 fake_scope "$LOG_TARGET" src/x.txt            # impl PASS 지문에 manifest 가 들어가므로 합의보다 먼저 둔다
 fake_consensus_pass "$LOG_TARGET" impl
-# 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
+# 워커 원문: codex --json stdout 은 <raw>.events.jsonl, stderr 진단은 <raw>.stderr.log 에 분리 보존된다(live.log 로 tee 하지 않는다 — JSONL 보호).
+# 가짜 codex 는 stderr 에 마커를 찍고 호출 횟수를 저장소 밖 카운터에 남긴다. UNDECIDED 는 doc-gap-resume.json(사용자 대기)을 남기므로 다음 사례 전에 치운다.
+export FAKE_WORKER_COUNT="$SCRATCH/log-target.worker-calls"
+clear_gap() { [ ! -f "$LOG_TARGET/.agent-work/doc-gap-resume.json" ] || mv "$LOG_TARGET/.agent-work/doc-gap-resume.json" "$SCRATCH/doc-gap-resume.$RANDOM$RANDOM.json"; }
 FAKE_CODEX="$LOG_TARGET/fake-codex"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -345,7 +348,7 @@ printf '%s\n' \
   'while [ "$#" -gt 0 ]; do' \
   '  case "$1" in -o) output_file="$2"; shift 2;; *) shift;; esac' \
   'done' \
-  'printf "WORKER_STREAM_MARKER\\n"' \
+  'printf "WORKER_STREAM_MARKER\\n" >&2; echo called >> "$FAKE_WORKER_COUNT"' \
   'if [ "${FAKE_TAMPER_BASELINE:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/existing-under-root.txt; fi' \
   'if [ "${FAKE_TAMPER_BOTH:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; for m in .agent-work/feature-scope.json .agent-work/feature-scope.lock.json; do jq -c ".files += [\"src/z.txt\"]" "$m" > "$m.tmp" && mv "$m.tmp" "$m"; done; echo tampered-both >> src/existing-under-root.txt; fi' \
   'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
@@ -362,31 +365,38 @@ set -e
 [ "$worker_rc" = 2 ] || fail "워커 스트리밍: USER_DECISION 종료 코드가 2가 아님 ($worker_rc)"
 [ -f "$LOG_TARGET/.agent-work/worker-baseline.tree" ] || fail "워커 기준선: 러너가 worker-baseline.tree 를 기록하지 않음"
 (cd "$LOG_TARGET" && git cat-file -e "$(cat .agent-work/worker-baseline.tree)") || fail "워커 기준선: tree 객체가 저장소에 없음"
-worker_raw="$(ls "$LOG_TARGET"/.agent-work/units/01-all/worker-*.log | tail -1)"   # unit 워커 원문은 units/<id>/ 에 남는다
+worker_raw="$(ls "$LOG_TARGET"/.agent-work/units/01-all/worker-*.log.stderr.log | tail -1)"   # unit 워커 원문은 units/<id>/ 에 남는다
 [ "$(grep -c 'WORKER_STREAM_MARKER' "$worker_raw")" = 1 ] \
-  || fail "워커 스트리밍: reviews 원문 로그에 출력이 정확히 1회 보존되지 않음"
-[ "$(grep -c 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log")" = 1 ] \
-  || fail "워커 스트리밍: live.log에 출력이 정확히 1회 전달되지 않음"
-# DOC_GAP 만 있으면 사용자에게 가지 않고 NEED_DOCS(exit 3), 재실행 시 검증자 재합의(stage=impl)
+  || fail "워커 원문: stderr 진단 로그에 출력이 정확히 1회 보존되지 않음"
+[ -f "${worker_raw%.stderr.log}.events.jsonl" ] || fail "워커 원문: --json 이벤트 JSONL 이 stderr 와 분리 보존되지 않음"
+grep -q 'WORKER_STREAM_MARKER' "${worker_raw%.stderr.log}.events.jsonl" && fail "워커 원문: stderr 가 이벤트 JSONL 에 섞임"
+jq -e '.origin=="worker" and .unit_id=="01-all" and .next_step=="WAITING_USER" and .gaps[0].tag=="worker-gap=01-all#1"' "$LOG_TARGET/.agent-work/doc-gap-resume.json" >/dev/null \
+  || fail "워커 USER_DECISION: doc-gap-resume.json(WAITING_USER) 이 기록되지 않음"
+clear_gap
+# DOC_GAP 만 있어도 impl 재합의(NEED_DOCS/APPROACH_GAP)가 아니라 USER_DECISION 과 같은 사용자 결정 경로(NEED_USER/UNDECIDED, stage doc-gap)다
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
+: > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=DOC_GAP bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 docgap_rc=$?
 set -e
-[ "$docgap_rc" = 3 ] || fail "DOC_GAP: 종료 코드가 3(NEED_DOCS)이 아님 ($docgap_rc)"
-[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = APPROACH_GAP ] || fail "DOC_GAP: reason 이 APPROACH_GAP 이 아님"
-[ "$(jq -r '.stage' "$LOG_TARGET/.agent-work/run-state.json")" = impl ] || fail "DOC_GAP: 재개 stage 가 impl 이 아님"
+[ "$docgap_rc" = 2 ] || fail "DOC_GAP: 종료 코드가 2(NEED_USER)가 아님 ($docgap_rc)"
+[ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = UNDECIDED ] || fail "DOC_GAP: reason 이 UNDECIDED 가 아님 ($(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.stage' "$LOG_TARGET/.agent-work/run-state.json")" = worker ] || fail "DOC_GAP: 재개 stage 가 worker 가 아님(impl 재합의로 되돌리면 안 됨)"
+[ -s "$FAKE_WORKER_COUNT" ] || fail "DOC_GAP: 워커가 호출되지 않음"
+[ "$(jq -r '.gaps[0].impact' "$LOG_TARGET/.agent-work/doc-gap-resume.json")" = DOC_GAP ] || fail "DOC_GAP: 체크포인트에 kind(진단 정보)가 남지 않음"
+clear_gap
 # 필수 워커 스킬 누락 → run_worker 가 실제로 중단하고(exit 1) 가짜 codex 를 부르지 않는다 (load_worker_rules 단독 호출로는 잡히지 않는 경로)
 sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=("missing-skill")/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 missing_skill_rc=$?
 set -e
 [ "$missing_skill_rc" = 1 ] || fail "필수 워커 스킬 누락: 러너 종료 코드가 1 이 아님 ($missing_skill_rc)"
 grep -q "필수 워커 스킬 'missing-skill' 없음" "$LOG_TARGET/.agent-work/live.log" || fail "필수 워커 스킬 누락: 실패 사유가 기록되지 않음"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "필수 워커 스킬 누락: 워커(codex)가 호출됨"
+[ ! -s "$FAKE_WORKER_COUNT" ] || fail "필수 워커 스킬 누락: 워커(codex)가 호출됨"
 sed -i.sedbak 's/^WORKER_SKILLS=.*/WORKER_SKILLS=()/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 # worker 단계 진입 시 원본 != lock → exit 2, run-state NEED_USER/SCOPE_MANIFEST_CHANGED, codex 호출 0 (set -e 아래 stop_need_user 도달 확인)
 [ -f "$LOG_TARGET/.agent-work/feature-scope.lock.json" ] || fail "scope lock: 러너가 feature-scope.lock.json 을 확정하지 않음"
@@ -398,7 +408,7 @@ sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm
 fake_consensus_pass "$LOG_TARGET" impl
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 lock_mismatch_rc=$?
@@ -406,7 +416,7 @@ set -e
 [ "$lock_mismatch_rc" = 2 ] || fail "scope lock 불일치: 러너 종료 코드가 2 가 아님 ($lock_mismatch_rc)"
 [ "$(jq -r '.status' "$LOG_TARGET/.agent-work/run-state.json")" = NEED_USER ] || fail "scope lock 불일치: run-state status 가 NEED_USER 가 아님 ($(jq -r '.status' "$LOG_TARGET/.agent-work/run-state.json"))"
 [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_MANIFEST_CHANGED ] || fail "scope lock 불일치: reason 이 SCOPE_MANIFEST_CHANGED 가 아님"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "scope lock 불일치: 워커(codex)가 호출됨"
+[ ! -s "$FAKE_WORKER_COUNT" ] || fail "scope lock 불일치: 워커(codex)가 호출됨"
 cp "$LOG_TARGET/.agent-work/feature-scope.json.orig" "$LOG_TARGET/.agent-work/feature-scope.json"
 # 워커가 worker-baseline.tree 를 빈 tree 로 바꾸고 new_file_roots 아래 기존 파일을 수정 → SCOPE_BASELINE_CHANGED, review 미진입, 원복 없음
 # 준비: 기준선에 있는 root 아래 파일을 커밋하고, roots 가 있는 manifest 로 원본·lock 을 맞춘 뒤 impl 체크포인트를 다시 만든다
@@ -432,24 +442,25 @@ set -e
 [ "$(cat "$LOG_TARGET/.agent-work/worker-baseline.tree")" = 4b825dc642cb6eb9a060e54bf8d69288fbee4904 ] || fail "기준선 조작: 기준선 파일이 자동 복구됨(복구 금지)"
 [ "$(jq -r .expected "$LOG_TARGET/.agent-work/worker-baseline.guard.json")" = "$(cat "$LOG_TARGET/.agent-work/worker-baseline.tree.keep")" ] || fail "기준선 조작: 가드 기대값이 원래 기준선이 아님"
 # 복구 없이 같은 명령 재실행 → 다시 SCOPE_BASELINE_CHANGED, codex 호출 0회
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 tamper_rerun_rc=$?
 set -e
 [ "$tamper_rerun_rc" = 2 ] || fail "기준선 미복구 재실행: 종료 코드가 2 가 아님 ($tamper_rerun_rc)"
 [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "기준선 미복구 재실행: reason 이 SCOPE_BASELINE_CHANGED 가 아님"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "기준선 미복구 재실행: 워커(codex)가 호출됨"
+[ ! -s "$FAKE_WORKER_COUNT" ] || fail "기준선 미복구 재실행: 워커(codex)가 호출됨"
 # 원래 값으로 복구하면 워커가 재개된다 (가짜 워커는 USER_DECISION 을 내므로 exit 2 / UNDECIDED)
 cp "$LOG_TARGET/.agent-work/worker-baseline.tree.keep" "$LOG_TARGET/.agent-work/worker-baseline.tree"
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 restored_rc=$?
 set -e
 [ "$restored_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = UNDECIDED ] || fail "기준선 복구 후: 워커가 재개되지 않음 (rc $restored_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" || fail "기준선 복구 후: 워커(codex)가 호출되지 않음"
+[ -s "$FAKE_WORKER_COUNT" ] || fail "기준선 복구 후: 워커(codex)가 호출되지 않음"
 [ "$(jq -r .active "$LOG_TARGET/.agent-work/worker-baseline.guard.json")" = false ] || fail "기준선 복구 후: 가드가 비활성화되지 않음"
+clear_gap
 # 복합 변경: 기준선 + manifest(원본·lock) 를 함께 바꾸면 SCOPE_MANIFEST_CHANGED 로 먼저 멈추더라도 가드가 남아야 한다
 cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.json.keep"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
@@ -464,23 +475,24 @@ set -e
 # manifest 만 복구(원본·lock)하고 재실행 → SCOPE_BASELINE_CHANGED, codex 0회
 cp "$LOG_TARGET/.agent-work/feature-scope.json.keep" "$LOG_TARGET/.agent-work/feature-scope.json"
 cp "$LOG_TARGET/.agent-work/feature-scope.json.keep" "$LOG_TARGET/.agent-work/feature-scope.lock.json"
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 both_rerun_rc=$?
 set -e
 [ "$both_rerun_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "복합 변조: manifest 만 복구한 재실행이 막히지 않음 (rc $both_rerun_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" && fail "복합 변조: 기준선 미복구 재실행에서 워커(codex)가 호출됨"
+[ ! -s "$FAKE_WORKER_COUNT" ] || fail "복합 변조: 기준선 미복구 재실행에서 워커(codex)가 호출됨"
 # 기준선까지 복구하면 재개
 cp "$LOG_TARGET/.agent-work/worker-baseline.tree.keep" "$LOG_TARGET/.agent-work/worker-baseline.tree"
-: > "$LOG_TARGET/.agent-work/live.log"
+: > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
 (cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 both_restored_rc=$?
 set -e
 [ "$both_restored_rc" = 2 ] && [ "$(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json")" = UNDECIDED ] || fail "복합 변조 복구 후: 워커가 재개되지 않음 (rc $both_restored_rc, reason $(jq -r '.reason' "$LOG_TARGET/.agent-work/run-state.json"))"
-grep -q 'WORKER_STREAM_MARKER' "$LOG_TARGET/.agent-work/live.log" || fail "복합 변조 복구 후: 워커(codex)가 호출되지 않음"
-echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 출력 스트리밍 + 필수 워커 스킬 누락 시 워커 미실행 + scope lock 불일치 시 NEED_USER + 기준선 조작 시 SCOPE_BASELINE_CHANGED(미복구 재실행 재중단·복구 후 재개·복합 변조 시 가드 보존)"
+[ -s "$FAKE_WORKER_COUNT" ] || fail "복합 변조 복구 후: 워커(codex)가 호출되지 않음"
+clear_gap
+echo "[OK] 8. live.log 아카이브 + 중첩 tee 중복 방지 + 워커 원문(events.jsonl/stderr.log 분리) + 워커 DOC_GAP/USER_DECISION → 사용자 결정 체크포인트 + 필수 워커 스킬 누락 시 워커 미실행 + scope lock 불일치 시 NEED_USER + 기준선 조작 시 SCOPE_BASELINE_CHANGED(미복구 재실행 재중단·복구 후 재개·복합 변조 시 가드 보존)"
 
 # ---------- 9. feature-live 저장소별 단일 실행 lock ----------
 chmod +x "$LOG_TARGET/feature-live"
@@ -533,7 +545,8 @@ printf '%s\n' \
   'jq -n -c --slurpfile r "$FAKE_REVIEW" '"'"'{structured_output: $r[0], session_id:"fake", total_cost_usd:0, usage:{input_tokens:0,output_tokens:0,cache_read_input_tokens:0,cache_creation_input_tokens:0}}'"'" \
   > "$REVIEW_SIDE/fake-claude"
 chmod +x "$REVIEW_SIDE/fake-claude"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
+# 이 절의 가짜는 claude 형태뿐이다 — production config 의 REVIEWER/FIXER 모델이 codex 로 라우팅돼도 가짜 claude 가 쓰이도록 역할 CLI 를 고정한다((f) 라우팅 절만 해제)
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^FIXER_CLI=.*/FIXER_CLI=\"claude\"/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 mkdir -p "$REVIEW_TARGET/src" "$REVIEW_TARGET/.agent-work/reviews"
 printf 'base\n' > "$REVIEW_TARGET/src/a.txt"
 printf 'base\n' > "$REVIEW_TARGET/src/b.txt"
@@ -573,18 +586,24 @@ grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: o
 run_review_loop '{"schema_version":1,"verdict":"APPROVE","issues":[]}' && fail "리뷰 루프: 구버전 schema_version 이 통과됨"
 # (d) FIX_CODE 인데 required_outcome 비어 있음 → exit 1
 run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
-# (e) DOC_GAP → exit 3, 러너는 NEED_DOCS(APPROACH_GAP) + stage=impl 로 반환
-set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"; docgap_loop_rc=$?; set -e
+# (e) DOC_GAP → user_question/options 계약 + exit 3 + doc-gap-resume.json(WAITING_USER), 러너는 NEED_USER(REVIEW_DOC_GAP) + stage=doc-gap (impl 재합의 아님)
+run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')" && fail "리뷰 루프: user_question/options 없는 DOC_GAP 이 통과됨"
+grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: DOC_GAP 질문 누락 거부 사유가 기록되지 않음"
+run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {user_question:"q?",options:["A","B"]}]}')" && fail "리뷰 루프: user_question/options 가 있는 FIX_CODE 가 통과됨"
+set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP",user_question:"Map 인가 선형 탐색인가",options:["Map","linear"]}]}')"; docgap_loop_rc=$?; set -e
 [ "$docgap_loop_rc" = 3 ] || fail "리뷰 루프: DOC_GAP 종료 코드가 3 이 아님 ($docgap_loop_rc)"
 [ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = DOC_GAP ] || fail "리뷰 루프: state.json 이 DOC_GAP 이 아님"
+jq -e '.version==1 and .origin=="review" and .next_step=="WAITING_USER" and .gaps[0].key=="R-01" and .gaps[0].tag=="review-issue=R-01" and (.gaps[0].options|length)==2 and .source_tree!=""' "$REVIEW_TARGET/.agent-work/doc-gap-resume.json" >/dev/null \
+  || fail "리뷰 루프: doc-gap-resume.json 이 WAITING_USER 로 기록되지 않음: $(cat "$REVIEW_TARGET/.agent-work/doc-gap-resume.json" 2>/dev/null)"
 printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > "$REVIEW_TARGET/.agent-work/run-state.json"
 set +e
 (cd "$REVIEW_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review.json" bash "$REVIEW_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
 review_docgap_rc=$?
 set -e
-[ "$review_docgap_rc" = 3 ] || fail "리뷰어 DOC_GAP: 러너 종료 코드가 3(NEED_DOCS)이 아님 ($review_docgap_rc)"
-[ "$(jq -r '.reason' "$REVIEW_TARGET/.agent-work/run-state.json")" = APPROACH_GAP ] || fail "리뷰어 DOC_GAP: reason 이 APPROACH_GAP 이 아님"
-[ "$(jq -r '.stage' "$REVIEW_TARGET/.agent-work/run-state.json")" = impl ] || fail "리뷰어 DOC_GAP: 재개 stage 가 impl 이 아님"
+[ "$review_docgap_rc" = 2 ] || fail "리뷰어 DOC_GAP: 러너 종료 코드가 2(NEED_USER)가 아님 ($review_docgap_rc)"
+[ "$(jq -r '.reason' "$REVIEW_TARGET/.agent-work/run-state.json")" = REVIEW_DOC_GAP ] || fail "리뷰어 DOC_GAP: reason 이 REVIEW_DOC_GAP 이 아님 ($(jq -r '.reason' "$REVIEW_TARGET/.agent-work/run-state.json"))"
+[ "$(jq -r '.stage' "$REVIEW_TARGET/.agent-work/run-state.json")" = doc-gap ] || fail "리뷰어 DOC_GAP: 재개 stage 가 doc-gap 이 아님"
+mv "$REVIEW_TARGET/.agent-work/doc-gap-resume.json" "$REVIEW_SIDE/doc-gap-resume.e.json"   # 이후 절은 pending gap 없이 계속 (삭제 대신 이동)
 # (f) 역할 → CLI 라우팅: REVIEWER_MODEL 을 gpt-* 로 바꾸면 같은 루프가 codex 로 리뷰어를 부른다 (읽기 전용 sandbox + 스키마 + -o), claude 는 호출 0회
 printf '%s\n' \
   '#!/usr/bin/env bash' \
@@ -598,14 +617,14 @@ printf '%s\n' \
 printf '%s\n' '#!/usr/bin/env bash' 'printf "claude\n" >> "$FAKE_COUNT.claude"; exit 9' > "$REVIEW_SIDE/fake-claude-never"
 chmod +x "$REVIEW_SIDE/fake-codex-reviewer" "$REVIEW_SIDE/fake-claude-never"
 cp "$REVIEW_SKILL/config.sh" "$REVIEW_SIDE/config.before-routing.sh"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/" "$REVIEW_SKILL/config.sh"
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"\"/" "$REVIEW_SKILL/config.sh"
 mv "$REVIEW_SKILL/config.sh.sedbak" "$REVIEW_SIDE/config.sedbak.routing"
 FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}" \
   || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "라우팅: REVIEWER_MODEL=gpt-* 인데 codex 리뷰어가 APPROVE 로 exit 0 이 아님"; }
 [ -f "$REVIEW_SIDE/.routing-calls.codex" ] || fail "라우팅: codex 리뷰어가 호출되지 않음"
 [ ! -f "$REVIEW_SIDE/.routing-calls.claude" ] || fail "라우팅: 리뷰어가 codex 인데 claude 가 호출됨"
 routing_attempt_dir="$(ls -d "$REVIEW_TARGET/.agent-work/reviews/impl-attempt-"* | sort | tail -1)"   # 앞 사례들이 attempt 를 소비했으므로 마지막 attempt
-[ -f "$routing_attempt_dir/reviewer-round-01.json.log" ] || fail "라우팅: codex 리뷰어 로그(.log)가 남지 않음 ($routing_attempt_dir)"
+[ -f "$routing_attempt_dir/reviewer-round-01.json.events.jsonl" ] && [ -f "$routing_attempt_dir/reviewer-round-01.json.stderr.log" ] || fail "라우팅: codex 리뷰어 이벤트 JSONL/stderr 로그가 남지 않음 ($routing_attempt_dir)"
 [ "$(jq -r '.verdict' "$routing_attempt_dir/reviewer-round-01.json")" = APPROVE ] || fail "라우팅: codex 리뷰어 결과 JSON 이 -o 경로에 없음"
 grep -q '검증자 CLI\|claude 실행 실패' "$REVIEW_SIDE/run.log" && fail "라우팅: codex 리뷰어 경로에서 claude 오류 메시지가 나옴"
 cp "$REVIEW_SIDE/config.before-routing.sh" "$REVIEW_SKILL/config.sh"   # 이후 절은 원래(claude 리뷰어) 설정으로 계속
@@ -735,12 +754,12 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo t >> "$VFIX_COUNT"' '[ -f "$VFIX_PASS_
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
-  'printf "VFIX_WORKER_MARKER\n"' \
+  'printf "VFIX_WORKER_MARKER\n" >&2' \
   'printf "%s\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/other.txt' \
   'printf '\''{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}'\'' > "$out"' \
   > "$VFIX_SIDE/fake-codex"
 chmod +x "$VFIX_SIDE/fake-codex"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s|^TEST_CMD=.*|TEST_CMD=\"VFIX_COUNT=$VFIX_SIDE/test-calls VFIX_PASS_FLAG=$VFIX_SIDE/tests-pass bash $VFIX_SIDE/test.sh\"|; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s|^TEST_CMD=.*|TEST_CMD=\"VFIX_COUNT=$VFIX_SIDE/test-calls VFIX_PASS_FLAG=$VFIX_SIDE/tests-pass bash $VFIX_SIDE/test.sh\"|; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
 fake_scope "$VFIX_TARGET" src/w.txt
 fake_consensus_pass "$VFIX_TARGET" design
 fake_consensus_pass "$VFIX_TARGET" impl
@@ -772,7 +791,7 @@ set -e
 [ "$(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json")" = SCOPE_BASELINE_CHANGED ] || fail "verify 재진입: reason 이 SCOPE_BASELINE_CHANGED 가 아님 ($(jq -r '.reason' "$VFIX_TARGET/.agent-work/run-state.json"))"
 [ "$(jq -r '.status' "$VFIX_TARGET/.agent-work/run-state.json")" != DONE ] || fail "verify 재진입: 기준선 미복구인데 DONE 이 됨"
 [ "$(wc -l < "$VFIX_SIDE/test-calls" | tr -d ' ')" = 1 ] || fail "verify 재진입: 기준선 미복구인데 테스트가 실행됨"
-grep -q 'VFIX_WORKER_MARKER' "$VFIX_TARGET/.agent-work/live.log" && fail "verify 재진입: 기준선 미복구인데 codex 가 호출됨"
+[ "$(ls "$VFIX_TARGET"/.agent-work/reviews/worker-*.log.stderr.log | wc -l | tr -d ' ')" = 1 ] || fail "verify 재진입: 기준선 미복구인데 codex 가 호출됨(worker 원문 로그가 늘어남)"
 # 3차: 기준선 복구 → verify 재개, 테스트 통과, DONE, 가드 비활성화
 cp "$VFIX_SIDE/baseline.keep" "$VFIX_TARGET/.agent-work/worker-baseline.tree"
 set +e
@@ -825,8 +844,10 @@ EOF
 cat > "$USAGE_DIR/claude-g.json" <<'EOF'
 {"session_id":"session-g","total_cost_usd":1.2914188,"num_turns":12,"usage":{"input_tokens":38,"output_tokens":14701,"cache_read_input_tokens":2509959,"cache_creation_input_tokens":158503}}
 EOF
-printf 'codex\n{"schema_version":6,"verdict":"PASS"}\ntokens used\n12,345\n{"schema_version":6,"verdict":"PASS"}\n' > "$USAGE_DIR/codex-f.log"
-printf 'codex\nno token line\n' > "$USAGE_DIR/codex-none.log"
+# codex --json 이벤트 JSONL: 깨진 줄·다른 이벤트 사이에 turn.completed 두 개(합산) / usage 없는 스트림 / 옛 plain "tokens used" 텍스트(더 이상 읽지 않음)
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}' 'not json at all' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}' \
+  '{"type":"item.completed","item":{"type":"agent_message"}}' '{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":345,"output_tokens":100}}' > "$USAGE_DIR/codex-f.jsonl"
+printf '%s\n' '{"type":"thread.started"}' 'tokens used' '12,345' > "$USAGE_DIR/codex-none.jsonl"
 usage_run() { (cd "$USAGE_DIR" && source "$USAGE_CFG" && "$@"); }
 usage_last() { tail -1 "$USAGE_DIR/.agent-work/usage.jsonl" | jq -r "$1"; }
 usage_rows() { wc -l < "$USAGE_DIR/.agent-work/usage.jsonl" | tr -d ' '; }
@@ -854,33 +875,44 @@ usage_run log_claude_usage lbl-d REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a2.
 usage_run log_claude_usage lbl-a REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a.json" 2>>"$USAGE_DIR/warn.log"
 [ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | wc -l | tr -d ' ')" = 2 ] || fail "usage E: label 재시도 행이 2개가 아님"
 [ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | sort -u | wc -l | tr -d ' ')" = 2 ] || fail "usage E: invocation_id 가 같음"
-# F. codex 최소 telemetry → tokens_total 만, Claude 전용 필드 null
-usage_run log_role_usage codex VALIDATOR gpt-5.6-sol lbl-f "$USAGE_DIR/codex-f.log" 2>>"$USAGE_DIR/warn.log" || fail "usage F: recorder 실패"
-[ "$(usage_last '[.cli,.tokens_total,.source,.role,.model]|@csv')" = '"codex",12345,"codex-log","VALIDATOR","gpt-5.6-sol"' ] || fail "usage F: codex 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
-[ "$(usage_last '[.cost_usd,.input_uncached,.cache_read,.cache_write,.output,.input_effective,.num_turns,.duration_ms,.duration_api_ms,.session]|map(.==null)|all')" = true ] || fail "usage F: 관측 불가 값이 null 이 아님"
-usage_run log_codex_usage lbl-f2 VALIDATOR gpt-5.6-sol "$USAGE_DIR/codex-none.log" 2>"$USAGE_DIR/warn-f.log" || fail "usage F: tokens used 없는 로그에서 함수 실패"
-grep -q '\[WARN\]' "$USAGE_DIR/warn-f.log" || fail "usage F: tokens used 없음 WARN 누락"
-[ "$(usage_rows)" = 5 ] || fail "usage F: tokens used 없는 로그가 행으로 기록됨"
+# F. codex --json 이벤트 → turn.completed 합산(input_total 12000 = uncached 4655 + cache_read 6345 + cache_write 1000), reasoning 은 output 의 부분집합, 가격표 추정 비용
+#    gpt-5.6-sol: billing uncached = 12000-6345 = 5655 → 5655*4.00 + 6345*0.40 + 600*20.00 (per 1M) = 0.037158
+usage_run log_role_usage codex VALIDATOR gpt-5.6-sol lbl-f "$USAGE_DIR/codex-f.jsonl" 2>>"$USAGE_DIR/warn.log" || fail "usage F: recorder 실패"
+[ "$(usage_last '[.cli,.tokens_total,.source,.role,.model,.num_turns]|@csv')" = '"codex",12600,"codex-events","VALIDATOR","gpt-5.6-sol",2' ] || fail "usage F: codex 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.input_uncached,.cache_read,.cache_write,.input_effective,.output,.reasoning_output]|@csv')" = '4655,6345,1000,12000,600,300' ] || fail "usage F: codex 토큰 매핑 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.cost_usd,.cost_kind,((.estimated_cost_usd*1000000)|round),.pricing_basis]|@csv')" = ',"estimated",37158,"openai-standard-token-rate-2026-09-23"' ] || fail "usage F: codex 비용 필드 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.duration_ms,.duration_api_ms,.session]|map(.==null)|all')" = true ] || fail "usage F: 관측 불가 값이 null 이 아님"
+usage_run log_codex_usage lbl-f2 VALIDATOR gpt-5.6-sol "$USAGE_DIR/codex-none.jsonl" 2>"$USAGE_DIR/warn-f.log" || fail "usage F: usage 이벤트 없는 스트림에서 함수 실패"
+grep -q '\[WARN\]' "$USAGE_DIR/warn-f.log" || fail "usage F: usage 이벤트 없음 WARN 누락"
+[ "$(usage_rows)" = 5 ] || fail "usage F: usage 이벤트 없는 스트림(옛 plain tokens used 포함)이 행으로 기록됨"
+# F2. 가격표에 없는 codex 모델 → estimated null / cost_kind unknown (추측 가격 없음)
+usage_run log_codex_usage lbl-f3 WORKER gpt-unknown-x "$USAGE_DIR/codex-f.jsonl" 2>>"$USAGE_DIR/warn.log" || fail "usage F2: recorder 실패"
+[ "$(usage_last '[.estimated_cost_usd,.cost_kind,.pricing_basis,.tokens_total]|@csv')" = ',"unknown",,12600' ] || fail "usage F2: unknown 모델 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 # G. effective input 회귀 + 실패 invocation 도 기록(exit_code/success)
 usage_run log_role_usage claude REVIEWER claude-sonnet-5 impl-review-a01-round-01 "$USAGE_DIR/claude-g.json" 1 2>>"$USAGE_DIR/warn.log"
 [ "$(usage_last '[.input_effective,.exit_code,.success]|@csv')" = '2668500,1,false' ] || fail "usage G: input_effective/exit_code 불일치"
-# 파생 집계는 writer 밖 — legacy 행(in/out)도 함께 읽는다
+# 파생 집계는 writer 밖 — legacy 행(in/out, v2 codex tokens_total 만 있는 행)도 함께 읽는다
 printf '{"label":"legacy","session":"s","cost_usd":0.2,"in":3,"out":4,"cache_read":5,"cache_write":6}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
-[ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations]|@csv')" = "7,136,15731,1" ] || fail "usage summary: 합계 불일치: $(usage_run usage_summary)"
-# 집계 보강: num_turns/output/cache_read_per_turn(전체·그룹), by_label·by_session 으로 어느 호출·세션이 cache read 를 만드는지 본다.
-# cache_read_per_turn 은 num_turns 를 보고한 행만으로 계산(A 1000/7, D 7/1, E 1000/7, G 2509959/12 → 2511966/27). legacy·codex 행은 num_turns 없음.
+printf '{"schema_version":2,"label":"legacy-codex","role":"WORKER","cli":"codex","model":"gpt-5.6-luna","session":null,"cost_usd":null,"input_uncached":null,"cache_read":null,"cache_write":null,"output":null,"input_effective":null,"tokens_total":777,"num_turns":null,"exit_code":0,"success":true,"source":"codex-log"}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
+# 행: A B D E(claude, cost 1.25+0.5+0.1+1.25) F(codex sol, est 0.037158) F2(codex unknown) G(claude 1.2914188) legacy(0.2) legacy-codex(unknown)
+[ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations]|@csv')" = "9,9446,16931,2" ] || fail "usage summary: 합계 불일치: $(usage_run usage_summary)"
+# 비용은 provenance 별로 분리 — reported(claude 보고값 합) / estimated(codex 가격표 추정 합) / combined 는 둘의 합(추정치), cost_usd 는 reported 와 같은 옛 이름
 usage_summary_json="$(usage_run usage_summary)"
-[ "$(printf '%s' "$usage_summary_json" | jq -r '[.num_turns, .cache_read, (.cache_read_per_turn|floor)]|@csv')" = "27,2512001,93035" ] \
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[((.reported_cost_usd*10000000)|round), ((.estimated_cost_usd*10000000)|round), ((.combined_cost_usd_estimate*10000000)|round), ((.cost_usd*10000000)|round), .reasoning_output]|@csv')" = "45914188,371580,46285768,45914188,600" ] \
+  || fail "usage summary: reported/estimated/combined 비용 분리 불일치: $usage_summary_json"
+# 집계 보강: num_turns/output/cache_read_per_turn(전체·그룹), by_label·by_session 으로 어느 호출·세션이 cache read 를 만드는지 본다.
+# cache_read_per_turn 은 num_turns 를 보고한 행만으로 계산(A 1000/7, D 7/1, E 1000/7, G 2509959/12, F 6345/2, F2 6345/2 → 2524656/31). legacy 행은 num_turns 없음.
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[.num_turns, .cache_read, (.cache_read_per_turn|floor)]|@csv')" = "31,2524691,81440" ] \
   || fail "usage summary: num_turns/cache_read_per_turn 불일치: $usage_summary_json"
 [ "$(printf '%s' "$usage_summary_json" | jq -r '.by_label["lbl-a"] | [.invocations,.cache_read,.num_turns,(.cache_read_per_turn|floor)]|@csv')" = "2,2000,14,142" ] \
   || fail "usage summary: by_label(lbl-a) 불일치: $usage_summary_json"
 [ "$(printf '%s' "$usage_summary_json" | jq -r '.by_session["session-a"] | [.invocations,.cache_read,.num_turns,.output]|@csv')" = "3,2007,15,1006" ] \
   || fail "usage summary: by_session(session-a) 불일치: $usage_summary_json"
-[ "$(printf '%s' "$usage_summary_json" | jq -r '[.by_session["none"].invocations, .by_session["none"].cache_read_per_turn, .by_role.VALIDATOR.cache_read_per_turn]|@csv')" = "1,," ] \
-  || fail "usage summary: num_turns 없는 그룹(codex/session null)의 cache_read_per_turn 이 null 이 아님: $usage_summary_json"
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[.by_session["none"].invocations, .by_label["legacy-codex"].cache_read_per_turn, .by_label["legacy-codex"].cost_unknown_invocations]|@csv')" = "3,,1" ] \
+  || fail "usage summary: num_turns 없는 그룹(legacy codex/session null)의 cache_read_per_turn 이 null 이 아님: $usage_summary_json"
 [ "$(printf '%s' "$usage_summary_json" | jq -r '.by_role.REVIEWER | [.invocations,((.cost_usd*10000)|round),.cache_read,.num_turns]|@csv')" = "4,38914,2511966,27" ] \
   || fail "usage summary: by_role(REVIEWER) 불일치: $usage_summary_json"
-echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex 최소·effective 회귀) + usage_summary by_label/by_session/cache_read_per_turn"
+echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex --json 이벤트 합산·가격표 추정·unknown 모델·effective 회귀) + usage_summary reported/estimated/combined·by_label/by_session/cache_read_per_turn"
 
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

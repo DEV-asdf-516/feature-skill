@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category": "CONTRACT_VIOLATION",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ],
+  "note": "approach.md 결정 3 이 참조 profile 의 지역 변수 이름 client 를 따르도록 정했는데 워커가 이유 없이 found 를 썼다. 구조·동작·테스트는 문서대로."
+}

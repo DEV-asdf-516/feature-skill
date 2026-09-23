@@ -27,13 +27,12 @@ flowchart TD
     P0["Phase 0 · 오케스트레이터\nfeature-run.sh --new → 요구 기록(request.md)\n+ 설계 초안(design.md). 모호하면 사용자에게 질문"] --> P1
     P1["설계 합의 (러너)\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
     P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED)\n+ implementation-units.json(기능 단위 분할) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
-    P2["구현 (러너) — 구현 단위 직렬 실행\nunit 마다: fresh 워커(REQUIRED는 그대로, DELEGATED는 제약 안에서)\n→ targeted test(실패 시 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음"] --> P3
-    P2 -.DOC_GAP.-> P15
+    P2["구현 (러너) — 구현 단위 직렬 실행\nunit 마다: fresh 워커(code-spec 을 그대로 옮김, DELEGATED 는 formatter·import·compiler 세부뿐)\n→ targeted test(실패 시 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음"] --> P3
     P3["리뷰 수렴 (러너)\n리뷰어 게이트(읽기 전용) → 수정자는 FIX_CODE 만\nRound 2 는 종결 검토. APPROVE + 이슈 0건까지"] --> P4
-    P3 -.DOC_GAP.-> P15
+    P3 -.DOC_GAP → 사용자 결정 → review-gap 워커 → 리뷰.-> ESC
     P4["최종 검증 (러너)\n승인 지문 → TEST_CMD/LINT_CMD → 지문 재확인"] -->|통과| DONE["DONE → 오케스트레이터 보고\n(커밋은 사용자 지시 시 수정자에게 위임)"]
     P4 -->|실패| P2R["워커 1회 수정 → 재리뷰\n(MAX_TEST_RETRIES 회)"] --> P3
-    P2 -.UNDECIDED.-> ESC
+    P2 -.UNDECIDED(DOC_GAP/USER_DECISION) → 사용자 결정 → 같은 unit 워커.-> ESC
     P1 -.교착/라운드 초과.-> ESC["사용자 에스컬레이션"]
     P15 -.-> ESC
     P3 -.-> ESC
@@ -43,10 +42,10 @@ flowchart TD
 ### 왜 문서가 세 개인가
 
 - `design.md`: 왜·무엇을 만드는지(요구 수준). 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위
-- `implementation.md`: 무엇을 코드로 바꾸는지(도메인 지식). 파일 목록·순서, 클래스/함수 수준 계획, 테스트 목록, 완료 기준
-- `approach.md`: 어떻게 구현하는지(CS 지식), 구현 결정 단위로 REQUIRED/DELEGATED 표시. 판정 기준은 기술 범주가 아니라 solution shape 다 — 외부 동작·영속 데이터 정합성·보안 경계가 갈리거나 사용자가 방식을 명시한 결정은 항상 REQUIRED 이고, 그 밖에는 워커가 고르면 해결 전략·주요 흐름·비용 특성·재사용 vs 새 구현·새 구조물 여부·실패 방식이 달라지는 결정(정규식 vs 수동 스캔, 사전 인덱스 vs 반복 탐색, CSS vs JS 상태)이 REQUIRED, 같은 접근법 안의 코드 표현(변수명, 동등한 제어문 형태, 작은 헬퍼 내부, import·포맷)이 DELEGATED 다. 판정 예시와 과잉 설계 안전장치는 `tests/solution-shape-cases.md`. 근거는 기존 프로젝트 패턴 최우선이며 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용한다. 러너가 그 범위를 워커 프롬프트에 직접 붙인다.
+- `implementation.md`: 무엇을 코드로 바꾸는지를 **코드 사양** 수준으로 — 변경·생성 파일과 순서, 변경할 symbol 과 새 symbol, signature 와 input/output, 호출 관계, 재사용할 기존 symbol, 제거·대체되는 기존 경로, 호출 순서(상태 변경 순서 포함), 테스트할 observable behavior, 완료 뒤 성립하는 구조. 필요하면 함수 단위까지.
+- `approach.md`: implementation.md 를 실제 코드로 옮기는 방법을 결정한 **실행 사양**. 구현 결정 단위로 REQUIRED/DELEGATED 표시. REQUIRED 는 solution shape(해결 전략·주요 흐름·비용 특성·재사용 vs 새 구현·새 구조물·실패 방식)뿐 아니라 code-spec — 어떤 symbol 을 어떤 호출 형태로 쓰는지, 판단과 결과 조립이 어디서 일어나는지, 호출 순서, branch 조건·early return, iteration 방식, collection 생성·누적 위치, private helper 여부와 signature, 의미 있는 local/intermediate value 의 역할과 이름 — 까지 정하며 pseudocode 로 적어도 된다(실제 코드와 1:1 blueprint 허용). DELEGATED 는 formatter 가 정하는 whitespace, import 정렬 도구가 정하는 순서, compiler 가 강제하는 문법, 저장소에 하나의 명백한 표현만 있는 경우뿐이다. 표현 선택은 프로젝트 convention → 인용한 reference code → 직접 범위의 동일 책임 precedent → 작성자 판단 순으로 정하고, 참조 코드는 백틱 줄 범위(`src/foo/Bar.kt:L40-L68`)로 인용해 러너가 워커 프롬프트에 직접 붙인다 — 참조는 "참고" 가 아니라 기본 복제 대상이고 달라지는 지점만 문서가 적는다. 판정 예시는 `tests/solution-shape-cases.md`.
 
-"무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 워커는 REQUIRED 결정을 그대로 옮기는 타이피스트로 둔다. 반대로 DELEGATED 를 "외부 동작만 안 바뀌면 전부"로 넓히면 알고리즘·자료구조 선택이 워커에게 넘어가 "정확하고 계약은 지키지만 별로인 구현"이 어느 단계에서도 잡히지 않는다. 그래서 "무슨 방식으로 풀 것인가"는 오케스트레이터가, "그 방식을 이 코드베이스 문법으로 어떻게 적을 것인가"만 워커가 소유한다.
+"무엇"만 적고 "어떻게"를 비워두면 워커가 테스트만 통과하는 수준의 코드를 짜고 그 뒤 어떤 단계도 그것을 결함으로 잡지 않는다. 그래서 두 문서를 합쳐 **워커가 별도의 설계·스타일 판단 없이 옮겨 적을 수 있는 코드 사양서**로 만들고, 워커는 그것을 저장소 문법으로 옮기는 타이피스트로 둔다. 완성도 기준: 같은 문서를 받은 유능한 두 워커가 서로 구조적으로 다른 코드(다른 control flow·처리 순서·helper 분해·aggregation 위치·재사용 symbol·API 사용 pattern·local 구조·naming)를 쓸 수 있다면, 그 차이가 formatter/compiler 수준이 아닌 이상 문서는 불완전하다(검증자 `CODE_SPEC_GAP`). 워커는 "더 좋은 방식"을 고르지 않고 문서가 코드로 옮겨지지 않거나 모순될 때만 `DOC_GAP` 을 내며, 리뷰어는 문서가 정한 것과 다른 구현을 동작이 같아도 `CONTRACT_VIOLATION` 으로 잡는다(근거는 문서·convention·reference 뿐, 리뷰어 취향 아님). 문서가 길어지는 것은 허용한다 — 최적화 목표는 문서 길이가 아니라 구현 결과의 예측 가능성과 저장소 일관성이다. 모델별 profile·capability score 는 없고, DOC_GAP·CONTRACT_VIOLATION·반복 수정이 나오면 그 지점의 문서 구체성을 실행 증거로 되짚는다.
 
 ### 동작 분기 계약
 
@@ -80,7 +79,8 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 | exit | status | reason |
 |---|---|---|
 | 0 | `DONE` | 승인 + 전체 테스트 통과 |
-| 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING` / `APPROACH_GAP`: 오케스트레이터가 문서를 쓰거나 보강할 차례 |
+| 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING`: 오케스트레이터가 문서를 쓸 차례 |
+| 2 | `NEED_USER` | `UNDECIDED`(워커 DOC_GAP/USER_DECISION) / `REVIEW_DOC_GAP`(리뷰어 DOC_GAP) / `DOC_GAP_SOURCE_CHANGED`: 구현 중 드러난 미결정 solution shape — 사용자 결정이 최종. 답을 `decisions.md` 에 `[USER-QUESTION][scope=impl][review-issue=<id>|worker-gap=<key>]` 태그로 기록하고 approach.md 에 동기화하면 검증자·디자이너·impl 재합의 없이 워커 → 리뷰로 이어진다(`doc-gap-resume.json`) |
 | 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
@@ -144,7 +144,8 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
         ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드 (--feature <id> 로 전용 worktree 확정)
         ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩(dirty 원본을 snapshot tree 로 materialize, 재실행 재사용) + finalize(B/O/F 3-way 무커밋 반영·archive·정리)
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
-        └── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지
+        ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지
+        └── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
 
 tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
@@ -153,12 +154,15 @@ tests/
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
-├── validator-cases/             # 고정 픽스처 15개 (문서·src·expected.json)
+├── validator-cases/             # 고정 픽스처 21개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
 ├── reviewer-cases.md            # 리뷰어 판정 감도 회귀 세트 설명
-├── reviewer-cases/              # 고정 픽스처 13개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
+├── reviewer-cases/              # 고정 픽스처 23개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
 ├── reviewer-regression.sh       # 실제 리뷰어 모델로 회귀 실행 (리뷰어 프롬프트·스키마 변경 시)
-└── solution-shape-cases.md      # REQUIRED/DELEGATED 판정 사례 10개 — 과잉 설계·과잉 위임 양쪽 경계
+├── worker-cases.md              # 워커 code-spec 충실도 회귀 세트 설명
+├── worker-cases/                # 고정 픽스처 8개 (base/ 컴파일 가능한 Java + run-tests.sh, .agent-work/ 합의 문서·scope·unit 1개, expected.json, assert.py) + lib/javacheck.py
+├── worker-regression.sh         # 실제 WORKER_MODEL 로 production run_worker 1회 → deterministic assertion (검증자·리뷰어·수정자 미호출, LLM 판정 없음)
+└── solution-shape-cases.md      # REQUIRED/DELEGATED 판정 사례 14개 — solution shape·code-spec·DELEGATED 세 경계
 
 .codex/
 ├── hooks.json                   # codex PreToolUse 훅 등록 (프로젝트 레벨)
@@ -276,7 +280,7 @@ Claude 세션은 stage/attempt 단위다(`designer-design`/`designer-impl`, `val
 
 - `input_uncached` 는 cache read/write 를 제외한 입력. `input_effective` = `input_uncached + cache_read + cache_write` — 진단 편의용 파생값이지 provider billing 공식 필드가 아니다.
 - `cache_read` 는 현재 context 크기가 아니라 해당 invocation 안의 model turn 들에서 읽힌 cache 토큰 누계일 수 있으므로 `num_turns` 와 함께 해석한다.
-- CLI 별로 노출 가능한 telemetry 가 다르다. `null` 은 0 이 아니라 "관측 불가" 다. codex 는 로그의 `tokens used` 총합만 `tokens_total` 에 기록하고 나머지는 `null`(`source: codex-log`).
+- `null` 은 0 이 아니라 "관측 불가" 다. codex 는 `codex exec --json` 이벤트 JSONL 의 `turn.completed.usage` 를 invocation 안에서 합산해 `input_uncached`/`cache_read`/`cache_write`/`output`/`reasoning_output`/`num_turns`/`tokens_total` 을 채운다(`source: codex-events`). 비용은 provenance 로 나뉜다 — `cost_usd` 는 provider 가 보고한 실제 비용(claude, codex 는 항상 null), `estimated_cost_usd` 는 codex 토큰 × 명시적 가격표(`codex_model_pricing`, 2026-09-23 standard rate, 가격표에 없는 모델은 null/`cost_kind: unknown`)의 추정치이며 실제 청구액이 아니다. `usage_summary` 는 `reported_cost_usd`(= `cost_usd`)·`estimated_cost_usd`·`combined_cost_usd_estimate`(둘의 합)·`cost_unknown_invocations` 를 따로 낸다.
 - CLI 가 실패해도 파싱 가능한 usage 가 있으면 `exit_code`/`success` 와 함께 기록한다. 같은 `label` 이 재시도되면 행이 여러 개이며 `invocation_id` 로 구분한다.
 - 옛 행(`in`/`out`)은 rewrite 하지 않는다. `usage_summary` 는 두 형식을 함께 읽는다.
 - `usage_summary [usage.jsonl]` 은 전체와 `by_role`/`by_label`/`by_session` 그룹마다 `invocations`·`cost_usd`·`cache_read`·`num_turns`·`output`·`cache_read_per_turn`(cache_read 합 ÷ num_turns 합, num_turns 를 보고한 행만; 없으면 `null`)을 낸다. 어느 역할·호출·세션이 cache read 를 만드는지 보는 관측값이며 임계치·자동 세션 교체 같은 판단은 하지 않는다.
@@ -310,9 +314,12 @@ bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 �
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
+bash tests/worker-regression.sh      # 워커 code-spec 충실도. 사례당 실제 WORKER_MODEL 호출 1회 (production run_worker 경로), 판정은 deterministic
 ```
 
-스모크 테스트는 매 변경마다 돌린다. 회귀 세트는 해당 역할의 프롬프트·스키마·루프의 연계 검사를 바꿨을 때만 같은 모델·effort로 돌린다. 검증자 사례는 "기존 결함이지만 이번 피처와 무관 → PASS", "사용자가 명시한 유틸 재사용 누락 → BLOCK", "정책 미결정 → ASK_USER", "Round 2에서 옛 문제를 새로 제기하면 회귀" 같은 판정 경계를, 리뷰어 사례는 "diff 밖 기존 결함 → APPROVE", "명명만 다르고 계약 준수 → APPROVE", "합의된 동작의 추가 black-box 테스트 → APPROVE", "지정 유틸 재구현·문서 밖 fallback·중복 분기·내부 호출 테스트 → REQUEST_CHANGES", "Round 2 에서 옛 문제 제기 → 회귀", "수정자의 범위 밖 변경 → REQUEST_CHANGES" 를 고정한다. 종료 코드를 먼저 대조하고 기대값은 핵심 필드만 본다. 자연어 본문은 사람이 확인한다. 회귀 실행에는 해당 역할의 모델·effort·CLI 경로만 실제 값이면 되고 `TEST_CMD`·`LINT_CMD`는 스크립트가 복사본에서 `true`로 바꾼다. 전제와 결과 해석은 `tests/validator-cases.md`·`tests/reviewer-cases.md`에 있다.
+스모크 테스트는 매 변경마다 돌린다. 회귀 세트는 해당 역할의 프롬프트·스키마·루프의 연계 검사를 바꿨을 때만 같은 모델·effort로 돌린다. 검증자 사례는 "기존 결함이지만 이번 피처와 무관 → PASS", "사용자가 명시한 유틸 재사용 누락 → BLOCK", "정책 미결정 → ASK_USER", "Round 2에서 옛 문제를 새로 제기하면 회귀", "접근법은 정해졌지만 판단·조립 위치가 두 구조를 허용 → CODE_SPEC_GAP BLOCK", "pseudocode blueprint → PASS" 같은 판정 경계를, 리뷰어 사례는 "diff 밖 기존 결함 → APPROVE", "문서가 정하지 않은 명명만 다르고 계약 준수 → APPROVE", "합의된 동작의 추가 black-box 테스트 → APPROVE", "지정 유틸 재구현·문서 밖 fallback·중복 분기·내부 호출 테스트 → REQUEST_CHANGES", "문서가 참조 구조·지역 변수 이름을 정했는데 helper 추출·다른 이름 → REQUEST_CHANGES(동작 같아도)", "formatter·import 순서 차이만 → APPROVE", "Round 2 에서 옛 문제 제기 → 회귀", "수정자의 범위 밖 변경 → REQUEST_CHANGES" 를 고정한다. 종료 코드를 먼저 대조하고 기대값은 핵심 필드만 본다. 자연어 본문은 사람이 확인한다. 회귀 실행에는 해당 역할의 모델·effort·CLI 경로만 실제 값이면 되고 `TEST_CMD`·`LINT_CMD`는 스크립트가 복사본에서 `true`로 바꾼다. 전제와 결과 해석은 `tests/validator-cases.md`·`tests/reviewer-cases.md`에 있다.
+
+워커 회귀(`tests/worker-regression.sh`)는 검증자·리뷰어와 다른 질문을 묻는다 — **현재 `WORKER_MODEL` 이 합의된 code-spec(implementation.md + approach.md)을 그대로 코드로 옮기는가**. 사례마다 컴파일 가능한 작은 Java 저장소와 합의 완료로 취급하는 문서·unit 1개를 두고, `scripts/worker-invoke.sh` 의 `run_worker`(feature-run.sh 가 쓰는 그 함수 — 프롬프트 조립·WORKER_RULES·REFERENCE CODE·implementation-context·스키마·CLI 라우팅·usage 기록·사후 게이트 포함)로 실제 워커를 정확히 1회 부른 뒤 결과 JSON·호출 전후 tree·diff 를 expected.json 과 `assert.py`(주석·문자열 제거 후 메서드 집합·본문·호출 순서·지역 변수 이름·분기 유무를 보는 `lib/javacheck.py`)로만 판정한다. 검증자·리뷰어·수정자는 부르지 않고 LLM 으로 채점하지 않으며, 워커 실패·잘못된 UNDECIDED 는 그대로 FAIL 이다. targeted test(컴파일 + main 기반 행동 테스트)가 통과해도 helper 추출·이름 변경·필드별 orchestration 같은 code-spec 위반이면 FAIL 이다. 실행 시작에 Worker CLI/model/effort/fast tier 를 출력하고, 끝에 production `usage.jsonl` 을 모아 호출 수·토큰·비용·시간을 낸다. 사례와 판정 기준은 `tests/worker-cases.md`.
 
 ## 트러블슈팅
 
@@ -324,7 +331,7 @@ bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).
 - **`NEED_USER(DECISION_SCOPE_REQUIRED)`**: `decisions.md`에 scope 없는 `- [USER-QUESTION] …` 줄이 있다. detail 의 행번호를 보고 `[USER-QUESTION][scope=design]` 또는 `[USER-QUESTION][scope=impl]` 로 고친 뒤 재실행(LLM 은 호출되지 않았다).
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 issue`** / **`리뷰 schema_version 이 현재 계약과 다름`**: 리뷰어가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어겼거나, 업데이트 후 `config.sh`의 `REVIEWER_CONTRACT_VERSION`이 병합되지 않은 것. 재실행하면 되고 반복되면 `tests/reviewer-regression.sh`로 프롬프트 회귀를 본다.
-- **리뷰 단계가 `NEED_DOCS(APPROACH_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈를 냈다. `state.json.review`의 해당 이슈 `required_outcome`대로 approach.md 를 보강하고 재실행하면 검증자 재합의 → 워커 재개 순으로 진행된다.
+- **리뷰 단계가 `NEED_USER(REVIEW_DOC_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈(`user_question`/`options`)를 냈다. 사용자가 고른 답을 `decisions.md` 에 `- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>` 으로 적고 approach.md 에 반영한 뒤 재실행하면 검증자·디자이너 없이 review-gap 워커 1회(같은 리뷰의 FIX_CODE 포함) → 리뷰 순으로 진행된다. 워커 `UNDECIDED` 도 같은 경로다(`worker-gap=<unit>#<n>` 태그).
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
 - **이전 피처 문맥이 섞임**: `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
 - **오케스트레이터에 conventions 가 안 보임**: 훅은 세션당 첫 프롬프트에만 넣는다(마커 `$TMPDIR/claude-conventions-injected/<session_id>`). 새 세션을 열거나 마커를 지우면 다시 주입된다. `FEATURE_ROLE_CHILD=1` 환경에서는 의도적으로 넣지 않는다.
