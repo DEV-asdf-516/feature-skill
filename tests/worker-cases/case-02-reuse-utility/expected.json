@@ -22,10 +22,7 @@
       "substring\\(",
       "\\.repeat\\(",
       "replace\\(",
-      "charAt\\(",
-      "String\\.format\\(",
-      "String\\.join\\(",
-      "StringBuilder"
+      "charAt\\("
     ]
   },
   "run_targeted_test": true

@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. 결정 2(연속 하이픈 축약)가 DELEGATED 로 남아 있지만 정규식 한 번 vs 수동 스캔은 bounded 문자열에서 결과·I/O·책임 배치·상태 의미·요구 규모의 비용이 같은 local expression 이다 — 이것을 REQUIREMENT_MISSING/CODE_SPEC_GAP 으로 내면 v15 회귀(material 대조군은 case-21·22)

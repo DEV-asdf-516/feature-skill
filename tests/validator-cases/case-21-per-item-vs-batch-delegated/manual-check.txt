@@ -1,0 +1,1 @@
+conflict_refs 가 approach.md 결정 1(주문 조회 [DELEGATED])을 가리키고, impact 에 id 마다 `findById`(DB 호출 n회) vs `findAllByIds` 1회(design: 한 페이지 최대 500 건, repository 는 DB)가 I/O 횟수를 가른다고 적혀 있는지, minimum_contract_needed 가 어느 쪽을 고를지 처방하지 않고 "조회 방식(호출 횟수)이 REQUIRED 로 정해져야 한다" 만 말하는지 확인. category 는 REQUIREMENT_MISSING(접근법 공백)·CODE_SPEC_GAP(material 구현 계약 공백) 둘 다 타당

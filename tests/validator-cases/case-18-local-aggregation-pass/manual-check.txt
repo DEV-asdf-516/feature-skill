@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. 건마다 `Stock.add` 호출 vs sku 별 사전 합산 뒤 `add` 는 in-memory Map 위의 local aggregation 표현이며 I/O·책임 배치·상태 의미·비용 특성이 같다 — CODE_SPEC_GAP 으로 내면 v15 회귀(I/O 횟수가 갈리는 material 대조군은 case-21)

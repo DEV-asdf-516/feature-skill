@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. (a) summary 안의 private helper 유무·조회 결과 local 이름·마스킹 결과 intermediate 유무·record 생성 표현을 문서가 정하지 않았다 — 이것을 CODE_SPEC_GAP 으로 내면 v15 회귀. (b) 결정 3 의 NEW ClientSummary 는 새 API 계약에 직접 대응하는 feature-local DTO 라 '확인한 symbol·가장 가까운 후보' 근거가 없어도 REUSE_DISCOVERY_GAP 이 아니다
