@@ -24,13 +24,13 @@ bash tests/reviewer-regression.sh compare <reviewer-round-NN.json> <expected.jso
 - `expected.json`은 핵심 필드만 본다: verdict, issues 개수, 각 기대 이슈를 만족하는 이슈의 존재. 필드는 정확 일치(`"category": "TEST_CONTRACT_GAP"`) 또는 `<field>_any_of` 허용 집합으로 적는다. 자연어 본문(`required_outcome`)은 대조하지 않고 스크립트가 출력만 한다 — 결과가 아니라 기법을 처방했는지는 사람이 본다.
 - 감도 회귀의 관심사는 "막지 말아야 할 것을 막았는가"와 "막아야 할 것을 통과시켰는가"다. 같은 유효 문제에 어떤 라벨을 골랐는지는 여러 답이 맞을 수 있으면 `_any_of`로 열어 둔다.
 
-case-12 와 case-16~19 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`, 기존 `findOrThrow`·`MaskingUtil.maskPhone` 재사용, `ClientService.summary` 제어 흐름 절)를 공유하고 `changed/`의 코드만 다르다. case-21~23 은 그 피처의 **code-spec 문서 버전**이다 — base 에 참조 precedent `ClientService.profile` 과 `ClientProfile` 이 있고 approach.md 가 helper 여부·지역 변수 이름·호출 형태까지 pseudocode 로 정한다(case-01~20 의 문서는 REQUIRED/DELEGATED 를 solution shape 경계로만 표시한 이전 형식이며, 리뷰어는 어느 쪽이든 "문서·reference·convention 이 정한 것" 만 근거로 판정하므로 그대로 유효하다). case-12 는 solution shape 경계를 위한 독립 피처(태그 병합)다. case-14~19 는 `base/conventions.md`(계층 책임·DTO 의존·Parse Don't Validate·Tell Don't Ask·명명 다섯 규칙, 여섯 사례 동일)를 가진 프로젝트이며, case-16·17·20 은 변경 이력 피처(`ClientService.update` + `DiffUtil`/`ChangeLogWriter` 재사용), case-18·19 는 검증 갱신 피처(`ClientService.update` + 요청 DTO 신설)다. 컨벤션 사례의 문서·코드에도 기대 판정 힌트를 적지 않는다 — 규칙은 conventions.md 에만 있고 implementation.md 는 그 규칙을 반복하지 않는다.
+case-12·16~19·24·25 를 제외한 모든 사례는 같은 피처(`GET /clients/{id}/summary`, 기존 `findOrThrow`·`MaskingUtil.maskPhone` 재사용, `ClientService.summary` 제어 흐름 절)를 공유하고 `changed/`의 코드만 다르다. case-21~23 은 approach.md 가 helper 없음·지역 변수 이름까지 REQUIRED 로 적어 둔 **과명세 문서 버전**이다 — v15 부터 리뷰어는 그런 local 문장을 material 계약으로 취급하지 않으므로 21·22 는 APPROVE 대조군이 됐다("문서에 적혀 있다는 사실만으로 모든 문장이 동등한 강도의 contract 가 되는 것은 아니다"). case-26 은 같은 피처에 동등 overload. case-12(bounded in-memory 태그 병합)와 case-24(DB 항목별 조회)는 local expression 과 material I/O 결정의 대조 쌍이고, case-25 는 불필요한 standalone abstraction(REDUNDANT_CODE)이다. case-14~19 는 `base/conventions.md`(계층 책임·DTO 의존·Parse Don't Validate·Tell Don't Ask·명명 다섯 규칙, 여섯 사례 동일)를 가진 프로젝트이며, case-16·17·20 은 변경 이력 피처(`ClientService.update` + `DiffUtil`/`ChangeLogWriter` 재사용), case-18·19 는 검증 갱신 피처(`ClientService.update` + 요청 DTO 신설)다. 컨벤션 사례의 문서·코드에도 기대 판정 힌트를 적지 않는다 — 규칙은 conventions.md 에만 있고 implementation.md 는 그 규칙을 반복하지 않는다.
 
 | 사례 | 상황 | 기대 |
 |---|---|---|
 | case-01-existing-defect-outside-diff | `ClientCache.evict`가 잘못된 키 타입으로 절대 제거하지 않는 기존 결함. diff 밖이고 이번 변경이 활성화하지 않음 | APPROVE |
 | case-02-meaningful-single-use-variable | `maskedPhone` 지역변수를 한 번만 쓰지만 approach.md 주 경로의 도메인 개념 | APPROVE |
-| case-03-alias-return | `ClientSummary summary = new …; return summary;` — 대입 직후 그대로 반환. 전제: 프로젝트 규칙 없음, 참조 코드는 모두 식을 직접 반환(순수 alias) | REQUEST_CHANGES / FIX_CODE / REDUNDANT_CODE / SEMANTIC_REDUNDANCY |
+| case-03-alias-return | `ClientSummary summary = new …; return summary;` — 대입 직후 그대로 반환. 프로젝트 규칙 없음 | APPROVE — 반환 직전 alias 변수는 local expression(v15 이전 REDUNDANT_CODE) |
 | case-04-undeclared-fallback | design이 phone 을 항상 존재한다고 정했는데 `phone == null → ""` 분기 추가 | REQUEST_CHANGES / FIX_CODE / UNDECLARED_BEHAVIOR 또는 CONTRACT_VIOLATION / DIRECT_MISMATCH |
 | case-05-duplicate-branch | `findOrThrow` 뒤에 다시 `client == null → NotFoundException` | REQUEST_CHANGES / FIX_CODE / REDUNDANT_CONTROL_FLOW(허용: UNDECLARED_BEHAVIOR, CONTRACT_VIOLATION) |
 | case-06-naming-differs-contract-kept | 참조 코드·문서와 변수명·포맷만 다르고 `findOrThrow`·`maskPhone` 재사용과 테스트 계약은 준수 | APPROVE (명명·포맷을 issue 로 올리면 회귀) |
@@ -38,7 +38,7 @@ case-12 와 case-16~19 를 제외한 모든 사례는 같은 피처(`GET /client
 | case-08-extra-blackbox-test | implementation.md 에 이름이 없지만 design.md 마스킹 계약을 검증하는 추가 black-box 테스트 | APPROVE ("문서에 없는 테스트"로 막으면 회귀) |
 | case-09-internal-call-test | `verify(repo, times(1))`·`verifyNoMoreInteractions` 만 하는 내부 호출 테스트 추가 | REQUEST_CHANGES / FIX_CODE / TEST_CONTRACT_GAP |
 | case-10-round2-old-issue | Round 1 리뷰(고정 `prev-review.json`, null fallback 한 건)는 수정됐고, Round 1 부터 있던 별개 alias(`ClientController.summary`의 `body`)가 수정 diff 밖에 남아 있음 | **Round 2 APPROVE** — 별개 문제를 새로 제기하면 종결 검토 회귀 |
-| case-12-undecided-approach | approach.md 가 "없는 태그 판별" 접근법을 DELEGATED 로 남겼고 직접 범위에 precedent 도 없는데, 워커가 항목마다 선형 `contains` 를 골라 DONE 보고. 동작·테스트는 문서대로 | REQUEST_CHANGES / **DOC_GAP** / UNDECIDED_APPROACH / DIRECT_MISMATCH — 동작이 맞다는 이유로 APPROVE 하거나 "Set 이 더 좋다"를 required_outcome 에 적으면 회귀 |
+| case-12-undecided-approach | approach.md 가 "없는 태그 판별" 을 DELEGATED 로 남겼고 워커가 bounded in-memory 목록에서 선형 `contains` 를 골라 DONE. 동작·테스트는 문서대로 | APPROVE — I/O·책임·상태·요구 규모의 비용이 같은 local expression. UNDECIDED_APPROACH/DOC_GAP 을 내면 local 선택으로 사용자를 부르는 회귀(material 대조군 case-24) |
 | case-13-reuse-ignored-parallel-repository | approach.md 결정 1 이 `REUSE findOrThrow` 로 정해졌는데 워커가 같은 조회 책임의 중첩 `ClientSummaryRepository` 를 새로 만들어 summary 가 그것을 호출. 동작·테스트는 문서대로 | REQUEST_CHANGES / FIX_CODE / CONTRACT_VIOLATION 또는 REDUNDANT_CODE — 동작이 맞다는 이유로 APPROVE 하면 회귀 |
 | case-11-fixer-out-of-scope | 수정자가 R-01(마스킹 재구현)을 고치면서 request.md 제외 대상인 `MaskingUtil.java` 까지 변경 | **Round 2 REQUEST_CHANGES** / OUT_OF_SCOPE_CHANGE / origin FIX_REGRESSION 또는 NEWLY_EXPOSED_BY_FIX |
 | case-14-convention-dto-transform-violated | conventions.md 규칙 2(응답 DTO 는 값만, 변환은 서비스)를 implementation.md 는 반복하지 않음. DTO 형태는 DELEGATED 인데 `ClientSummary.from(Client)` 가 `MaskingUtil` 을 호출해 변환 책임을 DTO 로 옮김. 동작·테스트는 문서대로 | REQUEST_CHANGES / FIX_CODE / **CONTRACT_VIOLATION** / DIRECT_MISMATCH — 동작이 맞거나 DELEGATED 라는 이유로 APPROVE 하면 회귀 |
@@ -48,9 +48,12 @@ case-12 와 case-16~19 를 제외한 모든 사례는 같은 피처(`GET /client
 | case-20-convention-map-batch-kept | case-16 과 같은 문서. `DiffUtil.diff(before.fields(), update.fields())` 로 얻은 Map 을 `writeAll` 에 한 번 전달하고 `Client.apply` 로 저장 | APPROVE — 한 번 쓰는 지역 변수 `changes` 나 `fields()` getter 호출을 이유로 막으면 회귀 |
 | case-18-convention-raw-request-below-boundary | 규칙 3(Parse, Don't Validate: 경계에서 불변 VO 로 변환, 아래에 `*Request`·raw Map 금지)이 있고 결정 3(전달 형태)은 DELEGATED. 서비스가 검증 뒤 mutable `ClientUpdateRequest` 를 `Client.updated` 에 그대로 전달 | REQUEST_CHANGES / FIX_CODE / **CONTRACT_VIOLATION** / DIRECT_MISMATCH (issue 1개 — v12 에서 case-19 와 같은 DTO/테스트 migration) |
 | case-19-convention-parsed-vo-with-internal-map | case-18 과 같은 문서. `ClientPatch.parse` 가 경계에서 검증과 동시에 불변 VO(내부는 unmodifiable Map)를 만들고 `Client.updated(ClientPatch)` 만 받음. 결정 3 이 NEW 를 허용 | APPROVE — VO 내부의 Map 이나 VO 신설을 이유로 막으면 회귀. **v13 경계:** 검증 판단은 `ClientPatch.parse` 안에 있고 `ClientService.update` 본문에는 없다 — 결정 2(검증 유틸 helper 금지·표준 라이브러리 직접 검사) + 결정 3(VO NEW 허용) + 규칙 3(경계에서 검증과 동시에 VO 변환) 을 합성하면 진입점이 직접 부르는 VO factory 가 그 경계이며 helper 추출이 아니다. 별도 타입 존재·Map 내부 표현·factory 존재만으로 "판단을 helper 로 위임" 이라 하면 이름 기반 판정 회귀(v12 실모델 실패). 반대 대조군은 case-14(DTO 가 `MaskingUtil` 을 호출해 변환 책임을 실제로 수행 → CONTRACT_VIOLATION)·case-18(raw Request 가 경계 아래로 전달). v12 migration: `ClientUpdateRequest` 는 implementation.md 대로 기본 생성자 + getter/setter 만 두고 테스트는 test-local helper 로 setter setup 한다(2-인자 생성자는 실제 TEST_CONTRACT_GAP 이라 제거 — 리뷰어를 약화시키지 않음). case-18 도 같은 DTO·테스트라 함께 migration |
-| case-21-reference-pattern-deviation | code-spec 문서(case-21~23 공통): 결정 3 이 참조 `profile`(`src/ClientService.java:L11-L14`)과 같은 두 줄 구조·helper 없음을 REQUIRED 로 정하고 pseudocode 까지 적음. 워커가 기능상 동일한 private `toSummary` 를 추출 | REQUEST_CHANGES / FIX_CODE / **CONTRACT_VIOLATION** / DIRECT_MISMATCH — 동작이 같다는 이유로 APPROVE 하면 회귀 |
-| case-22-naming-local-precedent-deviation | 같은 문서. 결정 3 이 참조의 지역 변수 이름 `client` 를 따르도록 정했는데 워커가 이유 없이 `found` 를 씀. 구조·동작·테스트는 문서대로 | REQUEST_CHANGES / FIX_CODE / **CONTRACT_VIOLATION** / DIRECT_MISMATCH — case-06 과의 차이는 문서가 이름을 정했는가뿐이다 |
-| case-23-formatter-trivia-only | 같은 문서. 심볼·순서·helper 없음·`client` 까지 blueprint 그대로이고 줄바꿈·빈 줄·인자 개행·import 순서만 참조와 다름(결정 5 DELEGATED) | APPROVE — 포맷·import 순서를 issue 로 올리면 회귀 |
+| case-21-reference-pattern-deviation | approach.md 결정 3 이 참조 `profile` 과 같은 두 줄 구조·helper 없음을 REQUIRED 로 적어 둠(사용자·convention 근거 없음). 워커가 같은 클래스 private `toSummary` 를 추출 | APPROVE — 책임 배치·재사용·순서·동작이 같은 local expression. CONTRACT_VIOLATION 을 내면 회귀 |
+| case-22-naming-local-precedent-deviation | 같은 문서. 결정 3 이 지역 변수 이름 `client` 를 적어 두었는데 워커가 `found` 를 씀 | APPROVE — local 이름은 명시 convention 이 없는 한 워커 소유 |
+| case-23-formatter-trivia-only | 같은 문서. 심볼·순서·재사용까지 문서대로이고 줄바꿈·빈 줄·인자 개행·import 순서만 다름 | APPROVE |
+| case-24-per-item-lookup-io-undecided | `OrderService.statuses(ids)`(한 페이지 최대 500 건, DB) 의 조회 방식이 DELEGATED, repository 에 `findById`·`findAllByIds` 모두 있음. 워커가 id 마다 `findById` 를 골라 DONE | REQUEST_CHANGES / **DOC_GAP** / UNDECIDED_APPROACH / DIRECT_MISMATCH — DB 호출 1 vs n 은 material. 어느 쪽이 낫다고 적으면 회귀 |
+| case-25-redundant-outcome-abstraction | 결정 3 이 기존 `SendStatus` 반환을 정했는데 워커가 `Kind` enum + `SendOutcome` record + `resultOf` 를 발명해 branch 결과를 감쌈. 동작·테스트는 문서대로 | REQUEST_CHANGES / FIX_CODE / **REDUNDANT_CODE** / SEMANTIC_REDUNDANCY — 제거해도 동작·책임·검증이 그대로. required_outcome 이 코드 형태를 처방하면 manual 실패 |
+| case-26-equivalent-overload | 결정 2 가 REUSE `MaskingUtil.maskPhone`(1-인자·2-인자 overload 공존)을 정했고 워커가 `maskPhone(phone, '*')` 를 씀 | APPROVE — 동일 동작의 overload 는 local expression |
 
 ## Round 2 사례의 실행 방식
 
@@ -58,12 +61,12 @@ case-12 와 case-16~19 를 제외한 모든 사례는 같은 피처(`GET /client
 
 ## 결과 해석
 
-기대 결과는 `통과 23 / 실패 0`이다. 실패는 세 부류로만 나눈다.
+기대 결과는 `통과 26 / 실패 0`이다. 실패는 세 부류로만 나눈다.
 
 - 스크립트가 exit 1로 끝남 → 하네스·설정·스키마 또는 리뷰어 출력 형식 문제(근거·연계 필드 검사 포함). 프롬프트 감도 문제가 아니다.
 - 정상 종료인데 `[DIFF]` → 실제 리뷰어 판정 감도 문제. 그 사례가 드러낸 입장 조건·"issue 가 아닌 것" 문장만 최소 수정한다.
 - case-10 Round 2 가 REQUEST_CHANGES → 수정 diff 와 issue 의 인과관계를 수동 확인한다.
 - case-14~19 의 `[DIFF]` 는 컨벤션 판정 감도 문제다(리뷰어 프롬프트의 "컨벤션 검사 기준" 절과 CONTRACT_VIOLATION 정의). 컨벤션이 없는 case-01~13 이 함께 흔들리면 컨벤션 절이 규칙 없는 프로젝트에도 새고 있는 것이다.
-- case-21~23 의 `[DIFF]` 는 code-spec 판정 감도 문제다. 21·22 가 APPROVE 면 "동작이 같으면 표현 차이" 로 읽은 것이고(CONTRACT_VIOLATION 의 code-spec 항목), 23 이 REQUEST_CHANGES 면 formatter·import trivia 를 잡은 것이다("issue 가 아닌 것"). case-06 이 함께 REQUEST_CHANGES 로 바뀌면 문서가 정하지 않은 이름까지 잡는 것이므로 회귀다 — case-06 과 case-22 의 차이는 문서가 이름을 정했는가뿐이다.
+- case-03·12·21·22·26 의 `[DIFF]`(REQUEST_CHANGES) 는 local expression 을 material 계약으로 읽은 회귀다 — 리뷰어 프롬프트의 "local implementation expression" 절과 CONTRACT_VIOLATION/UNDECIDED_APPROACH/REDUNDANT_CODE 정의를 본다. case-24 가 APPROVE 면 I/O topology 를 local 로 읽은 것이고, case-25 가 APPROVE 면 standalone abstraction 을 워커 자유로 읽은 것이다. case-06 은 계속 APPROVE 여야 한다.
 
 실행 전에 프롬프트나 스키마를 더 보강하지 않는다. 기대와 다른 사례가 나왔을 때만 손댄다. 판정이 기대와 다르면 개별 픽스처를 늘리지 말고 리뷰어 프롬프트 문구를 **최소로** 고친다. 사례 추가는 실제로 틀린 판정이 나온 상황에만 한다.

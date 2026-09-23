@@ -1,0 +1,1 @@
+conflict_refs 가 approach.md 결정 3(게이트웨이 실패 처리 [DELEGATED])을 가리키고, impact 에 재시도 없이 FAILED vs n회 재시도 후 FAILED 가 외부 SMS 호출 횟수(건당 과금)·실패 semantics 를 가른다고 적혀 있는지, minimum_contract_needed 가 횟수를 처방하지 않고 "재시도 여부(와 있다면 횟수)가 REQUIRED 로 정해져야 한다" 만 말하는지 확인. category 는 REQUIREMENT_MISSING·CODE_SPEC_GAP 둘 다 타당

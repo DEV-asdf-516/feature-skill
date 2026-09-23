@@ -1,0 +1,28 @@
+{
+ "version": 1,
+ "units": [
+  {
+   "id": "01-rename",
+   "title": "이름 변경",
+   "goal": "ClientService.rename 이 조회 → withName 사본 → save 1회 → 사본 반환 순서로 작성된다",
+   "requirements": [
+    "implementation.md#변경-파일",
+    "implementation.md#테스트"
+   ],
+   "scope": {
+    "files": [
+     "src/ClientService.java",
+     "src/test/ClientServiceTest.java"
+    ]
+   },
+   "references": [
+    "implementation.md",
+    "approach.md#결정-1",
+    "approach.md#결정-2",
+    "approach.md#결정-3",
+    "approach.md#결정-4"
+   ],
+   "targeted_test": "bash run-tests.sh ClientServiceTest"
+  }
+ ]
+}

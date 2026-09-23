@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. MaskingUtil.maskPhone 에 1-인자·2-인자(mask 문자) overload 가 있고 결정 2 는 어느 overload 인지 적지 않았다 — 동일 동작의 overload 선택은 local expression 이므로 CODE_SPEC_GAP 으로 내면 v15 회귀

@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. 결정 1 이 책임 위치(Classifier 가 판정·조립, Batch 는 위임)와 Classifier 의 public 계약만 정했고 helper 유무·local 이름·for/stream·pseudocode 는 적지 않았다 — 그것을 이유로 CODE_SPEC_GAP 을 내면 v15 회귀

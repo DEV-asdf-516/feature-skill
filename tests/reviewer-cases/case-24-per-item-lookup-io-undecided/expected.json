@@ -1,0 +1,12 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "DOC_GAP",
+      "category": "UNDECIDED_APPROACH",
+      "evidence_type": "DIRECT_MISMATCH"
+    }
+  ],
+  "note": "결정 1(주문 조회)이 DELEGATED 인데 repository 에 findById 와 findAllByIds 가 모두 있고 워커가 id 마다 findById 를 부르는 쪽을 골랐다. 한 페이지 500 건에서 DB 호출 1회 vs n회는 I/O topology 가 갈리는 material decision 이므로 UNDECIDED_APPROACH / DOC_GAP 이다(case-12 의 bounded in-memory contains 와 대조). 어느 쪽이 낫다고 적으면 회귀."
+}

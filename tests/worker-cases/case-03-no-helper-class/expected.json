@@ -1,0 +1,23 @@
+{
+  "expected_status": "DONE",
+  "expected_exit": 0,
+  "undecided_kinds": [],
+  "allowed_new_files": [],
+  "files_must_exist": [
+    "src/ClientService.java"
+  ],
+  "files_must_not_exist": [
+    "src/TagFormatter.java",
+    "src/TagUtil.java",
+    "src/Tags.java"
+  ],
+  "must_contain": {
+    "src/test/ClientServiceTest.java": [
+      "tagLine_joinsUpperCaseTags",
+      "tagLine_noTags_returnsEmpty",
+      "tagLine_unknownId_throwsNotFound"
+    ]
+  },
+  "must_not_contain": {},
+  "run_targeted_test": true
+}

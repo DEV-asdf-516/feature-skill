@@ -1,12 +1,6 @@
 {
   "round": 1,
-  "verdict": "REQUEST_CHANGES",
-  "issues": [
-    {
-      "action": "FIX_CODE",
-      "category": "CONTRACT_VIOLATION",
-      "evidence_type": "DIRECT_MISMATCH"
-    }
-  ],
-  "note": "approach.md 결정 3 이 참조 profile 과 같은 두 줄 구조·helper 없음을 REQUIRED 로 정했는데 워커가 기능상 동일한 private toSummary 를 추출했다. 동작·테스트는 문서대로."
+  "verdict": "APPROVE",
+  "issues": [],
+  "note": "approach.md 결정 3 이 참조 profile 과 같은 두 줄 구조·helper 없음을 REQUIRED 로 적어 두었지만, 같은 클래스 안의 private toSummary 추출은 책임 배치·재사용 경로·호출 순서·외부 동작을 바꾸지 않는 local implementation expression 이다. 문서에 적혀 있다는 사실만으로 merge blocker 가 되지 않는다(user decision·convention 이 그 구조를 요구하지 않음). findOrThrow·maskPhone 재사용과 테스트 계약은 지켰다."
 }

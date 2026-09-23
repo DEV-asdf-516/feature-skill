@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================
-# 워커 code-spec 충실도 회귀 — 고정 픽스처로 **실제 워커**(config.sh 의 WORKER_MODEL/WORKER_EFFORT, CLI 는 모델 이름 또는 WORKER_CLI)를
+# 워커 material-contract 충실도 회귀 — 고정 픽스처로 **실제 워커**(config.sh 의 WORKER_MODEL/WORKER_EFFORT, CLI 는 모델 이름 또는 WORKER_CLI)를
 # production 호출 경로(scripts/worker-invoke.sh 의 run_worker = feature-run.sh 가 쓰는 그 함수) 그대로 unit 하나당 정확히 1회 돌린다.
 #
-# 질문은 하나다: 현재 WORKER_MODEL 은 합의된 implementation.md + approach.md(code-spec) 를 그대로 코드로 옮기는가?
+# 질문은 하나다: 현재 WORKER_MODEL 은 합의된 material contract(implementation.md + approach.md)를 지키면서 local 표현은 스스로 정하고, 새 standalone 구조물을 만들지 않으며, material 공백에서만 DOC_GAP 을 내는가?
 #   평가 대상은 워커 하나뿐 — 디자이너·검증자·리뷰어·수정자는 호출하지 않고, 판정에 LLM 을 쓰지 않는다(리뷰어로 채점하지 않는다).
 #   흐름: fixture 준비 → 실제 워커 1회 → worker-result.json + 호출 전후 tree → deterministic assertion(expected.json + assert.py) → PASS/FAIL.
-#   컴파일·행동 테스트가 통과해도 code-spec(helper 추출·이름·호출 순서·재사용·batch 구조)을 어기면 FAIL 이다.
+#   컴파일·행동 테스트가 통과해도 material 계약(지정 symbol 재사용·재구현 없음·상태 변경 순서·batch 1회·새 파일/타입/public 메서드 없음·NEW 의 public 계약)을 어기면 FAIL 이다. 지역 변수 이름·같은 클래스 private helper·for/stream 은 판정하지 않는다.
 #
 # 사용법:
 #   touch .claude/ALLOW_REAL_LLM_REGRESSION        # 유료 실행 1회 승인 (사용자 지시 후에만)
@@ -100,6 +100,36 @@ printf '#!/usr/bin/env bash\nexec env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION
 printf '#!/usr/bin/env bash\nexec env -u CLAUDECODE -u CLAUDE_CODE_CHILD_SESSION "%s" "$@"\n' "$REAL_CODEX" > "$SCRATCH/bin/real-codex"
 chmod +x "$SCRATCH/bin/real-claude" "$SCRATCH/bin/real-codex"
 
+# ---------- impl consensus PASS 전제 (production 경로, 실제 검증자 0회) ----------
+# 워커 stage 는 impl 문서가 승인된 상태를 전제한다 — run_worker 가 UNDECIDED 를 기록할 때 _doc_gap_write 가 impl_docs_accepted
+# (consensus-impl.json PASS 가 현재 입력 지문에 유효)를 요구하므로, 픽스처를 "합의 완료로 간주" 하는 것만으로는 DOC_GAP 사례가 ENV_ERROR(exit 1) 로 끝난다.
+# install-smoke.sh 의 fake_consensus_pass 와 같은 방식으로 production consensus-loop.sh 를 가짜 검증자(PASS 리뷰를 -o 경로에 씀)로 한 번 돌려
+# 러너가 인정하는 체크포인트(consensus-impl.json: 포맷/계약 버전 · target=impl · 실제 PASS 리뷰 경로 · 현재 입력 지문)를 production 헬퍼로 만든다.
+# 검증 로직·지문 계산은 복제하지 않는다 — 결과는 같은 config.sh 의 consensus_pass_current impl 로 확인한다. 검증자 CLI 는 이 단계에서만 codex 로 고정한다.
+VALIDATOR_CONTRACT_CFG="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SRC_CONFIG" | cut -d= -f2 | cut -d' ' -f1)"
+[ -n "$VALIDATOR_CONTRACT_CFG" ] || { echo "[FAIL] config.sh 의 VALIDATOR_CONTRACT_VERSION 을 읽지 못함" >&2; exit 1; }
+FAKE_PASS_CODEX="$SCRATCH/bin/fake-codex-pass"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
+  '[ -n "$out" ] || exit 9' \
+  'printf '\''{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n'\'' "$FAKE_PASS_CONTRACT" > "$out"' \
+  > "$FAKE_PASS_CODEX"
+chmod +x "$FAKE_PASS_CODEX"
+fake_impl_consensus_pass() { # target-root → 0 성공 / 1 실패(메시지 stderr)
+  local root="$1" cfg="$1/.claude/skills/feature/config.sh"
+  # sed 의 백업 파일이 곧 원본 보관본이다 — 합의 루프 뒤 그대로 되돌린다(워커 호출은 실제 CLI 래퍼로)
+  sed -i.fixture-keep "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|; s|^VALIDATOR_CLI=.*|VALIDATOR_CLI=\"codex\"|" "$cfg"
+  if ! (cd "$root" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT_CFG" FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh impl) > "$root/consensus-setup.log" 2>&1; then
+    mv "$cfg.fixture-keep" "$cfg"; echo "impl 합의 PASS 체크포인트 생성 실패 — $root/consensus-setup.log" >&2; return 1
+  fi
+  mv "$cfg.fixture-keep" "$cfg"
+  (cd "$root" && source .claude/skills/feature/config.sh && consensus_pass_current impl) \
+    || { echo "impl 합의 PASS 가 현재 입력 지문에 유효하지 않음(production consensus_pass_current) — $root/.agent-work/consensus-impl.json" >&2; return 1; }
+  # 가짜 검증자 호출의 telemetry 는 워커 회귀의 usage 가 아니다 — 워커 호출 전에 비운다(usage.jsonl 은 워커 행만 모은다)
+  : > "$root/.agent-work/usage.jsonl"
+}
+
 # ---------- production 워커 stage 전제 + run_worker 1회 (temp 저장소 안에서, subshell) ----------
 # feature-run.sh 의 worker stage 가 워커를 부르기 직전까지 하는 일(scope lock → units lock → 기준선 tree → units/<id>/unit.json·scope.json·
 # before.tree → implementation-context.json) 을 같은 config.sh 헬퍼로 만든 뒤 run_worker 를 부른다. 그 뒤(targeted test·done.json·review)는 없다.
@@ -166,6 +196,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
   unit_id="$(jq -r '.units[0].id' "$target/.agent-work/implementation-units.json")"
   targeted_test="$(jq -r '.units[0].targeted_test' "$target/.agent-work/implementation-units.json")"
   unit_dir="$target/.agent-work/units/$unit_id"
+  if ! fake_impl_consensus_pass "$target" 2>"$target.setup.err"; then mark_fail "픽스처 전제 오류: $(cat "$target.setup.err")"; continue; fi
 
   echo "=== $name (기대 $expected_status, unit $unit_id) ==="
   t0="$(date +%s)"
@@ -216,7 +247,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
     [ -n "$f" ] || continue
     if [ -f "$target/$f" ] && grep -Eq -- "$pat" "$target/$f"; then failures+=("$f 에 /$pat/ 존재 (금지): $(grep -En -- "$pat" "$target/$f" | head -2 | paste -sd';' -)"); fi
   done < <(jq -r '.must_not_contain // {} | to_entries[] | .key as $f | .value[] | $f, .' "$expected")
-  # 6) DONE 사례: unit 의 targeted_test(컴파일 + 행동 테스트). 통과해도 code-spec 위반이면 아래 assert 가 FAIL — 컴파일 성공은 판정이 아니다.
+  # 6) DONE 사례: unit 의 targeted_test(컴파일 + 행동 테스트). 통과해도 material 계약 위반이면 아래 assert 가 FAIL — 컴파일 성공은 판정이 아니다.
   if [ "$expected_status" = DONE ] && [ "$(jq -r '.run_targeted_test // true' "$expected")" = true ] && [ "$actual_status" = DONE ]; then
     set +e; (cd "$target" && bash -c "$targeted_test") > "$target/targeted-test.log" 2>&1; trc=$?; set -e
     [ "$trc" -eq 0 ] || failures+=("targeted test 실패 (exit $trc): $targeted_test — $target/targeted-test.log")
@@ -247,8 +278,11 @@ fi
 # ---------- usage (production usage.jsonl 재사용 — 새 telemetry 없음) ----------
 echo; echo "usage ($SCRATCH/usage.jsonl — 각 temp 저장소의 .agent-work/usage.jsonl 을 모은 것):"
 if [ -s "$SCRATCH/usage.jsonl" ]; then
-  jq -r '"  \(.regression_case): \(.cli) \(.model) exit=\(.exit_code) tokens_total=\(.tokens_total // "n/a") input_effective=\(.input_effective // "n/a") output=\(.output // "n/a") cost_usd=\(.cost_usd // "n/a") duration_ms=\(.duration_ms // "n/a")"' "$SCRATCH/usage.jsonl"
-  jq -s -r '"  합계: invocations=\(length) tokens_total(codex)=\(map(select(.cli=="codex") | .tokens_total // 0) | add) input_effective(claude)=\(map(.input_effective // 0) | add) output(claude)=\(map(.output // 0) | add) cost_usd(보고된 행만)=\(map(.cost_usd // 0) | add) cost_unknown_invocations=\(map(select(.cost_usd == null)) | length)"' "$SCRATCH/usage.jsonl"
+  # 행 단위: usage schema v3 필드 그대로 (cost_usd = provider 보고값, codex 는 null / estimated_cost_usd = 가격표 추정, claude 는 null)
+  jq -r '"  \(.regression_case): \(.cli) \(.model) exit=\(.exit_code) tokens_total=\(.tokens_total // "n/a") input_effective=\(.input_effective // "n/a") output=\(.output // "n/a") reported_cost_usd=\(.cost_usd // "n/a") estimated_cost_usd=\(.estimated_cost_usd // "n/a") duration_ms=\(.duration_ms // "n/a")"' "$SCRATCH/usage.jsonl"
+  # 합계: config.sh 의 usage_summary 재사용 — 비용 집계 공식을 여기서 복제하지 않는다. 마지막 사례의 config.sh(TEST_CMD/LINT_CMD 만 true) 를 source 한다.
+  summary_json="$(cd "$target" && source .claude/skills/feature/config.sh && usage_summary "$SCRATCH/usage.jsonl")"
+  printf '%s' "$summary_json" | jq -r '"  합계: invocations=\(.invocations) tokens_total=\(.input_uncached + .cache_read + .cache_write + .output) input_effective=\(.input_uncached + .cache_read + .cache_write) output=\(.output) reasoning_output=\(.reasoning_output) reported_cost_usd=\(.reported_cost_usd) estimated_cost_usd=\(.estimated_cost_usd) combined_cost_usd_estimate=\(.combined_cost_usd_estimate) cost_unknown_invocations=\(.cost_unknown_invocations)"'
 else
   echo "  (usage 행 없음 — 워커 CLI 가 telemetry 를 남기지 않았거나 호출 전에 실패)"
 fi

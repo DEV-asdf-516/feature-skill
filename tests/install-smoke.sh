@@ -914,5 +914,35 @@ usage_summary_json="$(usage_run usage_summary)"
   || fail "usage summary: by_role(REVIEWER) 불일치: $usage_summary_json"
 echo "[OK] 13. usage telemetry recorder (A~G: 필드 명확화·optional null·핵심 필드 없음 WARN·session 무누적·label 재시도·codex --json 이벤트 합산·가격표 추정·unknown 모델·effective 회귀) + usage_summary reported/estimated/combined·by_label/by_session/cache_read_per_turn"
 
+# ---------- 14. 프롬프트 철학 가드 (LLM 호출 없음) ----------
+# 합의 문서는 production diff 를 사전에 고정하지 않고 material implementation contract 를 고정한다.
+# 옛 철학("과잉 명세 > 과소 명세", "두 워커가 구조적으로 다르면 불완전", "워커는 타이피스트", helper/local/iteration 미정 → DOC_GAP)이
+# 프롬프트·문서에 되살아나면 실패한다. exact 문장 grep 이 아니라 그 의미를 담는 핵심 어구 몇 개만 본다.
+PROMPTS="$TARGET_SKILL/prompts"
+forbid() { # file phrase
+  grep -Fq -- "$2" "$1" && fail "프롬프트 철학 회귀: $(basename "$1") 에 '$2' 가 남아 있음"; return 0
+}
+require() { # file phrase
+  grep -Fq -- "$2" "$1" || fail "프롬프트 철학 누락: $(basename "$1") 에 '$2' 가 없음"; return 0
+}
+for f in "$PROMPTS/designer-revise-impl.md" "$SOURCE_ROOT/.claude/skills/feature/SKILL.md" "$SOURCE_ROOT/README.md" "$SOURCE_ROOT/tests/solution-shape-cases.md"; do
+  forbid "$f" "과잉 명세를 택한다"; forbid "$f" "과잉 명세 > 과소 명세"; forbid "$f" "구조적으로 다른 코드를 쓸 수 있다면"; forbid "$f" "타이피스트"
+done
+require "$PROMPTS/designer-revise-impl.md" "material decision"; require "$PROMPTS/designer-revise-impl.md" "local implementation expression"
+forbid "$PROMPTS/designer-revise-impl.md" "코드 blueprint 수준"; forbid "$PROMPTS/designer-revise-impl.md" "helper 여부와 signature"
+for f in "$PROMPTS/validator-review-impl.md" "$PROMPTS/validator-overlays/guided.md"; do
+  forbid "$f" "두 워커가 문서를 지키면서"; forbid "$f" "non-trivial diff"; forbid "$f" "문서는 코드 사양서다"
+done
+require "$PROMPTS/validator-review-impl.md" "무엇이 달라지는가"; require "$PROMPTS/validator-review-impl.md" "local implementation expression"
+for f in "$PROMPTS"/worker-*.md; do
+  forbid "$f" "타이피스트"; forbid "$f" "helper placement 를 선택해야 함"; forbid "$f" "collection·aggregation 위치를 선택해야 함"; forbid "$f" "변수 이름·pseudocode 를 그대로"
+  require "$f" "material"
+done
+require "$PROMPTS/worker-unit.md" "local implementation expression(당신이 정한다)"; require "$PROMPTS/worker-implement.md" "local implementation expression(당신이 정한다)"
+forbid "$PROMPTS/reviewer.md" "문서가 지정하지 않은 private helper 추출이나 지정된 helper 의 inline"; forbid "$PROMPTS/reviewer.md" "다른 이름·구조를 쓴 것"
+require "$PROMPTS/reviewer.md" "local implementation expression"; require "$PROMPTS/reviewer.md" "standalone abstraction"
+forbid "$PROMPTS/fixer.md" "지정된 helper 를 inline 하지 않고"; require "$PROMPTS/fixer.md" "material contract"
+echo "[OK] 14. 프롬프트 철학 가드 — material decision / local implementation expression 경계 (과잉 명세·두 워커 diff·타이피스트·helper/local DOC_GAP 의미 부재)"
+
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

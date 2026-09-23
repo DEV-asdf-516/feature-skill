@@ -6,7 +6,7 @@
 # run_worker 는 원래 feature-run.sh 안의 인라인 함수였고 본문은 그대로다. 파일만 분리한 이유는 하나 —
 # tests/worker-regression.sh 가 검증자·리뷰어·수정자 없이 **production 워커 호출 경로 그대로**(프롬프트 조립·WORKER_RULES·
 # REFERENCE CODE·implementation-context·스키마·WORKER_MODEL/EFFORT·CLI 라우팅·usage 기록·사후 게이트)를 1회 호출해
-# 실제 WORKER_MODEL 의 code-spec 충실도를 재기 위해서다. 테스트용 별도 워커 구현·프롬프트·CLI 인자 복제는 없다.
+# 실제 WORKER_MODEL 의 material-contract 충실도를 재기 위해서다. 테스트용 별도 워커 구현·프롬프트·CLI 인자 복제는 없다.
 #
 # 호출자 계약(feature-run.sh 와 worker-regression.sh 가 동일하게 제공):
 #   config.sh 가 먼저 source 되어 있고, 현재 디렉터리가 저장소 루트(WORK_DIR 상대 경로)다.

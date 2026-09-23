@@ -42,7 +42,8 @@ FIXER_CLI=""
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
 # 13: implementation.md+approach.md 를 코드 사양서로 판정 — CODE_SPEC_GAP(문서가 두 가지 이상의 non-trivial 코드 구조를 허용) 추가, DELEGATED 는 formatter/import/compiler 세부와 저장소 단일 표현뿐.
-VALIDATOR_CONTRACT_VERSION=14
+# 15: 검증 대상을 production diff 동일성 → material decision 으로 되돌림. CODE_SPEC_GAP 은 material 구현 계약 하나가 열린 경우만(일곱 입장 조건 + "무엇이 달라지는가" gate), helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection 은 워커 소유 local expression. REUSE_DISCOVERY_GAP 은 새 responsibility boundary 에만(feature-local DTO/entity/private helper 제외). "두 워커 다른 diff" 기준 폐기.
+VALIDATOR_CONTRACT_VERSION=15
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -50,7 +51,8 @@ VALIDATOR_CONTRACT_VERSION=14
 # 10: 프로젝트 컨벤션(conventions.md) 명시 규칙 위반을 CONTRACT_VIOLATION 으로 검사 — 리뷰어·수정자 프롬프트에 CONVENTIONS_FILE 경로 전달.
 # 11: code-spec 수준 REQUIRED(호출 순서·helper 분해·naming·local 구조·reference pattern) 이탈을 동작이 같아도 CONTRACT_VIOLATION 으로 검사. 제외는 formatter/import/compiler 세부뿐.
 # 14: DOC_GAP issue 에 user_question(비어 있지 않음)·options(≥2) 필수, FIX_CODE 는 둘 다 빈 값 — 리뷰어 DOC_GAP 은 impl 재합의가 아니라 사용자 결정으로 간다(doc-gap-resume.json).
-REVIEWER_CONTRACT_VERSION=14
+# 15: CONTRACT_VIOLATION/UNDECIDED_APPROACH 를 material 계약(책임 배치·재사용·호출 횟수·상태 순서·transaction/lock/retry/cache·public 계약·명시 convention)으로 한정. helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection/반환 직전 alias 는 문서가 적어 두었어도 issue 아님. REDUNDANT_CODE 에 문서가 요구하지 않은 standalone abstraction(outcome/context/kind 등) 추가. 수정자는 material contract 만 복구.
+REVIEWER_CONTRACT_VERSION=15
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
