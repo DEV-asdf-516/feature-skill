@@ -10,17 +10,19 @@
 # --- 역할별 모델 + reasoning effort ---
 # 모델별 지원 effort가 다르므로 역할마다 함께 설정한다. 실제 허용 여부는 각 CLI가 검증한다.
 # 어느 CLI 로 돌릴지는 모델 ID 로 정한다(claude* → claude, gpt-*/o*/codex* → codex). 아래 "역할 → CLI 라우팅" 참고.
-DESIGNER_MODEL="claude-fable-5-1"   # 오케스트레이터 겸 문서 소유자
+# DESIGN_REVISION_MODEL: 검증자가 BLOCK 한 합의 문서(design/implementation/approach)를 수정하는 하위 실행(consensus-loop 의 DESIGNER 역할) 전용.
+#   초안 작성은 interactive 오케스트레이터 세션이 직접 하며 그 모델은 이 설정으로 제어되지 않는다.
+DESIGN_REVISION_MODEL="claude-fable-5-1"
 DESIGNER_EFFORT="low"
-VALIDATOR_MODEL="gpt-6-sol"     # 명세 검증자
-VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
+VALIDATOR_MODEL="gpt-6-astra"     # 명세 검증자
+VALIDATOR_EFFORT="low" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 VALIDATOR_PROFILE=""      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 빈 값 = 모델별 기본값(validator_profile 헬퍼). compact | guided | conservative | none
-WORKER_MODEL="gpt-6-luna"       # 구현 담당
-WORKER_EFFORT="max"
-REVIEWER_MODEL="gpt-6-astra"  # 구현 리뷰 담당
-REVIEWER_EFFORT="low"
-FIXER_MODEL="claude-sonnet-5"     # 리뷰 이슈 수정 담당
-FIXER_EFFORT="low"
+WORKER_MODEL="claude-opus-5-5"       # 구현 담당
+WORKER_EFFORT="medium"
+REVIEWER_MODEL="gpt-5.6-sol"  # 구현 리뷰 담당
+REVIEWER_EFFORT="high"
+FIXER_MODEL="claude-sonnet-5-5"     # 리뷰 이슈 수정 담당
+FIXER_EFFORT="high"
 
 # --- CLI 실행 형식 ---
 # Claude Code 비대화형 실행. 필요 시 --permission-mode 조정.
@@ -243,7 +245,7 @@ cli_for_model() { # model → claude|codex (이름으로 정할 수 없으면 1)
     *)                       return 1 ;;
   esac
 }
-role_model()  { local v="${1}_MODEL";  printf '%s' "${!v}"; }
+role_model()  { local v="${1}_MODEL"; [ "$1" = DESIGNER ] && v=DESIGN_REVISION_MODEL; printf '%s' "${!v}"; } # DESIGNER 역할은 DESIGN_REVISION_MODEL 을 읽는다
 role_effort() { local v="${1}_EFFORT"; printf '%s' "${!v}"; }
 role_cli() { # ROLE(DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) → claude|codex
   local role="$1" override_var="${1}_CLI" override model
@@ -1220,11 +1222,11 @@ usage_summary() {
 # =============================================================
 # 가드: 설정이 틀리면 이 파일을 source 하는 스크립트를 즉시 중단
 # =============================================================
-case "$DESIGNER_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$TEST_CMD$LINT_CMD" in
+case "$DESIGN_REVISION_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$TEST_CMD$LINT_CMD" in
   *CHANGE_ME*) echo "[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요." >&2; exit 1;;
 esac
 for required_value in \
-  "$DESIGNER_MODEL" "$DESIGNER_EFFORT" \
+  "$DESIGN_REVISION_MODEL" "$DESIGNER_EFFORT" \
   "$VALIDATOR_MODEL" "$VALIDATOR_EFFORT" \
   "$WORKER_MODEL" "$WORKER_EFFORT" \
   "$REVIEWER_MODEL" "$REVIEWER_EFFORT" \
