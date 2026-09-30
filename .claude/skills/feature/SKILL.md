@@ -11,7 +11,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 ## 사전 조건
 
-1. `config.sh`의 역할별 `*_MODEL`·`*_EFFORT`·`TEST_CMD`·`LINT_CMD`가 실제 환경과 일치. 빈 값이나 `CHANGE_ME`가 남으면 가드가 실행 거부.
+1. `config.sh`의 역할별 `*_MODEL`·`*_EFFORT`·`TEST_CMD`·`LINT_CMD`가 실제 환경과 일치. 빈 값이나 `CHANGE_ME`가 남으면 가드가 실행 거부. 이 interactive 오케스트레이터 세션(초안 design/implementation/approach 작성)의 모델은 `config.sh` 로 제어되지 않는다 — `DESIGN_REVISION_MODEL` 은 검증자가 BLOCK 한 합의 문서를 고치는 하위 실행(child DESIGNER)에만 쓰인다.
 2. `claude`, `codex`, `jq`, `uuidgen`, `envsubst` 설치·로그인.
 3. 저장소 루트에서 실행. `.agent-work/`는 `.gitignore`에 등록돼 있다.
 

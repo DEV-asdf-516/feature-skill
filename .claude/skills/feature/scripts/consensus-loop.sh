@@ -306,7 +306,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   if [ "$designer_rc" -ne 0 ]; then
     if [ "$(consensus_editable_fingerprint "$TARGET")" = "$designer_docs_before" ]; then
       # 문서·decisions 변경 없음 → 기존 실패. 같은 디자이너 재실행은 안전하다(체크포인트 DESIGNER_PENDING 그대로).
-      echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGNER_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1
+      echo "[FAIL] 디자이너 실행 실패 (모델 '$DESIGN_REVISION_MODEL' 확인). 재실행 시 $TARGET round $round / DESIGNER_PENDING 부터 재개"; exit 1
     fi
     # 문서 또는 decisions 변경 있음 → '디자이너 성공' 으로 간주하는 것이 아니다. 편집 결과는 있지만 CLI 완료 신호가 불확실하므로
     # 같은 편집을 반복하지 않고 독립 검증자에게 넘겨 판정시킨다(부분 수정이면 BLOCK 으로 기존 루프에 돌아오고, 충분하면 PASS).

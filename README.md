@@ -12,7 +12,8 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 
 | 역할 | 모델·effort 설정 | CLI (기본 설정) | 하는 일 |
 |---|---|---|---|
-| **오케스트레이터·디자이너** | `DESIGNER_MODEL` / `DESIGNER_EFFORT` | claude (대화 세션 + 비대화형 문서 수정) | 요구 해석, 설계 문서·구현 문서 작성/수정, 최종 테스트 |
+| **오케스트레이터** | (설정 없음 — interactive Claude Code 세션의 모델) | claude 대화 세션 | 요구 해석, 설계 문서·구현 문서 초안 작성, 최종 테스트 |
+| **디자이너(설계 수정)** | `DESIGN_REVISION_MODEL` / `DESIGNER_EFFORT` | claude 비대화형 문서 수정 (`run_edit_role DESIGNER`) | 검증자가 BLOCK 한 합의 문서(design/implementation/approach)만 수정. 초안은 쓰지 않는다 |
 | **검증자** | `VALIDATOR_MODEL` / `VALIDATOR_EFFORT` | 읽기 전용 (codex `--sandbox read-only` / claude `--tools Read,Grep,Glob`) | 설계·구현 문서에 "지금 구현을 시작하면 안 되는 최소 사유"가 있는지만 판정. 설계 개선자가 아니라 게이트 |
 | **워커** | `WORKER_MODEL` / `WORKER_EFFORT` | 편집 (codex `--sandbox workspace-write` / claude `acceptEdits`) | 합의된 구현 문서대로 구현. 문서에 없는 동작 분기는 만들지 않고 `DOC_GAP`/`USER_DECISION`으로 되돌린다 |
 | **리뷰어** | `REVIEWER_MODEL` / `REVIEWER_EFFORT` | 읽기 전용 (claude / codex 어느 쪽이든) | 구현 병합 게이트. "지금 verify 로 가면 안 되는 최소 사유"가 있는지만 판정(APPROVE/REQUEST_CHANGES). 코드 개선자가 아니다 |
@@ -194,7 +195,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    커스터마이즈가 없으면 `.new` 로 덮어쓰면 된다.
 2. `.claude/skills/feature/config.sh` 의 `CHANGE_ME` 를 채운다.
    ```bash
-   DESIGNER_MODEL="<디자이너 모델>"
+   DESIGN_REVISION_MODEL="<설계 수정 모델>"   # 검증자 BLOCK 뒤 합의 문서를 고치는 하위 실행(DESIGNER 역할). 오케스트레이터 세션의 모델은 여기서 제어하지 않는다
    DESIGNER_EFFORT="<지원 effort>"
    VALIDATOR_MODEL="<검증자 모델>"
    VALIDATOR_EFFORT="<지원 effort>"       # 게이트 모드 기본 medium — 검증자는 구현을 막을 최소 사유만 판정
@@ -216,7 +217,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 
 ## 사용
 
-`DESIGNER_MODEL`·`DESIGNER_EFFORT`와 맞춘 Claude Code 세션에서 "feature" 또는 "피처"를 명시하며 기능 구현을 요청하면
+Claude Code 세션(오케스트레이터 — 이 세션의 모델은 `config.sh` 로 제어되지 않는다)에서 "feature" 또는 "피처"를 명시하며 기능 구현을 요청하면
 스킬이 발동한다. 사소한 수정·단일 파일 변경에는 쓰지 않는다.
 
 ```
