@@ -45,7 +45,9 @@ FIXER_CLI=""
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
 # 13: implementation.md+approach.md 를 코드 사양서로 판정 — CODE_SPEC_GAP(문서가 두 가지 이상의 non-trivial 코드 구조를 허용) 추가, DELEGATED 는 formatter/import/compiler 세부와 저장소 단일 표현뿐.
 # 15: 검증 대상을 production diff 동일성 → material decision 으로 되돌림. CODE_SPEC_GAP 은 material 구현 계약 하나가 열린 경우만(일곱 입장 조건 + "무엇이 달라지는가" gate), helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection 은 워커 소유 local expression. REUSE_DISCOVERY_GAP 은 새 responsibility boundary 에만(feature-local DTO/entity/private helper 제외). "두 워커 다른 diff" 기준 폐기.
-VALIDATOR_CONTRACT_VERSION=15
+# 16: 판정 격리 — 검증자는 호출마다 fresh 세션, 종결 검토 입력은 직전 blocker 의 구조화된 주장·증거(prev-blockers-*.json — why_blocks_now 제외)와 decisions.md 를 뺀 문서 diff 뿐. [round N] ACCEPT/REJECT 이력은 판정 입력이 아니며 "REJECT 된 이슈 재제기 금지" 는 폐기(검증자가 독립 재판정, 불일치는 DEADLOCK 으로 사용자에게).
+# 17: 검증자 입력에서 decisions.md 원본을 뺐다 — 러너가 추린 확정 사용자 결정 파일(reviews/user-decisions-<target>.md, [USER-QUESTION][scope=…] 줄만)을 준다. v16 실모델에서 검증자가 decisions.md 의 REJECT 사유를 읽고 추론에 쓴 것이 관측됨.
+VALIDATOR_CONTRACT_VERSION=17
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -208,7 +210,8 @@ snapshot_worktree_tree() {
 }
 
 # 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
-# 세션 이름은 역할이 아니라 stage/attempt 단위다(designer-design, validator-impl, reviewer-a01, fixer-a01, worker-unit-<id>).
+# 세션 이름은 역할이 아니라 stage/attempt 단위다(designer-design, reviewer-a01, fixer-a01, worker-unit-<id>).
+# 예외: 합의 루프의 검증자는 호출마다 고유한 이름(validator-<target>-round-NN-<invocation id>)을 받아 항상 fresh 다 — 수정 뒤 재검증이 이전 판정 대화에 anchoring 되지 않게 한다.
 # 같은 stage/attempt 안의 라운드·재시도만 이어가고(저장소 재탐색 없이 프롬프트 캐시 활용), 다른 stage/attempt 로는
 # 대화 문맥을 넘기지 않는다 — 상태 전달은 문서·JSON·체크포인트·지문으로만 한다. 넓은 세션은 turn 마다 누적 문맥을
 # 통째로 cache read 하므로 비용이 stage 수에 비례해 커진다.
@@ -276,7 +279,7 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
 # 읽기 전용·스키마 강제 JSON 역할(검증자·리뷰어).
 #   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.events.jsonl(--json stdout) + $out.stderr.log.
 #   conventions: 프롬프트에 이미 들어 있으면 "" 를 넘긴다. claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록으로 붙인다.
-#   claude 는 세션(session_name)을 라운드 간 이어간다(codex exec 는 무상태). 두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
+#   claude 는 같은 session_name 이면 세션을 이어간다(codex exec 는 무상태). 호출자가 호출마다 다른 이름을 주면 fresh 다(합의 루프의 검증자). 두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
   local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1

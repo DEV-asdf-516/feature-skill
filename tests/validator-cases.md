@@ -6,7 +6,7 @@
 python3 tests/validator-fixture-smoke.py              # 유료 호출 없는 fixture/비교 검사
 # 사용자 지시 후에만 1회용 승인 파일 생성:
 touch .claude/ALLOW_REAL_LLM_REGRESSION
-bash tests/validator-regression.sh                   # 25개, 최대 실제 검증자 25회
+bash tests/validator-regression.sh                   # 29개, 최대 실제 검증자 29회
 bash tests/validator-regression.sh case-08b-round2-new-issue # 08a 먼저 + 08b, 최대 2회
 bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 ```
@@ -42,6 +42,10 @@ bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 | 20 equivalent-overload-unspecified-pass | `MaskingUtil.maskPhone` 에 1-인자·2-인자 overload 가 있고 결정 2 는 어느 것인지 적지 않음 | impl PASS |
 | 21 per-item-vs-batch-delegated | `OrderService.statuses(ids)`(한 페이지 최대 500 건, repository 는 DB) 의 조회 방식이 DELEGATED. repository 에 `findById`·`findAllByIds` 모두 있음 — DB 호출 1 vs n 의 I/O topology | impl BLOCK / REVISE_DOC / REQUIREMENT_MISSING 또는 CODE_SPEC_GAP / DIRECT_MISMATCH |
 | 22 retry-semantics-delegated | `NotificationService.send` 의 gateway 실패 처리(재시도 여부·횟수, 건당 과금)가 DELEGATED | impl BLOCK / REVISE_DOC / REQUIREMENT_MISSING 또는 CODE_SPEC_GAP / DIRECT_MISMATCH |
+| 23a rejected-blocker-round1 | 23b 의 Round 1 대조군. 06 과 같은 input/src — 정규화 뒤 무조건 저장이 8자리/미저장+400 계약 위반 | impl Round 1 BLOCK / REVISE_DOC 1건 |
+| 23b rejected-blocker-round2 | 직전 리뷰에 그 blocker(B-01)가 있고 디자이너는 "DB 제약으로 커버" 라며 **REJECT**, 문서는 그대로. fresh 종결 검증자는 REJECT 사실·사유를 입력으로 받지 않는다 | impl Round 2 **BLOCK** / REVISE_DOC 1건 / origin UNRESOLVED_PREVIOUS — PASS 하면(REJECT 로 blocker 가 소멸하면) 회귀 |
+| 24a reachable-failure-round1 | 24b 의 Round 1 대조군. 05b 와 같은 input/src — 키 포함 URL 을 공용 get 이 기록 | design Round 1 BLOCK / REVISE_DOC / SECURITY / REACHABLE_FAILURE |
+| 24b reachable-failure-resolved-round2 | 직전 리뷰의 REACHABLE_FAILURE(B-01, reachable_scenario·impact 포함)를 design 수정(요청 기록에서 쿼리 문자열 제외)이 실제로 해결. src 는 아직 옛 동작 | design Round 2 **PASS** — 이전 주장(scenario/impact)만으로 UNRESOLVED_PREVIOUS 를 내면 회귀 |
 
 SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURITY_RISK`다.
 
@@ -54,6 +58,15 @@ SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURIT
 08b에서는 08a의 실제 리뷰를 이어 붙이지 않는다. 고정 `prev-review.json`에는 A만 넣는다. 가짜 디자이너는 `revised-input/`을 적용해 A만 고친다. B는 변경 전부터 있었지만 직전 리뷰에는 없었으므로, Round 2에서 처음 등록하면 suppression 실패다.
 
 **직전 리뷰에 A+B가 모두 있었다면 미해결 B를 `UNRESOLVED_PREVIOUS`로 내는 것이 올바르다.** 그 상황에서 PASS를 요구하면 기존 Round 2 계약을 깨뜨린다. 따라서 별도의 Round 1 대조와 A만 포함한 종결 검사로 나눈다. 이전 미해결 이슈 유지나 수정으로 새로 생긴 회귀를 검사하는 사례는 이번 suppression 사례와 별개다.
+
+## 23·24: 판정 격리(v16)의 두 방향
+
+v16 부터 종결 검증자는 fresh 세션이고 입력은 `prev-blockers-*.json`(직전 blocker 의 구조화된 주장·증거 — refs·reachable_scenario·impact·최소 불변식, `why_blocks_now` 제외)과 `decisions.md` 를 뺀 문서 diff 뿐이다. 두 쌍은 그 양방향을 본다. 기대값은 결과(verdict·개수·action·origin)만 고정하고 문장은 고정하지 않는다.
+
+- **23b — REJECT 는 veto 가 아니다.** 가짜 디자이너가 `decisions-round1.md` 의 REJECT 줄만 남기고 문서는 바꾸지 않는다(`revised-input/` = `input/`). v17 부터 검증자 입력은 `decisions.md` 원본이 아니라 `[USER-QUESTION]` 줄만 추린 `reviews/user-decisions-<target>.md` 라서 REJECT 줄은 전달되지 않는다(v16 실모델에서는 검증자가 원본의 REJECT 사유를 읽고 `why_blocks_now` 에서 반박 대상으로 언급했다 — 결과는 BLOCK 으로 맞았지만 격리가 프롬프트 규칙에만 있었다). 같은 blocker 가 다시 성립해야 하며, 러너는 DEADLOCK 또는 MAX_ROUNDS 로 사용자에게 올린다(둘 다 exit 2). manual-check 로 이슈 본문이 REJECT 사유를 근거·반박 대상으로 삼지 않았는지 본다.
+- **24b — evidence seed 는 anchoring 이 아니다.** 직전 주장의 실행 경로·영향은 재확인의 출발점이다. design 이 그 경로를 끊도록 바뀌었으면(코드는 아직 구현 전) 제외해야 한다.
+
+a 쪽은 08a 와 같은 역할의 Round 1 대조군이다(실패하면 b 의 유료 호출 생략). 23 쌍은 "같은 blocker 가 다시 성립하는가" 를 보는 사례라 category 는 06 보다 넓게 허용한다(REQUIREMENT_MISSING 포함 — v16 실모델에서 관측). category 분류 감도는 06 이 본다.
 
 ## 채점
 
@@ -110,4 +123,6 @@ VALIDATOR_CONTRACT_VERSION 13 실모델 회귀에서 8개 사례가 깨졌다. �
 
 프롬프트 변경(v14) 요약: ① 관할에 "문서가 소유한 구현 포인트" 정의와 발명 금지 ② CODE_SPEC_GAP 여섯 입장 조건(확정 구현 대상 / solution 소유 / trivia 아님 / production diff 구조·명명·API 를 유의미하게 바꿈 / convention·reference·precedent 가 정하지 않음 / 워커가 임의 선택해야 함) ③ "두 워커 다른 diff" 는 ④ 의 보조 판정 ④ 선형 흐름 = helper 없음, signature 의 modifier 는 세부 ⑤ 테스트 코드의 경계 ⑥ category 우선순위·중복 금지(REQUIREMENT_MISSING → 접근법 누락 → REUSE_DISCOVERY_GAP → CODE_SPEC_GAP, 하위가 성립하면 상위 추가 금지). guided 오버레이 4단계 동기화. case-13(BLOCK)·case-14(PASS) 의 기대는 그대로다.
 
-v14 실모델 회귀는 실행되지 않은 채 v15 로 넘어갔다. 사용자 승인 뒤 `touch .claude/ALLOW_REAL_LLM_REGRESSION && bash tests/validator-regression.sh` 로 25개를 돌린다.
+v14 실모델 회귀는 실행되지 않은 채 v15 로 넘어갔다. 사용자 승인 뒤 `touch .claude/ALLOW_REAL_LLM_REGRESSION && bash tests/validator-regression.sh` 로 29개를 돌린다.
+
+v16(판정 격리: fresh 검증자, prev-blockers 요약, decisions.md 를 뺀 diff, REJECT 재제기 금지 폐기)은 Round 2 사례(08a/b·23a/b·24a/b)만 실모델로 통과를 확인했다(2026-10-06). v17(검증자 입력에서 decisions.md 원본 제거)도 같은 여섯 사례를 실모델로 통과했고(2026-10-06, Gate 6/6·Classification 6/6), 23b 의 Round 2 결과 JSON·이벤트 로그에 디자이너 REJECT 사유가 나타나지 않음을 확인했다. Round 1 위주의 나머지 23개는 v16·v17 모두 미실행이다.

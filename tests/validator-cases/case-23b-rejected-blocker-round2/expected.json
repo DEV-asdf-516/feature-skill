@@ -1,0 +1,22 @@
+{
+  "stage": "impl",
+  "round": 2,
+  "requires_case": "case-23a-rejected-blocker-round1",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category_any_of": [
+        "CHANGE_INTRODUCES_DATA_RISK",
+        "REQUIREMENT_CONTRADICTION",
+        "REQUIREMENT_MISSING"
+      ],
+      "evidence_type_any_of": [
+        "DIRECT_MISMATCH",
+        "REACHABLE_FAILURE"
+      ],
+      "origin": "UNRESOLVED_PREVIOUS"
+    }
+  ],
+  "note": "디자이너가 B-01 을 REJECT 하고 문서를 바꾸지 않았다. fresh 종결 검증자는 REJECT 사실·사유를 입력으로 받지 않고 prev-blockers 와 현재 문서·코드로 같은 blocker 를 다시 성립시켜야 한다. PASS 하면(REJECT 를 근거로 소멸시키면) 실패다."
+}

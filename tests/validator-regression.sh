@@ -5,10 +5,10 @@
 #   bash tests/validator-regression.sh                 # 전 사례
 #   bash tests/validator-regression.sh case-02-...     # 사례 하나만
 #   bash tests/validator-regression.sh compare <validator-round-json> <expected.json>   # 결과 파일만 대조
-# 비용: 사례당 실제 검증자 호출 1회. 08b 선택 시 대조군 08a도 먼저 실행하므로 2회.
+# 비용: 사례당 실제 검증자 호출 1회. Round 2 사례(08b·23b·24b) 선택 시 대조군(requires_case)도 먼저 실행하므로 2회.
 # 대조 기준: verdict 일치 + blocking_issues 개수 일치 + expected.issues 각각을 만족하는 이슈 존재.
 #   expected 이슈 필드는 정확 일치(action, origin …) 또는 `<field>_any_of` 배열로 허용 집합을 준다.
-# case-08b: 한 consensus-loop 프로세스 안에서 Round 1(가짜 codex 가 prev-review.json 을 그대로 출력)
+# Round 2 사례(08b·23b·24b): 한 consensus-loop 프로세스 안에서 Round 1(가짜 codex 가 prev-review.json 을 그대로 출력)
 #   → 가짜 디자이너(revised-input/ 문서 적용 + decisions 기록) → Round 2(실제 검증자) 로 진행한다.
 # =============================================================
 set -euo pipefail
@@ -89,7 +89,7 @@ if [ -n "${1:-}" ] && [ -f "$CASES_DIR/$1/expected.json" ]; then
   requested_dependency="$(jq -r '.requires_case // empty' "$CASES_DIR/$1/expected.json")"
 fi
 
-# case-08b 용 가짜 실행기: Round 1 검증자 호출만 고정 리뷰로 대체하고, 디자이너는 revised-input/ 를 적용한다
+# Round 2 사례용 가짜 실행기: Round 1 검증자 호출만 고정 리뷰로 대체하고, 디자이너는 revised-input/ 를 적용한다
 write_fakes() { # target case_dir codex_bin
   local target="$1" case_dir="$2" real_codex; real_codex="$(command -v "$3")"
   cat > "$target/fake-codex" <<EOF
@@ -105,7 +105,7 @@ exec "$real_codex" "\$@"
 EOF
   cat > "$target/fake-claude" <<EOF
 #!/usr/bin/env bash
-# 디자이너 대체: 검증자 Round 1 이슈를 ACCEPT 한 것으로 기록하고 revised-input/ 문서를 적용한다
+# 디자이너 대체: revised-input/ 문서를 적용하고 decisions-round1.md 의 판정(ACCEPT 또는 REJECT)을 기록한다
 set -euo pipefail
 cp "$case_dir/revised-input/"*.md "$target/.agent-work/"
 cat "$case_dir/decisions-round1.md" >> "$target/.agent-work/decisions.md"

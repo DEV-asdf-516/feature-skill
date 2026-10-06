@@ -113,6 +113,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어 프롬프트·스키마·루프 검사가 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을 올린다.
 - **수정자는 수정자다**: `FIX_CODE` 이슈의 required_outcome 만 구현하고 새 문제를 찾거나 무관한 리팩터링을 하지 않는다. 잘못된 이슈는 코드 대신 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다. `OUT_OF_SCOPE_CHANGE` 는 수정자에게 가지 않는다. 범위 밖 변경은 자동 원복하지 않고 현재 상태를 보존한 채 러너가 `FOREIGN_WORKTREE_CHANGE` 로 사용자에게 반환한다. 되돌릴지 보존할지는 사용자가 결정한다. 같은 working tree 의 다른 세션 변경일 수 있고 `pre_bash_guard` 가 `git restore`/`checkout --`/`reset --hard` 를 차단한다. 워커·수정자는 git index 조작(add/reset/stash/restore --staged)이 금지된다. codex 훅의 정규식에 더해 러너·루프가 호출 전후 index 지문(`git ls-files --stage`)을 비교해 바뀌었으면 자동 복구 없이 중단한다(결과 기준 차단). 관련 테스트만 필터로 돌리고 전체 스위트는 verify 단계가 한 번 돌린다.
 - **승인 독립성**: 리뷰 세션(`reviewer`)과 수정 세션(`fixer`)은 절대 합치지 않는다.
+- **판정 격리**: 합의 루프는 사실과 계약만 공유하고 판단 과정은 넘기지 않는다. 검증자는 호출마다 fresh 세션이고, 수정 뒤 종결 검증자가 받는 것은 직전 blocker 의 구조화된 주장·증거(`reviews/prev-blockers-*.json` — 증거 위치·reachable_scenario·impact·최소 불변식, 자유 서술 `why_blocks_now` 제외)와 실제 문서 diff(`decisions.md` 제외)뿐이다. 검증자는 `decisions.md` 원본도 받지 않는다 — 러너가 `[USER-QUESTION][scope=…]` 줄만 추린 `reviews/user-decisions-<target>.md` 를 준다. 디자이너의 ACCEPT/REJECT 사유는 검증자에게 전달되지 않으므로, 디자이너가 REJECT 한 이슈를 검증자가 독립적으로 다시 성립한다고 보면 DEADLOCK 으로 사용자에게 간다. 디자이너는 blocker 의 구조화된 필드만 받고(`reviews/designer-input-*.json`) 세션은 stage 단위로 이어간다.
   마지막 APPROVE 이후 코드가 한 줄이라도 바뀌면 재리뷰 없이 파이프라인을 끝내지 않는다.
 - **설계 모호성은 질문으로**: 추측 금지. 사용자 질문/답변은 `decisions.md`에
   `- [USER-QUESTION][scope=design|impl] <질문> → <답>` 형식으로 남아 검증자 이슈 판정(ACCEPT/REJECT)과 구분 추적된다.
@@ -271,7 +272,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 
 `usage.jsonl` 한 행 = CLI invocation 한 번의 관측 telemetry. 세션 누계가 아니며, 같은 Claude 세션을 `--resume`해도 행은 invocation 별로 기록한다.
 writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·가격 추정을 하지 않는다. 집계는 그 위에서 한다(`usage_summary` 또는 아래 jq).
-Claude 세션은 stage/attempt 단위다(`designer-design`/`designer-impl`, `validator-design`/`validator-impl`, `reviewer-a01`, `fixer-a01`, `worker-unit-<id>`).
+Claude 세션은 stage/attempt 단위다(`designer-design`/`designer-impl`, `reviewer-a01`, `fixer-a01`, `worker-unit-<id>`). 합의 루프의 검증자만 호출마다 fresh 세션이다(`validator-<target>-round-NN-<invocation id>`).
 같은 stage/attempt 안의 라운드·재시도만 `--resume` 하고 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
 
 ```json
