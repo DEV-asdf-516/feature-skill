@@ -1,0 +1,1 @@
+R2 이슈의 어느 필드(why_blocks_now·impact 포함, 결과 JSON 을 직접 열어 확인)에도 디자이너의 REJECT 사유(DB 제약)가 근거·반박 대상으로 나타나지 않는지 확인 — 나타나면 검증자가 decisions.md 원본을 읽은 것이다

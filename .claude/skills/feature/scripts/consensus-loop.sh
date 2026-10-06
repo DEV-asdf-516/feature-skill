@@ -89,8 +89,11 @@ snapshot_changed_docs() { # dir → 스냅샷 대비 내용이 바뀐 문서의 
   done
 }
 snapshot_docs_diff() { # dir → stdout (unified diff, 검증자 입력·사람 확인용. 변경 없으면 빈 출력)
+  # decisions.md 는 뺀다 — 직전 라운드 이후 거기 추가되는 것은 디자이너의 [round N] ACCEPT/REJECT 사유뿐이고(사용자 결정이 바뀌면 upstream 지문이 Round 1 로 되돌린다),
+  # 그 사유는 종결 검증자의 판정 입력이 아니다. 변경 파일 계산(snapshot_changed_docs)과 재개 지문은 그대로 decisions.md 를 본다.
   local before after
   consensus_docs | while IFS= read -r doc; do
+    [ "$(basename "$doc")" != decisions.md ] || continue
     before="$1/$(basename "$doc")"; after="$doc"
     [ -f "$before" ] || before=/dev/null; [ -f "$after" ] || after=/dev/null
     if [ "$before" != /dev/null ] || [ "$after" != /dev/null ]; then diff -u "$before" "$after" || true; fi
@@ -186,15 +189,29 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   if [ -n "$prev_review" ]; then
     docs_diff="$WORK_DIR/reviews/docs-diff-$TARGET-round-$tag.diff"
     snapshot_docs_diff "$prev_snapshot" > "$docs_diff" || true
-    prev_context="이번은 Round $round(종결 검토)다. 입력: 직전 blocking issue JSON = $prev_review, 디자이너의 ACCEPT/REJECT 판정 = $WORK_DIR/decisions.md, 직전 라운드 이후 문서 diff = $docs_diff, 현재 문서. 이번 라운드에서 허용되는 blocking 은 세 종류뿐이며 origin 으로 표시한다: UNRESOLVED_PREVIOUS(직전 이슈가 미해결, previous_issue_id 에 같은 id) / REVISION_REGRESSION(직전 수정이 새로 만든 직접 회귀, revision_ref 에 diff 위치) / NEWLY_EXPOSED_BY_REVISION(Round 1 에는 없던 정보가 수정으로 처음 드러남, revision_ref 필수). 직전 라운드 당시 이미 볼 수 있었던 별개의 문제는 제기하지 마라. 해결된 이슈는 제외한다. REJECT 된 이슈는 새로운 근거 위치가 없으면 재제기하지 마라."
+    # 종결 검증자는 fresh 세션이고, 직전 라운드에서 넘어오는 것은 blocker 의 구조화된 주장·증거(identity·증거 위치·실행 경로·영향·요구 불변식)뿐이다.
+    # reasoning 은 끊되 evidence 는 끊지 않는다: 직전 검증자의 자유 서술(why_blocks_now)과 디자이너의 ACCEPT/REJECT 사유는 넘기지 않는다 — 현재 문서·diff·저장소로 다시 판정시킨다.
+    prev_blockers="$WORK_DIR/reviews/prev-blockers-$TARGET-round-$tag.json"
+    jq '[.blocking_issues[] | {id, category, evidence_type, basis_refs, conflict_refs, code_refs, reachable_scenario, impact, minimum_contract_needed}]' "$prev_review" > "$prev_blockers" \
+      || { echo "[FAIL] 직전 blocker 요약 생성 실패: $prev_review" >&2; exit 1; }
+    prev_context="이번은 Round $round(종결 검토)다. 입력: 직전 blocker 의 주장과 증거 = $prev_blockers (id / category / evidence_type / basis_refs / conflict_refs / code_refs / reachable_scenario = 주장된 실행 경로 / impact = 주장된 영향 / minimum_contract_needed = 요구된 최소 불변식), 직전 라운드 이후 실제 문서 diff = $docs_diff, 현재 문서. 직전 blocker 는 확정 사실이 아니라 재확인할 주장이다 — 적힌 증거 위치와 실행 경로를 출발점으로 현재 문서와 저장소에서 직접 다시 확인해, 요구된 불변식이 현재 문서에서 여전히 깨져 있고 입장 조건을 만족하면 UNRESOLVED_PREVIOUS, 아니면 제외한다. 문서 소유자가 그 이슈를 수용했는지·기각했는지와 그 이유는 판정 입력이 아니며 전달되지 않는다. 이번 라운드에서 허용되는 blocking 은 세 종류뿐이며 origin 으로 표시한다: UNRESOLVED_PREVIOUS(직전 이슈가 미해결, previous_issue_id 에 같은 id) / REVISION_REGRESSION(직전 수정이 새로 만든 직접 회귀, revision_ref 에 diff 위치) / NEWLY_EXPOSED_BY_REVISION(Round 1 에는 없던 정보가 수정으로 처음 드러남, revision_ref 필수). 직전 라운드 당시 이미 볼 수 있었던 별개의 문제는 제기하지 마라. 해결된 이슈는 제외한다."
   fi
 
   # ---------- 검증자 검토: 읽기 전용, 스키마 강제 JSON (CLI 는 VALIDATOR_MODEL 로 라우팅) ----------
   # 공통 계약(validator-review-*.md) 뒤에 프로필 오버레이를 붙인다. 오버레이는 envsubst 를 거치지 않는다(치환 변수 없음).
-  validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" \
-    render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT}')"$VALIDATOR_OVERLAY"
+  # 검증자는 decisions.md 원본을 입력으로 받지 않는다 — 거기에는 디자이너의 [round N] ACCEPT/REJECT 사유가 섞여 있고, "읽되 무시하라" 는 격리가 아니다.
+  # 이 target 의 확정 사용자 결정([USER-QUESTION][scope=…]) 줄만 매 호출 직전에 결정적으로 다시 추린다(지문의 consensus_user_decisions_for 와 같은 범위).
+  # 디자이너와 지문·체크포인트는 계속 decisions.md 원본을 쓴다.
+  user_decisions="$WORK_DIR/reviews/user-decisions-$TARGET.md"
+  case "$TARGET" in design) user_decision_scopes='design';; impl) user_decision_scopes='design|impl';; esac
+  { printf '# 확정 사용자 결정 (%s 단계 — 아래에 줄이 없으면 확정된 사용자 결정이 없다)\n' "$TARGET"
+    grep -E "^[[:space:]]*- \[USER-QUESTION\]\[scope=($user_decision_scopes)\]" "$WORK_DIR/decisions.md" || true; } > "$user_decisions"
+  validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" USER_DECISIONS_FILE="$user_decisions" \
+    render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT} ${USER_DECISIONS_FILE}')"$VALIDATOR_OVERLAY"
   # conventions 는 검증자 프롬프트 본문에 이미 렌더링돼 있으므로 "" 를 넘긴다.
-  run_readonly_json_role VALIDATOR "validator-$TARGET" "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
+  # 검증자 세션은 호출마다 fresh 다(이름에 invocation id) — 종결 검토가 직전 검증자 대화에 anchoring 되지 않게 하고, 같은 라운드 재시도·Round 1 재시작도 옛 대화를 --resume 하지 않는다.
+  # 라운드 간 상태는 위 prev_context 의 파일로만 넘긴다. 디자이너는 판정자가 아니라 문서 수정자이므로 stage 세션을 그대로 이어간다(아래).
+  run_readonly_json_role VALIDATOR "validator-$TARGET-round-$tag-$(new_invocation_id)" "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
     || exit 1
 
   verdict=$(jq -er '.verdict' "$review") || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
@@ -286,7 +303,11 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   echo "--- 디자이너가 리뷰($(basename "$prev_review"))를 반영/반박합니다 ---"
   decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
   designer_result="$WORK_DIR/reviews/designer-$TARGET-round-$tag.raw"
-  designer_prompt=$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" ROUND="$round" \
+  # 디자이너 입력은 blocker 의 구조화된 주장·증거뿐이다 — 검증자의 자유 서술(why_blocks_now)은 넘기지 않는다. prev_review 에서 매번 결정적으로 다시 만든다(재개 포함).
+  designer_input="$WORK_DIR/reviews/designer-input-$TARGET-round-$tag.json"
+  jq '{blocking_issues: [.blocking_issues[] | {id, category, change_relation, evidence_type, basis_refs, conflict_refs, code_refs, reachable_scenario, impact, minimum_contract_needed}]}' "$prev_review" > "$designer_input" \
+    || { echo "[FAIL] 디자이너 입력 생성 실패: $prev_review" >&2; exit 1; }
+  designer_prompt=$(REVIEW_FILE="$designer_input" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
   # 호출 전 문서 상태(합의 대상 문서 + decisions.md = editable 지문)와 source 작업 트리(WORK_DIR 제외 tree). 디자이너는 편집 역할이라 문서 밖 파일도 쓸 수 있다.
   designer_docs_before="$(consensus_editable_fingerprint "$TARGET")"

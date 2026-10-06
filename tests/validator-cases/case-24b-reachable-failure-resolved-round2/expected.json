@@ -1,0 +1,8 @@
+{
+  "stage": "design",
+  "round": 2,
+  "requires_case": "case-24a-reachable-failure-round1",
+  "verdict": "PASS",
+  "issues": [],
+  "note": "직전 REACHABLE_FAILURE(B-01)는 design 수정(요청 기록에서 쿼리 문자열 제외)으로 해결됐다. 코드(src)는 아직 옛 동작이지만 design 이 그 수정을 이번 변경으로 정했다. prev-blockers 의 reachable_scenario/impact 를 주장으로 받아 현재 문서로 재확인해야 하며, 이전 주장만으로 UNRESOLVED_PREVIOUS 를 내면 실패다."
+}

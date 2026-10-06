@@ -1,0 +1,29 @@
+{
+  "schema_version": 17,
+  "verdict": "BLOCK",
+  "blocking_issues": [
+    {
+      "id": "B-01",
+      "action": "REVISE_DOC",
+      "category": "REQUIREMENT_CONTRADICTION",
+      "change_relation": "INTRODUCED_BY_FEATURE",
+      "evidence_type": "DIRECT_MISMATCH",
+      "basis_refs": [
+        "design.md:L3-L4"
+      ],
+      "conflict_refs": [
+        "approach.md:L3"
+      ],
+      "code_refs": [],
+      "reachable_scenario": "",
+      "impact": "8자리가 아닌 정규화 결과가 corp_code 로 저장되고 유효하지 않은 입력에 400 이 반환되지 않는다",
+      "why_blocks_now": "합의된 설계 계약과 approach 결정이 직접 충돌하며 워커가 로컬 선택으로 해소할 수 없다",
+      "minimum_contract_needed": "정규화 결과가 유효한 8자리 숫자가 아니면 저장하지 않고 400 으로 응답한다는 계약이 구현 문서에 반영돼야 한다",
+      "user_question": "",
+      "options": [],
+      "origin": "ROUND_1",
+      "previous_issue_id": "",
+      "revision_ref": ""
+    }
+  ]
+}

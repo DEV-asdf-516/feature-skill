@@ -1,0 +1,31 @@
+{
+  "schema_version": 17,
+  "verdict": "BLOCK",
+  "blocking_issues": [
+    {
+      "id": "B-01",
+      "action": "REVISE_DOC",
+      "category": "CHANGE_INTRODUCES_SECURITY_RISK",
+      "change_relation": "INTRODUCED_BY_FEATURE",
+      "evidence_type": "REACHABLE_FAILURE",
+      "basis_refs": [
+        "request.md:L4"
+      ],
+      "conflict_refs": [
+        "design.md:L8"
+      ],
+      "code_refs": [
+        "src/HttpClientSupport.java:L2-L4"
+      ],
+      "reachable_scenario": "DartClient.lookup 이 crtfc_key 원문이 포함된 URL 을 조립해 HttpClientSupport.get(url) 에 넘기고, get 이 전송 전에 그 URL 전체를 log.info 로 기록한다",
+      "impact": "API 키 원문이 애플리케이션 로그에 남는다",
+      "why_blocks_now": "설계가 현재 요청 기록 동작을 그대로 재사용한다고 정해 워커가 키 노출 없이 구현할 수 없다",
+      "minimum_contract_needed": "crtfc_key 원문이 포함된 URL 이 애플리케이션 로그에 기록되지 않아야 한다",
+      "user_question": "",
+      "options": [],
+      "origin": "ROUND_1",
+      "previous_issue_id": "",
+      "revision_ref": ""
+    }
+  ]
+}
