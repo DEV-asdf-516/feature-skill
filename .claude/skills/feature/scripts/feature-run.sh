@@ -219,6 +219,7 @@ for f in consensus-loop.sh impl-review-loop.sh; do
   [ -x "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음/실행권한 없음: $f"
 done
 [ -f "$SKILL_DIR/scripts/worker-invoke.sh" ] || env_error "스크립트 없음: worker-invoke.sh (run_worker)"
+[ -f "$SKILL_DIR/scripts/notify-done.sh" ] || env_error "스크립트 없음: notify-done.sh (notify_feature_done)"
 [ -f "$WORKER_SCHEMA" ] || env_error "스키마 없음: $WORKER_SCHEMA"
 for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
   [ -f "$SKILL_DIR/prompts/$p" ] || env_error "프롬프트 없음: $p"
@@ -349,6 +350,11 @@ log "시작 stage: $STAGE (test_retries=$TEST_RETRIES)"
 # ---------- 워커 호출 ----------
 # run_worker 는 scripts/worker-invoke.sh 에 있다(본문 그대로 분리 — tests/worker-regression.sh 가 같은 경로로 production 워커 1회를 호출한다).
 source "$SKILL_DIR/scripts/worker-invoke.sh"
+
+# ---------- DONE 완료 푸시 알림 ----------
+# notify_feature_done 은 scripts/notify-done.sh — done stage 의 write_state done DONE 직후 1회.
+# 미설정·발송 실패는 DONE(exit 0)을 바꾸지 않고, 재발송은 notify-done.sent 마커와 "이미 DONE" 조기 종료가 막는다.
+source "$SKILL_DIR/scripts/notify-done.sh"
 
 # ---------- 구현 단위 하나 실행 ----------
 # fresh 워커 → targeted test(실패 시 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json. unit 별 리뷰·수정자는 없다 —
@@ -591,6 +597,7 @@ while :; do
 
     done)
       write_state done DONE "" "Phase 3 승인 + 전체 테스트 통과. 커밋은 사용자 지시 시에만."
+      notify_feature_done || true   # DONE 기록 성공 뒤에만, 피처당 1회 — 실패해도 exit 0 그대로
       anomaly_n="$(cli_anomaly_count)"
       [ "$anomaly_n" -eq 0 ] || log "[WARN] CLI 종료코드 불일치 복구 $anomaly_n 건 — $CLI_ANOMALY_LOG (raw exit code 는 usage.jsonl 에 그대로)"
       log "DONE"

@@ -80,6 +80,16 @@ LINT_CMD="CHANGE_ME"
 # 복잡도·중복·dead code 같은 정적 분석은 LINT_CMD 안에 프로젝트 도구로 구성한다(eslint/sonar, radon, detekt, clippy, knip, jscpd…).
 # 스킬은 언어 독립이므로 자체 코드 검사를 갖지 않는다. 커버리지 % 임계치도 두지 않는다 — 숫자 채우기용 테스트를 유발한다.
 
+# --- ntfy 완료 푸시 알림 (선택) ---
+# DONE(리뷰 승인 + 테스트·린트 통과, FINALIZED 아님) 기록 직후 1회 발송한다(scripts/notify-done.sh 의 notify_feature_done).
+# OS 독립 — curl HTTP 호출 하나뿐이고 uname/OS 분기가 없다. 미설정이면 로그만 남기고 생략하며,
+# 발송 실패도 DONE 결과(exit 0)를 바꾸지 않는다. 환경변수가 항상 우선이고 토픽·토큰을 저장소에 하드코딩하지 않는다.
+NTFY_URL="${NTFY_URL:-https://ntfy.sh}"   # self-host 서버면 교체
+NTFY_TOPIC="${NTFY_TOPIC:-}"              # 구독 토픽. 비어 있으면 발송 생략
+NTFY_TOKEN="${NTFY_TOKEN:-}"              # 보호 토픽 인증(선택). argv 가 아니라 curl --config(stdin)으로 전달돼 ps·로그에 남지 않는다
+NTFY_TIMEOUT="${NTFY_TIMEOUT:-5}"         # HTTP 전체 타임아웃(초)
+NTFY_CURL_BIN="${NTFY_CURL_BIN:-curl}"    # 테스트가 HTTP 클라이언트를 모킹할 때 교체
+
 # --- 역할별 규칙 파일 ---
 # 기본은 이 스킬이 설치된 프로젝트. 피처 전용 worktree 에서 돌 때는 러너가 FEATURE_PROJECT_ROOT 로 그 worktree 를 넘긴다 —
 # 규칙 파일·conventions·프로젝트 로컬 워커 스킬을 원본이 아니라 snapshot 된 worktree 에서 읽어 실행 격리를 지킨다(하위 루프도 상속).
