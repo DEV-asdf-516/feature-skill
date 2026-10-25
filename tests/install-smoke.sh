@@ -292,6 +292,8 @@ sed -i.sedbak 's/^CLAUDE_BIN=.*/CLAUDE_BIN="true"/' "$LOG_SKILL/config.sh" && rm
 sed -i.sedbak 's/^CODEX_BIN=.*/CODEX_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^TEST_CMD=.*/TEST_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+# 워커 픽스처가 전부 가짜 codex(CODEX_BIN 교체)이므로 모델 기본값과 무관하게 codex 로 고정한다
+sed -i.sedbak 's/^WORKER_CLI=.*/WORKER_CLI="codex"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 chmod -x "$LOG_TARGET/feature-live"
 
 mkdir -p "$LOG_TARGET/.agent-work"
@@ -718,7 +720,7 @@ printf '%s\n' \
   'exit "${FAKE_WORKER_RC:-0}"' \
   > "$WIDX_SIDE/fake-codex"
 chmod +x "$WIDX_SIDE/fake-codex"
-sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$WIDX_SIDE/fake-codex\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$WIDX_SIDE/fake-codex\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"   # 워커 픽스처가 fake codex 이므로 모델 기본값과 무관하게 고정
 for worker_rc_case in 0 7; do
   (cd "$WIDX_TARGET" && git restore --staged --worktree src/w.txt)
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$WIDX_TARGET/.agent-work/run-state.json"
