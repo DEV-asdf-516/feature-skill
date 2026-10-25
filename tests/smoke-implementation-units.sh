@@ -130,7 +130,7 @@ kind=worker; printf '%s' "$prompt" | grep -qE 'targeted-test-[0-9]+\.log' && kin
 mkdir "$MOCK_STATE/worker.lock" 2>/dev/null || { echo "CONCURRENT WORKER" >> "$MOCK_LOG"; exit 9; }
 release() { rmdir "$MOCK_STATE/worker.lock"; }
 echo "$kind ${unit:-none}" >> "$MOCK_LOG"
-[ "$cli" = claude ] && [ "$kind" = worker ] && echo "claude-worker $unit $session_flag" >> "$MOCK_LOG"   # 사례 T: fresh 세션 플래그 기록
+[ "$cli" = claude ] && [ "$kind" = worker ] && echo "claude-worker $unit $session_flag" >> "$MOCK_LOG.sessions"   # 사례 T 전용 계측 — 공용 로그를 오염시키지 않게 분리(워커가 claude 로 라우팅돼도 A/I 순서 비교 유지)
 sleep 0.2
 n="${unit%%-*}"
 # 프롬프트의 [IMPLEMENTATION CONTEXT] 블록을 보존해 사례 X 가 검사한다
@@ -173,7 +173,7 @@ fake_pass() { # design|impl — 가짜 검증자가 PASS 를 -o 에 쓴다
 fake_pass design; fake_pass impl
 restore_units() { write_units; fake_pass impl; }   # manifest 원복 + impl PASS 지문 재동기화
 run_runner() { # → exit code, 로그 $TMP/run.log
-  : > "$MOCK_LOG"
+  : > "$MOCK_LOG"; : > "$MOCK_LOG.sessions"
   bash "$RUN" > "$TMP/run.log" 2>&1; echo $?
 }
 reason() { jq -r '.reason' .agent-work/run-state.json; }
@@ -293,17 +293,20 @@ pass "E: lock≠원본 → UNITS_MANIFEST_CHANGED(워커 0회), lock 제거 후 
 
 # ===== 사례 E2: unit 워커 호출 중 manifest 가 바뀌면 중단 =====
 reset_tree
-cat > "$TMP/bin/codex-tamper" <<EOF
+# 워커가 어느 CLI 로 라우팅되든 첫 호출에서 탬퍼가 일어나도록 두 CLI 를 모두 감싼다 (impl PASS 픽스처라 첫 호출이 worker 01)
+for c in claude codex; do
+  cat > "$TMP/bin/$c-tamper" <<EOF
 #!/usr/bin/env bash
 jq '.units[0].title += "x"' .agent-work/implementation-units.json > .agent-work/u.tmp && mv .agent-work/u.tmp .agent-work/implementation-units.json
-exec "$TMP/bin/codex" "\$@"
+exec "$TMP/bin/$c" "\$@"
 EOF
-chmod +x "$TMP/bin/codex-tamper"
-sed -i.bak "s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-tamper\"|" "$CFG" && rm -f "$CFG.bak"
+  chmod +x "$TMP/bin/$c-tamper"
+done
+sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude-tamper\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-tamper\"|" "$CFG" && rm -f "$CFG.bak"
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNITS_MANIFEST_CHANGED ] || { tail -20 "$TMP/run.log"; fail "E2: exit 2/UNITS_MANIFEST_CHANGED 기대, 실제 $rc/$(reason)"; }
 grep -q 'test-01' "$MOCK_LOG" && fail "E2: manifest 변경 후 targeted test 로 진행함"
-sed -i.bak "s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" "$CFG" && rm -f "$CFG.bak"
+sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" "$CFG" && rm -f "$CFG.bak"
 restore_units
 pass "E2: 워커 호출 중 manifest 변경 → 중단, targeted test 미진입"
 
@@ -413,8 +416,9 @@ reset_tree
 sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="claude-worker-x"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "T: exit 0 기대, 실제 $rc"; }
-[ "$(seq_of '^claude-worker ')" = "claude-worker 01-intake --session-id claude-worker 02-drop --session-id claude-worker 03-reassign --session-id" ] \
-  || fail "T: unit 워커가 fresh 세션이 아님: $(seq_of '^claude-worker ')"
+t_seq="$(paste -sd' ' "$MOCK_LOG.sessions")"
+[ "$t_seq" = "claude-worker 01-intake --session-id claude-worker 02-drop --session-id claude-worker 03-reassign --session-id" ] \
+  || fail "T: unit 워커가 fresh 세션이 아님: $t_seq"
 pass "T: claude 워커도 unit 마다 --session-id (fresh)"
 
 echo "[SMOKE] 전부 통과 — 임시 저장소: $TMP (필요 없으면 직접 정리)"
