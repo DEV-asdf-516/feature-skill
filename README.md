@@ -242,6 +242,22 @@ finalize 는 `HEAD` 대비 diff 를 붙이지 않는다. worktree 생성 시 원
 
 파이프라인 시작 전에 켜도 `live.log` 생성을 기다렸다가 자동으로 스트리밍을 시작한다.
 
+### ntfy 완료 푸시 알림 (선택)
+
+`DONE`(리뷰 승인 + 테스트·린트 통과 — 사용자 승인 뒤의 `FINALIZED` 가 아니다)이 기록되면 러너가 [ntfy](https://ntfy.sh) HTTP API 로 휴대폰 푸시 알림을 보낸다(`scripts/notify-done.sh`). 발송 경로는 `curl` HTTP 요청 하나뿐이고 `uname`/OS 조건문이 없어 macOS·Linux·Windows(Git Bash/WSL) 어디서든 같게 동작한다.
+
+1. 휴대폰에 ntfy 앱(iOS/Android)을 설치하고 고유한 토픽을 구독한다. public 서버(ntfy.sh)에서는 토픽 이름이 곧 접근 권한이므로 추측 불가능한 이름을 쓴다.
+2. 러너를 실행하는 쉘 환경에 환경변수를 설정한다(저장소·config.sh 에 개인 토픽·토큰을 하드코딩하지 않는다):
+
+```bash
+export NTFY_TOPIC="feature-done-x7k2q9"   # 필수 — 비어 있으면 발송을 생략하고 로그만 남긴다
+export NTFY_URL="https://ntfy.sh"         # 선택 — self-host 서버면 교체 (기본값 https://ntfy.sh)
+export NTFY_TOKEN="tk_..."                # 선택 — 보호 토픽 인증. argv 가 아니라 curl --config(stdin)으로 전달돼 ps·로그에 남지 않는다
+export NTFY_TIMEOUT=5                     # 선택 — HTTP 전체 타임아웃(초, 기본 5)
+```
+
+알림 본문에는 프로젝트명·feature id·완료 상태(`DONE`)·완료 시각·finalize 승인 대기 여부가 들어간다. 알림은 부수 효과다: 미설정·HTTP 실패 어느 쪽도 `DONE` 결과(exit 0)·상태 전이·종료 코드를 바꾸지 않는다. 발송은 피처당 1회다 — 이미 `DONE` 인 피처를 재실행하면 재발송하지 않고(`notify-done.sent` 마커 + 조기 종료), `--new` 로 새 피처를 시작하면 마커도 아카이브돼 다시 발송된다. topic·token 은 `live.log` 에 기록하지 않는다.
+
 라운드 한도는 `config.sh`에서 조정한다:
 
 ```bash
@@ -264,6 +280,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / invocation 별 usage telemetry / 실시간 로그 |
 | `cli-anomalies.jsonl` / `worker-outcome.guard.json` / `designer-scope.guard.json` | CLI 종료코드 불일치 복구 기록(append-only: role·cli·label·raw_exit_code·recovery=STRUCTURED_RESULT\|FORWARD_TO_VALIDATOR\|FORWARD_TO_REVIEWER·evidence; `usage.jsonl` 의 raw exit_code/success 는 그대로) / 결과 없는 불확실 워커 변경의 fail-closed 가드(호출 전 tree) / 디자이너의 문서 밖 source 변경 가드(호출 전 tree). codex read-only 결과는 invocation 전용 임시 `-o`(`<out>.invocation-<id>.tmp`)에만 쓰이고 usable 할 때만 `<out>` 으로 옮겨진다 |
+| `notify-done.sent` | ntfy 완료 알림 발송 마커(피처당 1회) — 있으면 `done` 재진입에도 재발송하지 않는다. `--new` 가 archive 로 옮겨 새 피처는 다시 발송된다 |
 | `archive/` | 이전 피처 산출물 보관 (새 피처 시작 시 자동 이동) |
 | `feature.json` | (피처 worktree) 부트스트랩 기록 — version 2: branch·worktree·source_root·head·`snapshot_tree`·`bootstrap_tree`(finalize 기준선 B)·mode·created_at |
 | `archive/worktree/<id>/<timestamp>/` | (원본) finalize 기록 — `manifest.json`·`feature.patch`(B→F)·`finalize.json`(status·B/O/F/merge tree·`source_after_tree`·cleanup·충돌 목록)·`agent-work/`(worktree 산출물 사본) |
@@ -315,6 +332,7 @@ bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted
 bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지문·stage 회귀·DECISION_SCOPE_REQUIRED. LLM 호출 없음
 bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 워커 DONE/DOC_GAP 종료 코드·impl PASS provenance 전제·usage summary. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
+bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
 touch .claude/ALLOW_REAL_LLM_REGRESSION   # 유료 회귀 1회 승인 — 사용자 지시 후에만. 없으면 회귀 스크립트가 exit 3 으로 차단
 bash tests/validator-regression.sh   # 검증자 판정 감도. 사례당 실제 검증자 호출 1회
 bash tests/reviewer-regression.sh    # 리뷰어 판정 감도. 사례당 실제 리뷰어 호출 1회
