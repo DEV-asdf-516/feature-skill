@@ -70,10 +70,15 @@ MAX_SPEC_ROUNDS=1        # 명세 합의 최대 라운드
 MAX_IMPL_ROUNDS=1        # 구현 리뷰-수정 라운드 (리뷰는 +1회 — 마지막 수정도 종결 검토). 1 = Reviewer 2 + Fixer 1, 첫 수정으로 안 풀리면 사용자에게
 MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 워커 재수정 허용 횟수
 # Feature Worker 세션 교체 임계치(claude 라우팅 전용). 논리적 워커는 하나지만, unit 완료(targeted test PASS) 직후에
-# 마지막 워커 invocation 의 '관측' 입력 토큰(usage.jsonl 의 input_effective = uncached+cache_read+cache_write)이 이 값 이상이면
-# worker-handoff.json(스키마·계약 지문·git tree 검증)을 거쳐 다음 unit 부터 fresh CLI 세션으로 교체한다(scripts/worker-invoke.sh).
-# 교체 시점은 unit 경계뿐이고, telemetry 가 없으면 임의 추정 없이 세션을 유지하며, 0 이면 교체하지 않는다.
-WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-150000}"
+# 마지막 워커 invocation 의 '마지막 턴 실제 컨텍스트'(usage.jsonl 의 context_last_turn; 없으면 input_per_turn 근사)가 이 값 이상이면
+# (input_effective 는 invocation 안 모든 model turn 의 누적 입력이라 컨텍스트 창 크기가 아니다 — 2026-10-27 매 unit 교체 사고)
+# worker-handoff.json(스키마·계약 지문·git tree 검증)을 거쳐 다음 unit 부터 fresh CLI 세션으로 교체한다(scripts/worker-invoke.sh). claude·codex 모두.
+# 교체 시점은 unit 경계뿐이고, 판단은 그 unit 에서 이 실행이 부른 마지막 워커 호출(units/<id>/last-usage-label)의 행만 쓴다.
+# telemetry 가 없으면 임의 추정 없이 세션을 유지하며, 0 이면 교체하지 않는다. 기본 1,000,000 = 컨텍스트 창이 실제로 100만 토큰 수준일 때만.
+WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"
+# 창 크기(usage.jsonl 의 context_window)까지 관측되면 고정 임계치 대신 이 비율로 판단한다: context_last_turn / context_window ≥ 비율 → 다음 unit 부터 교체.
+# 창 크기를 모르면 위 고정 임계치, 실측 자체가 없으면 input_per_turn 근사 + 고정 임계치(근사 사용은 로그에 남는다). 비활성은 위 값 0.
+WORKER_SESSION_ROTATE_CONTEXT_RATIO="${WORKER_SESSION_ROTATE_CONTEXT_RATIO:-0.8}"
 
 # --- 산출물 디렉터리 (저장소 루트 기준 상대 경로) ---
 WORK_DIR=".agent-work"
@@ -575,12 +580,15 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
       [ -z "$schema" ] || schema_args=(--json-schema "$(cat "$schema")")
       session_args=$(claude_session_args "$session")
+      # stream-json: model 호출(assistant 메시지)마다 usage 가 오므로 '마지막 턴의 실제 컨텍스트'(context_last_turn)를 잴 수 있다.
+      # 마지막 result 이벤트는 --output-format json 의 결과와 같은 객체다 — 그걸 $raw 로 뽑아 아래 소비자(structured_output·usage)는 그대로 둔다.
       FEATURE_ROLE_CHILD=1 "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
         ${conv_args[@]+"${conv_args[@]}"} \
         ${schema_args[@]+"${schema_args[@]}"} \
-        "$@" --output-format json \
+        "$@" --verbose --output-format stream-json \
         "$prompt" \
-        > "$raw" || rc=$?
+        > "$raw.stream.jsonl" || rc=$?
+      claude_stream_extract_result "$raw.stream.jsonl" "$raw"
       log_role_usage claude "$role" "$model" "$label" "$raw" "$rc" "$inv"   # 실패해도 파싱 가능한 usage 는 남긴다
       if [ "$rc" -eq 0 ]; then
         claude_session_commit "$session"
@@ -1285,6 +1293,9 @@ verify_approved_fingerprint() {
 #   null = "관측 불가"(0 이 아님).
 #   input_effective = input_uncached + cache_read + cache_write — 진단용 파생값이지 provider billing 공식 필드가 아니다.
 #   cache_read 는 invocation 안의 model turn 들에서 읽힌 cache 누계일 수 있으므로 num_turns 와 함께 해석한다.
+#   input_per_turn = floor(input_effective / num_turns) — 턴당 평균 입력, 컨텍스트 점유량의 근사치(context_last_turn 이 null 일 때의 대체값). num_turns 없으면 null.
+#   context_last_turn = 그 invocation 의 마지막 model 호출이 실제로 넣은 입력(claude: stream-json 마지막 assistant usage 합, codex: rollout 마지막 token_count.last_token_usage.input_tokens).
+#     = 그 시점의 컨텍스트 창 점유량. 세션 교체 판단은 이 값을 먼저 쓴다. context_window = 모델 창 크기(claude: result.modelUsage[<워커 모델>].contextWindow — 보조 모델 항목이 섞여 오므로 워커 모델 키 우선, codex: model_context_window).
 #   CLI 종료 성공/실패와 무관하게 파싱 가능한 telemetry 가 있으면 기록한다(exit_code/success). 파싱 불가면 WARN 후 생략 —
 #   telemetry 는 best effort 이며 파싱 실패로 작업을 실패시키거나 같은 유료 invocation 을 재실행하지 않는다.
 #   비용 필드는 provenance 로 나눈다(섞지 않는다):
@@ -1318,15 +1329,46 @@ new_invocation_id() { # 호출 직전 생성. 같은 label 재시도를 구분�
   else printf '%s-%s-%s' "$(date +%s)" "$$" "$RANDOM$RANDOM"; fi
 }
 
+# claude stream-json JSONL → 마지막 result 이벤트를 단일 JSON(= --output-format json 과 같은 객체)으로 뽑는다.
+# result 이벤트가 없고 파일이 type 없는 단일 객체면(구형 출력·mock) 그 객체를 그대로 쓴다. 둘 다 아니면 out 은 만들지 않는다(호출자 진단은 stream 파일).
+claude_stream_extract_result() { # stream_jsonl out_json
+  local line
+  line="$(jq -c 'select(type=="object" and (.type=="result" or (has("type")|not)))' "$1" 2>/dev/null | tail -1)"
+  [ -n "$line" ] || { cp "$1" "$2" 2>/dev/null; return 0; }
+  printf '%s\n' "$line" > "$2"
+}
+# claude stream-json JSONL 의 마지막 assistant 메시지 usage → 그 호출 시점의 실제 컨텍스트(input + cache_read + cache_creation). 없으면 null.
+claude_stream_context_last_turn() { # stream_jsonl
+  jq -c 'select(type=="object" and .type=="assistant" and (.message.usage|type)=="object") | .message.usage
+         | ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))' "$1" 2>/dev/null | tail -1
+}
+# codex thread 의 rollout(~/.codex/sessions/**/rollout-*-<thread_id>.jsonl) 마지막 token_count 이벤트 → {context_last_turn, context_window}.
+# 관측 전용: 완료 판정·재실행 판단에는 쓰지 않는다(cli-exit-mismatch 불변식). 파일이 없거나 이벤트가 없으면 null.
+codex_rollout_context_last_turn() { # events_jsonl
+  local tid f
+  tid="$(jq -r 'select(type=="object" and .type=="thread.started") | .thread_id // empty' "$1" 2>/dev/null | head -1)"
+  [ -n "$tid" ] || { echo '{"context_last_turn":null,"context_window":null}'; return 0; }
+  # 이 invocation 의 thread.started.thread_id 와 파일명이 일치하는 rollout 만 읽는다 — '가장 최근 rollout' 을 집으면 다른 세션 값이 섞인다.
+  # 정확히 1개가 아니면(없음·중복) 측정 불가로 null — 추측으로 고르지 않는다.
+  local matches; matches="$(find "${CODEX_HOME:-$HOME/.codex}/sessions" -type f -name "rollout-*-$tid.jsonl" 2>/dev/null)"
+  f="$(printf '%s\n' "$matches" | grep -c . | { read -r n; [ "$n" -eq 1 ] && printf '%s' "$matches"; })"
+  [ -n "$f" ] || { echo '{"context_last_turn":null,"context_window":null}'; return 0; }
+  jq -c 'select(type=="object" and .type=="event_msg" and .payload.type=="token_count" and (.payload.info|type)=="object") | .payload.info
+         | {context_last_turn:(.last_token_usage.input_tokens // null), context_window:(.model_context_window // null)}' "$f" 2>/dev/null | tail -1 \
+    || echo '{"context_last_turn":null,"context_window":null}'
+}
+
 # claude --output-format json 결과 파일 → 행 1개.  usage 핵심 필드(usage.input_tokens)가 없으면 경고 후 생략(pipeline 실패 아님).
+# 옆에 <result_file>.stream.jsonl 이 있으면 context_last_turn(마지막 assistant 메시지의 입력 합)을 채운다. context_window 는 result.modelUsage 에서.
 log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
-  local label="$1" role="$2" model="$3" result_file="$4" rc="${5:-0}" inv="${6:-}"
+  local label="$1" role="$2" model="$3" result_file="$4" rc="${5:-0}" inv="${6:-}" ctx='null'
   [ -n "$inv" ] || inv="$(new_invocation_id)"
   if ! jq -e '.usage.input_tokens != null' "$result_file" >/dev/null 2>&1; then
     echo "[WARN] usage 필드 없음 — 기록 생략: $result_file" >&2
     return 0
   fi
-  jq -c --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" \
+  if [ -f "$result_file.stream.jsonl" ]; then ctx="$(claude_stream_context_last_turn "$result_file.stream.jsonl")"; [ -n "$ctx" ] || ctx='null'; fi
+  jq -c --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson ctx "$ctx" \
     --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
     {
       schema_version: $v,
@@ -1342,6 +1384,11 @@ log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
       output: (.usage.output_tokens // null),
       reasoning_output: null,
       input_effective: ((.usage.input_tokens // 0) + (.usage.cache_read_input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)),
+      input_per_turn: (if ((.num_turns // 0) > 0)
+                       then ((((.usage.input_tokens // 0) + (.usage.cache_read_input_tokens // 0) + (.usage.cache_creation_input_tokens // 0)) / .num_turns) | floor)
+                       else null end),
+      context_last_turn: $ctx,
+      context_window: ((.modelUsage // {}) as $mu | ($mu[$model].contextWindow? // ($mu | to_entries | first.value.contextWindow? // null))),
       tokens_total: null,
       num_turns: (.num_turns // null),
       duration_ms: (.duration_ms // null),
@@ -1369,7 +1416,9 @@ log_codex_usage() { # label role model events_jsonl [exit_code] [invocation_id]
   else
     rates='null'
   fi
+  local ctx; ctx="$(codex_rollout_context_last_turn "$events")"; [ -n "$ctx" ] || ctx='{"context_last_turn":null,"context_window":null}'
   jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson a "$agg" --argjson rates "$rates" --argjson basis "$basis" \
+    --argjson ctx "$ctx" \
     --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
     ($a.input_total - $a.cache_read - $a.cache_write) as $uncached
     | (if $rates == null then null
@@ -1385,6 +1434,8 @@ log_codex_usage() { # label role model events_jsonl [exit_code] [invocation_id]
       input_uncached: $uncached, cache_read: $a.cache_read, cache_write: $a.cache_write, output: $a.output,
       reasoning_output: $a.reasoning,
       input_effective: ($uncached + $a.cache_read + $a.cache_write),
+      input_per_turn: (if $a.turns > 0 then (($uncached + $a.cache_read + $a.cache_write) / $a.turns | floor) else null end),
+      context_last_turn: $ctx.context_last_turn, context_window: $ctx.context_window,
       tokens_total: ($a.input_total + $a.output),
       num_turns: $a.turns, duration_ms: null, duration_api_ms: null,
       exit_code: $rc, success: ($rc == 0),
