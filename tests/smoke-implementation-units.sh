@@ -89,6 +89,7 @@ write_units
 cat > "$TMP/bin/mock-cli" <<'EOF'
 #!/usr/bin/env bash
 cli="$(basename "$0")"   # claude | codex — 출력 규약 선택에만 쓴다
+outfmt=""
 out=""; schema=""; prompt=""; session_flag=""; session_value=""; editing=0; resume_tid=""; want_help=0
 while [ "$#" -gt 0 ]; do case "$1" in
   exec|-p) shift;;
@@ -100,18 +101,29 @@ while [ "$#" -gt 0 ]; do case "$1" in
   --sandbox) [ "$2" = workspace-write ] && editing=1; shift 2;;
   --permission-mode) editing=1; shift 2;;
   --session-id|--resume) session_flag="$1"; session_value="$2"; shift 2;;
-  -m|-c|--model|--effort|--output-format|--tools|--allowedTools|--disallowedTools|--append-system-prompt) shift 2;;
+  --output-format) outfmt="$2"; shift 2;;
+  --verbose) shift;;
+  -m|-c|--model|--effort|--tools|--allowedTools|--disallowedTools|--append-system-prompt) shift 2;;
   *) prompt="$1"; shift;;
 esac; done
 # codex_resume_cli_check 의 `exec resume --help` — resume 계약 플래그를 가진 도움말을 돌려준다
 [ "$want_help" = 1 ] && { echo "usage: codex exec resume [--json] [--output-schema] [--output-last-message] [--sandbox]"; exit 0; }
-usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'   # input 100: 세션 교체 임계치 사례(R)의 관측값 — 기본 임계치(150000)보다 작아 다른 사례에선 교체되지 않는다
+usage='"session_id":"fake","total_cost_usd":0,"num_turns":4,"usage":{"input_tokens":400,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'   # input 400 / 4 turns → input_per_turn 100: 세션 교체 임계치 사례(R)의 관측값 — 기본 임계치(1000000)보다 작아 다른 사례에선 교체되지 않는다
 # 실제 codex exec --json 은 첫 이벤트로 thread.started 를 낸다 — 세션 원장(config.sh codex 어댑터)이 이 계약을 읽는다.
 # resume 호출이면 같은 thread id 를 돌려준다(codex_session_check_resumed 가 원장과 대조한다).
 [ "$cli" = codex ] && printf '{"type":"thread.started","thread_id":"%s"}\n' "${resume_tid:-mock-thread-$$}"
 emit() { # 결과 JSON 을 호출된 CLI 의 규약대로 돌려준다
   if [ "$cli" = codex ]; then
     if [ -n "$out" ]; then printf '%s\n' "$1" > "$out"; else printf '%s\n' "$1"; fi
+    # 실제 codex exec --json 은 turn.completed.usage 를 낸다 — usage.jsonl 행(input_per_turn 400)이 생겨 사례 Z 의 교체 판단 입력이 된다
+    printf '{"type":"turn.completed","usage":{"input_tokens":400,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0}}\n'
+  elif [ "${outfmt:-json}" = stream-json ] && [ -f "$MOCK_STATE/stream-ctx" ]; then
+    # 실제 claude stream-json: model 호출마다 assistant 메시지(usage), 마지막에 result(= json 출력과 같은 객체). 사례 R2 가 context_last_turn 을 본다
+    # stream-ctx: "<context_last_turn> [context_window]" — 창 크기가 있으면 result.modelUsage 에 contextWindow 로 싣는다(실제 claude result 형태)
+    read -r sc_ctx sc_win < "$MOCK_STATE/stream-ctx"
+    printf '{"type":"assistant","message":{"usage":{"input_tokens":%s,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}\n' "$sc_ctx"
+    if [ -n "$sc_win" ]; then printf '{"type":"result","structured_output":%s,%s,"modelUsage":{"mock-model":{"contextWindow":%s}}}\n' "$1" "$usage" "$sc_win"
+    else printf '{"type":"result","structured_output":%s,%s}\n' "$1" "$usage"; fi
   else
     printf '{"structured_output":%s,%s}\n' "$1" "$usage"
   fi
@@ -516,6 +528,8 @@ sidA="$(awk 'NR==1{print $4}' "$MOCK_LOG.sessions")"; sidB="$(awk 'NR==3{print $
 [ "$(paste -sd' ' "$MOCK_LOG.sessions")" = "claude-worker 01-intake --session-id $sidA claude-test-fix 01-intake --resume $sidA claude-worker 02-drop --session-id $sidB claude-worker 03-reassign --session-id $sidC" ] \
   || fail "R: 교체 시퀀스 불일치(기대: 01→fix 같은 세션, 02/03 은 unit 경계마다 fresh): $(cat "$MOCK_LOG.sessions")"
 [ "$sidA" != "$sidB" ] && [ "$sidB" != "$sidC" ] && [ "$sidA" != "$sidC" ] || fail "R: 세대별 세션 ID 가 구분되지 않음"
+grep -q '세션 교체 예약: input_per_turn(턴당 평균 근사' "$TMP/run.log" || fail "R: context_last_turn 관측 불가 시 input_per_turn 근사로 판단했다는 로그가 없음"
+grep -q '세션 교체 판단에 근사값 사용' "$TMP/run.log" || fail "R: 근사값 사용 사실이 로그에 없음"
 [ -f .agent-work/.session-feature-worker.gen1 ] && [ -f .agent-work/.session-feature-worker.gen2 ] || fail "R: 은퇴 세션 파일이 세대 접미사로 보존되지 않음"
 jq -e --arg sid "$sidC" '.generation==3 and .session_bound==true and .session_id==$sid and .last_completed_unit_id=="03-reassign"' .agent-work/worker-session.json >/dev/null \
   || fail "R: 저널 세대·세션 ID 불일치: $(cat .agent-work/worker-session.json)"
@@ -530,8 +544,45 @@ printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .a
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "R: 이관 tree 불일치가 막히지 않음 ($rc/$(reason))"; }
 grep -q '^worker ' "$MOCK_LOG" && fail "R: 이관 검증 실패인데 워커가 호출됨"
-sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-150000}"|' "$CFG" && rm -f "$CFG.bak"
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
 pass "R: 임계치 도달 시 unit 경계에서만 세션 교체(fix 는 같은 세션), handoff 스키마·tree 검증, 변조 시 fresh 세션 거부"
+
+# ===== 사례 R2: claude stream-json 의 context_last_turn(마지막 model 호출 실제 입력)이 input_per_turn 보다 우선한다 =====
+# 턴당 평균(400/4=100)은 임계치 이상이지만 실측 컨텍스트 7 은 임계치 10 미만 → 교체하지 않는다. 임계치 5 → 실측 근거로 교체.
+reset_tree
+echo 7 > "$MOCK_STATE/stream-ctx"
+sed -i.bak 's/^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*/WORKER_SESSION_ROTATE_INPUT_TOKENS=10/' "$CFG" && rm -f "$CFG.bak"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "R2: exit 0 기대, 실제 $rc"; }
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 1 ] || fail "R2: 실측 컨텍스트(7) < 임계치(10)인데 세션이 교체됨: $(cat "$MOCK_LOG.sessions")"
+[ "$(jq -rs '[ .[] | select(.role=="WORKER") ] | last | [.context_last_turn, .input_per_turn] | @csv' .agent-work/usage.jsonl)" = "7,100" ] \
+  || fail "R2: usage 행의 context_last_turn/input_per_turn 불일치: $(tail -1 .agent-work/usage.jsonl)"
+ls .agent-work/units/01-intake/worker-*.log.stream.jsonl >/dev/null 2>&1 || fail "R2: stream-json 원본이 보존되지 않음: $(ls .agent-work/units/01-intake)"
+reset_tree
+sed -i.bak 's/^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*/WORKER_SESSION_ROTATE_INPUT_TOKENS=5/' "$CFG" && rm -f "$CFG.bak"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "R2: (임계치 5) exit 0 기대, 실제 $rc"; }
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 3 ] || fail "R2: 실측 컨텍스트(7) ≥ 임계치(5)인데 unit 마다 교체되지 않음: $(cat "$MOCK_LOG.sessions")"
+grep -q '세션 교체 예약: context_last_turn(실측, 창 크기 관측 불가 → 고정 임계치) 7tok' "$TMP/run.log" || fail "R2: 실측(고정 임계치) 근거 로그가 없음"
+grep -q '근사값 사용' "$TMP/run.log" && fail "R2: 실측이 있는데 근사값 사용 로그가 찍힘"
+# 창 크기까지 관측되면 고정 임계치(1000000) 대신 비율: 7/10=0.7 < 0.8 유지, 8/10=0.8 ≥ 0.8 교체
+reset_tree
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
+echo "7 10" > "$MOCK_STATE/stream-ctx"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "R2: (비율 0.7) exit 0 기대, 실제 $rc"; }
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 1 ] || fail "R2: 비율 0.7 < 0.8 인데 세션이 교체됨: $(cat "$MOCK_LOG.sessions")"
+[ "$(jq -rs '[ .[] | select(.role=="WORKER") ] | last | [.context_last_turn, .context_window] | @csv' .agent-work/usage.jsonl)" = "7,10" ] \
+  || fail "R2: usage 행의 context_window 불일치: $(tail -1 .agent-work/usage.jsonl)"
+reset_tree
+echo "8 10" > "$MOCK_STATE/stream-ctx"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "R2: (비율 0.8) exit 0 기대, 실제 $rc"; }
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 3 ] || fail "R2: 비율 0.8 ≥ 0.8 인데 교체되지 않음: $(cat "$MOCK_LOG.sessions")"
+grep -q '세션 교체 예약: context_last_turn/context_window(실측) 8/10tok = 0.800 ≥ 비율 0.8' "$TMP/run.log" || fail "R2: 비율 근거 로그가 없음"
+rm -f "$MOCK_STATE/stream-ctx"
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
+pass "R2: claude stream-json 실측 context_last_turn 우선(창 크기 없음→고정 임계치 7<10 유지·7≥5 교체, 창 크기 있음→비율 0.7 유지·0.8 교체), stream 원본 보존·result 추출"
 
 # ===== 사례 Y: codex 워커도 Feature 당 세션 1개 — thread_id 는 원장에만, 저널은 session_bound 만 (불변식 fail-closed) =====
 reset_tree
@@ -570,5 +621,25 @@ rc="$(run_runner)"
 [ "$(grep '^codex-worker' "$MOCK_LOG.sessions")" = "codex-worker 03-reassign resume $tid" ] \
   || fail "Y: 복구 후 03 이 같은 thread 로 재개되지 않음: $(grep '^codex-worker' "$MOCK_LOG.sessions")"
 pass "Y: codex 워커 세션 1 thread(원장에만 저장, 저널은 session_bound), 원장 소실·결속 불일치 → 중단(자동 fresh 금지), 복구 후 같은 thread 재개"
+
+# ===== 사례 Z: codex 워커도 임계치 도달 시 unit 경계에서 교체 — 원장은 세대 접미사로 은퇴, 다음 unit 은 새 exec(resume 아님), handoff 검증 =====
+reset_tree
+sed -i.bak 's/^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*/WORKER_SESSION_ROTATE_INPUT_TOKENS=1/' "$CFG" && rm -f "$CFG.bak"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "Z: exit 0 기대, 실제 $rc"; }
+[ "$(grep '^codex-worker' "$MOCK_LOG.sessions" | paste -sd'|' -)" = "codex-worker 01-intake new|codex-worker 02-drop new|codex-worker 03-reassign new" ] \
+  || fail "Z: codex 교체 시퀀스 불일치(기대: unit 마다 새 exec): $(grep '^codex-worker' "$MOCK_LOG.sessions")"
+[ -f "$LEDGER.gen1" ] && [ -f "$LEDGER.gen2" ] && [ -f "$LEDGER" ] || fail "Z: 은퇴 원장이 세대 접미사로 보존되지 않음: $(ls .agent-work/.session-feature-worker* )"
+jq -e '.generation==3 and .session_bound==true and .session_id==null' .agent-work/worker-session.json >/dev/null || fail "Z: 저널 세대 불일치: $(cat .agent-work/worker-session.json)"
+jq -e '.generation==3 and .last_completed_unit=="02-drop" and .next_unit=="03-reassign"' .agent-work/worker-handoff.json >/dev/null || fail "Z: handoff 불일치: $(cat .agent-work/worker-handoff.json)"
+grep -q '세션 교체 예약: input_per_turn(턴당 평균 근사.*fresh codex 세션' "$TMP/run.log" || fail "Z: codex 교체 로그가 없음"
+# 교체된 세대인데 handoff 가 없으면 새 exec 를 열지 않는다(claude 와 같은 게이트)
+prep_rerun_03; rm -f "$LEDGER" .agent-work/worker-handoff.json
+jq '.session_bound=false' .agent-work/worker-session.json > "$TMP/j.tmp" && mv "$TMP/j.tmp" .agent-work/worker-session.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "Z: 교체 세대 + handoff 없음이 막히지 않음 ($rc/$(reason))"; }
+grep -q '^worker ' "$MOCK_LOG" && fail "Z: 이관 검증 실패인데 워커가 호출됨"
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
+pass "Z: codex 워커 임계치 교체 — 원장 세대 은퇴·새 exec·handoff 검증, 교체 세대 handoff 부재 시 fresh 거부"
 
 echo "[SMOKE] 전부 통과 — 임시 저장소: $TMP (필요 없으면 직접 정리)"

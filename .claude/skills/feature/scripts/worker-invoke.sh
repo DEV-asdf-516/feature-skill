@@ -92,22 +92,54 @@ worker_handoff_valid_file() { # handoff-path
     "$1" >/dev/null 2>&1
 }
 
-# unit 완료 직후에만 호출된다(run_unit). 임계치는 '관측값'(usage.jsonl 의 마지막 WORKER claude invocation 의 input_effective)으로만
-# 판단한다 — telemetry 가 없으면 임의 추정 없이 세션을 유지한다. 마지막 unit 뒤에는 교체하지 않는다(이관할 다음 unit 이 없다).
+# unit 완료 직후에만 호출된다(run_unit). 판단값은 이 unit 에서 이 실행이 부른 마지막 워커 호출의 usage 행에서
+# context_last_turn(마지막 model 호출의 실제 입력 = 컨텍스트 창 점유량; claude stream-json / codex rollout) 을 먼저 쓴다 — 창 크기(context_window)를
+# 알면 비율(WORKER_SESSION_ROTATE_CONTEXT_RATIO), 모르면 고정 임계치. 실측이 없으면 input_per_turn(턴당 평균, 근사)과 고정 임계치를 비교하고 근사 사용을 로그에 남긴다. input_effective 는 invocation 안 모든 turn 의 누적 입력이라 컨텍스트 창 크기가 아니다
+# (그걸 쓰면 매 unit 교체된다 — 2026-10-27). 둘 다 없으면 임의 추정 없이 세션을 유지한다. claude 세션 파일·codex 원장 모두 세대 접미사로 은퇴. 마지막 unit 뒤에는 교체하지 않는다(이관할 다음 unit 이 없다).
 maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree
   local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
   local handoff="$WORK_DIR/worker-handoff.json"
   local threshold="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-0}" observed next="" u old_gen new_gen fp
   case "$threshold" in ''|*[!0-9]*) env_error "WORKER_SESSION_ROTATE_INPUT_TOKENS 가 정수가 아님: '$threshold'";; esac
   [ "$threshold" -gt 0 ] || return 0
-  [ "$(role_cli WORKER)" = claude ] || return 0   # 교체는 현재 claude 세션만 — codex 원장 은퇴(ledger 교체)는 codex 세션 레이어와 함께 별도 결정
-  [ -f "$sid_file" ] && [ -f "$journal" ] || return 0
-  observed="$(jq -rs '[ .[] | select(.role=="WORKER" and .cli=="claude") ] | if length==0 then empty else (last.input_effective // empty) end' "$WORK_DIR/usage.jsonl" 2>/dev/null || true)"
-  if [ -z "$observed" ]; then
-    log "[WARN] 세션 교체 판단 보류 — usage telemetry 에 WORKER input_effective 가 없어 측정 불가(임의 추정 없이 세션 유지)"
+  local cli ledger; cli="$(role_cli WORKER)" || return 0
+  ledger="$(codex_session_ledger "$FEATURE_WORKER_SESSION")"
+  [ -f "$journal" ] || return 0
+  case "$cli" in claude) [ -f "$sid_file" ] || return 0;; codex) [ -f "$ledger" ] || return 0;; *) return 0;; esac
+  # 이 unit 에서 이 프로세스가 실제로 부른 마지막 워커 호출의 행만 본다 — 재개(워커 미호출)나 label 부재면 이전 unit 값을 재사용하지 않고 유지
+  local label_file="$WORK_DIR/units/$1/last-usage-label" label=""
+  [ -f "$label_file" ] && label="$(cat "$label_file")"
+  if [ -z "$label" ]; then
+    log "세션 교체 판단 보류 — unit $1 에서 이 실행이 부른 워커 호출이 없음(재개 경로). 이전 unit 의 telemetry 는 재사용하지 않는다"
     return 0
   fi
-  [ "$observed" -ge "$threshold" ] || return 0
+  # 판정 순서:
+  #   1) context_last_turn(실측) + context_window 둘 다 있음 → 비율 context_last_turn/context_window ≥ WORKER_SESSION_ROTATE_CONTEXT_RATIO
+  #   2) context_last_turn 만 있음(창 크기 관측 불가)      → 고정 임계치 WORKER_SESSION_ROTATE_INPUT_TOKENS 와 비교
+  #   3) 실측 없음                                        → input_per_turn(턴당 평균 근사) 과 고정 임계치 비교, 근사 사용을 로그에 남긴다
+  #   4) 아무것도 없음                                    → 임의 추정 없이 유지
+  local row basis window ratio="${WORKER_SESSION_ROTATE_CONTEXT_RATIO:-0.8}" hit=0
+  case "$ratio" in ''|*[!0-9.]*|.|*.*.*) env_error "WORKER_SESSION_ROTATE_CONTEXT_RATIO 가 소수가 아님: '$ratio'";; esac
+  row="$(jq -cs --arg l "$label" --arg c "$cli" '[ .[] | select(.role=="WORKER" and .cli==$c and .label==$l) ] | if length==0 then empty else last end' "$WORK_DIR/usage.jsonl" 2>/dev/null || true)"
+  observed="$(printf '%s' "$row" | jq -r '.context_last_turn // empty' 2>/dev/null || true)"
+  window="$(printf '%s' "$row" | jq -r 'if (.context_window // 0) > 0 then .context_window else empty end' 2>/dev/null || true)"
+  if [ -n "$observed" ] && [ -n "$window" ]; then
+    basis="context_last_turn/context_window(실측) ${observed}/${window}tok = $(awk -v a="$observed" -v b="$window" 'BEGIN{printf "%.3f", a/b}') ≥ 비율 $ratio"
+    [ "$(awk -v a="$observed" -v b="$window" -v r="$ratio" 'BEGIN{print (a/b >= r) ? 1 : 0}')" = 1 ] && hit=1
+  elif [ -n "$observed" ]; then
+    basis="context_last_turn(실측, 창 크기 관측 불가 → 고정 임계치) ${observed}tok ≥ 임계치 ${threshold}tok"
+    [ "$observed" -ge "$threshold" ] && hit=1
+  else
+    observed="$(printf '%s' "$row" | jq -r '.input_per_turn // empty' 2>/dev/null || true)"
+    if [ -z "$observed" ]; then
+      log "[WARN] 세션 교체 판단 보류 — usage telemetry 에 호출 $label 의 WORKER context_last_turn/input_per_turn 이 없어 측정 불가(임의 추정 없이 세션 유지)"
+      return 0
+    fi
+    log "세션 교체 판단에 근사값 사용 — 호출 $label 의 실측 context_last_turn 관측 불가, input_per_turn(턴당 평균) ${observed}tok 으로 고정 임계치 ${threshold}tok 와 비교"
+    basis="input_per_turn(턴당 평균 근사 — context_last_turn 관측 불가) ${observed}tok ≥ 임계치 ${threshold}tok"
+    [ "$observed" -ge "$threshold" ] && hit=1
+  fi
+  [ "$hit" -eq 1 ] || return 0
   for u in $(unit_ids); do unit_done_valid "$u" || { next="$u"; break; }; done
   [ -n "$next" ] || return 0
   old_gen="$(jq -r '.generation // 1' "$journal")"; new_gen=$((old_gen + 1))
@@ -117,17 +149,44 @@ maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree
     '{version:1, generation:$gen, last_completed_unit:$last, next_unit:$next, source_tree:$tree, contract_fingerprint:$fp, context_file:$ctx}' \
     > "$handoff.tmp" && mv "$handoff.tmp" "$handoff" || env_error "worker-handoff.json 기록 실패"
   worker_handoff_valid_file "$handoff" || env_error "worker-handoff.json 이 스키마(schemas/worker-handoff.schema.json)와 다름"
-  # 은퇴한 세션 ID 는 지우지 않고 세대 접미사로 보존한다. session_id 를 비워 두면 다음 호출이 fresh --session-id 로 시작한다.
-  mv "$sid_file" "$sid_file.gen$old_gen" || env_error "세션 파일 보존 실패"
+  # 은퇴한 세션(claude 세션 파일 / codex 원장)은 지우지 않고 세대 접미사로 보존한다. 비워 두면 다음 호출이 fresh(--session-id / 새 exec)로 시작한다.
+  case "$cli" in
+    claude) mv "$sid_file" "$sid_file.gen$old_gen" || env_error "세션 파일 보존 실패";;
+    codex)  mv "$ledger" "$ledger.gen$old_gen" || env_error "codex 세션 원장 보존 실패";;
+  esac
   jq --argjson gen "$new_gen" '.generation=$gen | .session_id=null | .session_bound=false' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal" \
     || env_error "worker-session.json 세대 갱신 실패"
-  log "Feature Worker 세션 교체 예약: 관측 입력 ${observed}tok ≥ 임계치 ${threshold}tok — generation $new_gen, unit $next 부터 fresh 세션(계약 문서·context 색인 재주입)"
+  log "Feature Worker 세션 교체 예약: $basis — generation $new_gen, unit $next 부터 fresh $cli 세션(계약 문서·context 색인 재주입)"
 }
 
 # 워커 호출 전 세션 전제 확정(모델 호출 0회). 호출자 계약: stop_need_user / env_error / log 가 정의돼 있다.
 #   저널 없음 + 이전 체계(unit 별 fresh 세션)의 흔적 또는 완료 unit 체크포인트 → 묵시적 마이그레이션 금지, 사용자에게.
 #     이어 돌리기로 결정했으면 $WORK_DIR/worker-session.migrate 파일을 만들고 재실행(마커는 1회 소비되고 새 세션 저널이 생긴다).
 #   저널 있음 + cli·모델·effort·계약 지문·세션 ID 불일치 → 자동 resume 금지, 자동 fresh 재생성 금지, 사용자에게.
+# 세션 증거가 없는 상태에서 fresh 세션을 만들어도 되는지 — generation 1 이면 '아직 미생성'이라 통과, 교체된 세대면 그 세대의
+# worker-handoff.json 이 스키마·계약 지문·현재 tree 와 일치해야만 통과한다(claude·codex 공용). 불일치는 모델 호출 0회로 멈춘다.
+worker_handoff_gate_for_fresh() { # journal contract_fingerprint
+  local journal="$1" fp="$2" gen; gen="$(jq -r '.generation // 1' "$journal")"
+  if [ -f "$WORK_DIR/worker-handoff.json" ] && [ "$(jq -r '.generation' "$WORK_DIR/worker-handoff.json" 2>/dev/null)" = "$gen" ]; then
+    # 세션 교체 직후의 fresh 세대 — 이관 정보(worker-handoff.json)가 스키마·계약 지문·현재 tree 와 일치해야만 새 세션을 만든다
+    worker_handoff_valid_file "$WORK_DIR/worker-handoff.json" \
+      || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 이 스키마(schemas/worker-handoff.schema.json)와 다르다 — 이관 정보를 신뢰할 수 없으므로 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고, --new 또는 사용자 정리 후 재실행"
+    [ "$(jq -r '.contract_fingerprint' "$WORK_DIR/worker-handoff.json")" = "$fp" ] \
+      || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 의 계약 지문이 현재 워커 규칙·프롬프트와 다르다 — 이관 시점과 계약이 달라졌으므로 자동으로 fresh 세션을 만들지 않는다. 규칙을 교체 시점으로 되돌리거나 --new"
+    local handoff_tree cur_tree
+    handoff_tree="$(jq -r '.source_tree' "$WORK_DIR/worker-handoff.json")"
+    cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
+    [ "$handoff_tree" = "$cur_tree" ] \
+      || stop_need_user WORKER_SESSION_MISMATCH "세션 이관 시점 tree($handoff_tree)와 현재 작업 트리($cur_tree)가 다르다 — 이관 전제 위에서만 fresh 세션을 만든다. 변경을 확인한 뒤 그 tree 로 명시적으로 되돌리고 재실행하거나, 의도한 변경이면 사용자가 재시작 방식을 명시하라. 자동 원복 없음"
+    if [ "${_HANDOFF_VERIFIED_GEN:-}" != "$gen" ]; then   # run_unit·run_worker 가 각각 검증하므로 같은 세대는 한 번만 기록
+      _HANDOFF_VERIFIED_GEN="$gen"
+      log "세션 이관 검증 통과 (generation $gen, next unit $(jq -r '.next_unit' "$WORK_DIR/worker-handoff.json")) — fresh 세션으로 계약 문서·context 색인을 다시 받는다"
+    fi
+  elif [ "$gen" -gt 1 ]; then
+    # 교체된 세대인데 세대가 일치하는 이관 정보가 없다(handoff 삭제·변조) — 검증 없는 fresh 세션을 만들지 않는다
+    stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 generation $gen(교체된 세대)인데 그 세대의 worker-handoff.json 이 없다 — 이관 검증 없이 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고 --new 또는 사용자 정리 후 재실행"
+  fi
+}
 ensure_feature_worker_session() {
   local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
   local cli model effort fp legacy jsid
@@ -174,22 +233,8 @@ ensure_feature_worker_session() {
     elif jq -e '.session_bound==true' "$journal" >/dev/null 2>&1; then
       # 결속 기록은 있는데 세션 증거(ID·세션 파일)가 모두 없다 — 소실이지 '아직 미생성'이 아니다. 자동 fresh 금지.
       stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 session_bound=true 인데 세션 ID 도 CLI 세션 파일($sid_file)도 없다 — 수용된 세션이 소실됐다. 자동으로 fresh 세션을 만들지 않는다. 세션 파일을 복구하거나 --new(또는 사용자가 재시작 방식을 명시)"
-    elif [ -f "$WORK_DIR/worker-handoff.json" ] \
-         && [ "$(jq -r '.generation' "$WORK_DIR/worker-handoff.json" 2>/dev/null)" = "$(jq -r '.generation // 1' "$journal")" ]; then
-      # 세션 교체 직후의 fresh 세대 — 이관 정보(worker-handoff.json)가 스키마·계약 지문·현재 tree 와 일치해야만 새 세션을 만든다
-      worker_handoff_valid_file "$WORK_DIR/worker-handoff.json" \
-        || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 이 스키마(schemas/worker-handoff.schema.json)와 다르다 — 이관 정보를 신뢰할 수 없으므로 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고, --new 또는 사용자 정리 후 재실행"
-      [ "$(jq -r '.contract_fingerprint' "$WORK_DIR/worker-handoff.json")" = "$fp" ] \
-        || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 의 계약 지문이 현재 워커 규칙·프롬프트와 다르다 — 이관 시점과 계약이 달라졌으므로 자동으로 fresh 세션을 만들지 않는다. 규칙을 교체 시점으로 되돌리거나 --new"
-      local handoff_tree cur_tree
-      handoff_tree="$(jq -r '.source_tree' "$WORK_DIR/worker-handoff.json")"
-      cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
-      [ "$handoff_tree" = "$cur_tree" ] \
-        || stop_need_user WORKER_SESSION_MISMATCH "세션 이관 시점 tree($handoff_tree)와 현재 작업 트리($cur_tree)가 다르다 — 이관 전제 위에서만 fresh 세션을 만든다. 변경을 확인한 뒤 그 tree 로 명시적으로 되돌리고 재실행하거나, 의도한 변경이면 사용자가 재시작 방식을 명시하라. 자동 원복 없음"
-      log "세션 이관 검증 통과 (generation $(jq -r '.generation' "$WORK_DIR/worker-handoff.json"), next unit $(jq -r '.next_unit' "$WORK_DIR/worker-handoff.json")) — fresh 세션으로 계약 문서·context 색인을 다시 받는다"
-    elif [ "$(jq -r '.generation // 1' "$journal")" -gt 1 ]; then
-      # 교체된 세대인데 세대가 일치하는 이관 정보가 없다(handoff 삭제·변조) — 검증 없는 fresh 세션을 만들지 않는다
-      stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 generation $(jq -r '.generation' "$journal")(교체된 세대)인데 그 세대의 worker-handoff.json 이 없다 — 이관 검증 없이 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고 --new 또는 사용자 정리 후 재실행"
+    else
+      worker_handoff_gate_for_fresh "$journal" "$fp"
     fi
   fi
   if [ "$cli" = codex ]; then
@@ -204,6 +249,9 @@ ensure_feature_worker_session() {
     elif [ "$bound" != true ] && [ -f "$ledger" ]; then
       # accept(원장 확정)와 저널 갱신 사이에 죽은 경우 포함 — 두 기록의 불일치 위에서 조용히 resume 하지 않는다
       stop_need_user WORKER_SESSION_MISMATCH "codex 세션 원장($ledger)은 확정돼 있는데 worker-session.json 은 미결속(session_bound=false)이다 — 불일치 위에서 자동 resume 도 자동 fresh 도 하지 않는다. 원장과 저널을 확인한 뒤 사용자가 정리하고 재실행(--new 포함)"
+    elif [ "$bound" != true ]; then
+      # 미결속 + 원장 없음: generation 1 이면 아직 미생성, 교체된 세대면 handoff 검증을 통과해야 새 exec 를 연다
+      worker_handoff_gate_for_fresh "$journal" "$fp"
     fi
   fi
 }
@@ -269,6 +317,8 @@ run_worker() { # prompt-file [unit-dir]
   run_edit_role WORKER "$session" "$tag-$stamp" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$result" --allowedTools "Bash"
   worker_rc=$?
   set -e
+  # 세션 교체 판단이 '이 unit 의 이 호출' usage 행만 보도록 label 을 남긴다(usage.jsonl 의 마지막 WORKER 행 = 이전 unit 일 수 있다)
+  [ -z "$unit_dir" ] || printf '%s\n' "$tag-$stamp" > "$unit_dir/last-usage-label"
   # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 그 불확실성이 해소됐다.
   # 결과를 수용할지는 아래 게이트·가드(index·manifest·기준선·write-set·결과 계약·worker-outcome)가 따로 판정하고,
   # 게이트 중단 뒤 사용자가 복구하고 재실행하는 재호출은 같은 스레드에 보내는 '의도된 새 턴'이다 — marker 로 막지 않는다.
