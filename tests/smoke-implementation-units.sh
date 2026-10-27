@@ -16,7 +16,14 @@
 #   J. 모든 unit 완료 후에만 기존 전체 review → verify(TEST_CMD/LINT_CMD) → DONE 으로 진입한다
 #   K. implementation-units.json 변경 시 기존 impl consensus PASS 가 무효가 된다
 #   S. manifest 스키마·부분집합 검사
-#   T. claude 로 라우팅된 워커는 unit 마다 fresh 세션(--session-id)이다
+#   T. 워커는 Feature 당 단일 세션 — Unit 3개에 세션 ID 1개, 01 은 --session-id, 02/03 은 같은 ID 로 --resume (저널 worker-session.json 일치)
+#   I-S. targeted test 실패의 수정 호출도 같은 세션의 --resume 다
+#   U. 워커 응답 직후·targeted test 직전 중단 — 유효한 결과 + after-tree 일치면 CLI 재호출 없이 테스트부터 재개
+#   V. 세션 전제(모델·세션 파일) 불일치 → 자동 resume·자동 fresh 금지(모델 호출 0회), 복구 후에만 같은 세션 재개
+#   W. 예전 fresh-워커 실행 잔존 → WORKER_SESSION_MISSING(묵시적 마이그레이션 금지), worker-session.migrate 후에만 새 세션 재개
+#   R. 관측 토큰 임계치 도달 → unit 경계에서만 결정론적 세션 교체(worker-handoff.json 스키마·지문·tree 검증, test-fix 는 교체 지점 아님)
+#   Y. codex 워커도 Feature 당 세션 1 thread — thread_id 는 원장(.session-feature-worker.codex.json)에만, 저널은 session_bound 만;
+#      원장 소실(bound=true)·원장 존재+미결속(bound=false) 모두 WORKER_SESSION_MISMATCH 로 fail-closed(자동 fresh 금지)
 #   X. unit 간 rolling implementation context (별도 모델 호출 없음, 러너가 upsert/remove 를 (kind,subject) 키로 fold):
 #      X-A. Unit 01 PASS 후 Unit 02 워커 프롬프트에 01 의 확정 fact 가 들어간다
 #      X-B. Unit 01 targeted test 가 끝내 실패하면 01 의 context 는 확정되지 않는다
@@ -82,19 +89,26 @@ write_units
 cat > "$TMP/bin/mock-cli" <<'EOF'
 #!/usr/bin/env bash
 cli="$(basename "$0")"   # claude | codex — 출력 규약 선택에만 쓴다
-out=""; schema=""; prompt=""; session_flag=""; editing=0
+out=""; schema=""; prompt=""; session_flag=""; session_value=""; editing=0; resume_tid=""; want_help=0
 while [ "$#" -gt 0 ]; do case "$1" in
   exec|-p) shift;;
+  resume) if [ "$2" = "--help" ]; then want_help=1; else resume_tid="$2"; fi; shift 2;;   # codex: exec resume <thread-id> | exec resume --help
+  --help) want_help=1; shift;;
   -o) out="$2"; shift 2;;
   --output-schema) schema="$(cat "$2")"; shift 2;;            # codex: 스키마 파일 경로
   --json-schema) schema="$2"; shift 2;;                         # claude: 스키마 본문
   --sandbox) [ "$2" = workspace-write ] && editing=1; shift 2;;
   --permission-mode) editing=1; shift 2;;
-  --session-id|--resume) session_flag="$1"; shift 2;;
+  --session-id|--resume) session_flag="$1"; session_value="$2"; shift 2;;
   -m|-c|--model|--effort|--output-format|--tools|--allowedTools|--disallowedTools|--append-system-prompt) shift 2;;
   *) prompt="$1"; shift;;
 esac; done
-usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
+# codex_resume_cli_check 의 `exec resume --help` — resume 계약 플래그를 가진 도움말을 돌려준다
+[ "$want_help" = 1 ] && { echo "usage: codex exec resume [--json] [--output-schema] [--output-last-message] [--sandbox]"; exit 0; }
+usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":100,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'   # input 100: 세션 교체 임계치 사례(R)의 관측값 — 기본 임계치(150000)보다 작아 다른 사례에선 교체되지 않는다
+# 실제 codex exec --json 은 첫 이벤트로 thread.started 를 낸다 — 세션 원장(config.sh codex 어댑터)이 이 계약을 읽는다.
+# resume 호출이면 같은 thread id 를 돌려준다(codex_session_check_resumed 가 원장과 대조한다).
+[ "$cli" = codex ] && printf '{"type":"thread.started","thread_id":"%s"}\n' "${resume_tid:-mock-thread-$$}"
 emit() { # 결과 JSON 을 호출된 CLI 의 규약대로 돌려준다
   if [ "$cli" = codex ]; then
     if [ -n "$out" ]; then printf '%s\n' "$1" > "$out"; else printf '%s\n' "$1"; fi
@@ -130,7 +144,10 @@ kind=worker; printf '%s' "$prompt" | grep -qE 'targeted-test-[0-9]+\.log' && kin
 mkdir "$MOCK_STATE/worker.lock" 2>/dev/null || { echo "CONCURRENT WORKER" >> "$MOCK_LOG"; exit 9; }
 release() { rmdir "$MOCK_STATE/worker.lock"; }
 echo "$kind ${unit:-none}" >> "$MOCK_LOG"
-[ "$cli" = claude ] && [ "$kind" = worker ] && echo "claude-worker $unit $session_flag" >> "$MOCK_LOG.sessions"   # 사례 T 전용 계측 — 공용 로그를 오염시키지 않게 분리(워커가 claude 로 라우팅돼도 A/I 순서 비교 유지)
+[ "$cli" = claude ] && echo "claude-$kind $unit $session_flag $session_value" >> "$MOCK_LOG.sessions"   # 사례 I/T/U/V/W 전용 계측 — 공용 로그를 오염시키지 않게 분리(워커가 claude 로 라우팅돼도 A/I 순서 비교 유지)
+if [ "$cli" = codex ]; then   # 사례 Y 전용 계측
+  if [ -n "$resume_tid" ]; then echo "codex-$kind $unit resume $resume_tid" >> "$MOCK_LOG.sessions"; else echo "codex-$kind $unit new" >> "$MOCK_LOG.sessions"; fi
+fi
 sleep 0.2
 n="${unit%%-*}"
 # 프롬프트의 [IMPLEMENTATION CONTEXT] 블록을 보존해 사례 X 가 검사한다
@@ -184,6 +201,7 @@ reset_tree() { # 소스 파일을 기준선으로, unit 산출물·lock·체크�
   rm -f "$MOCK_STATE"/ctx-*.txt
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json .agent-work/feature-scope.lock.json .agent-work/worker-baseline.tree .agent-work/worker-baseline.guard.json \
     .agent-work/worker-result.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* \
+    .agent-work/worker-session.json .agent-work/worker-session.migrate* .agent-work/worker-handoff.json .agent-work/usage.jsonl \
     .agent-work/doc-gap-resume.json   # 사례 C 의 UNDECIDED 가 남긴 사용자 대기 체크포인트(tests/smoke-doc-gap.sh 가 검증) — 다음 사례는 pending 없이 시작
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }
@@ -333,6 +351,10 @@ rc="$(run_runner)"
   || fail "I: unit 01 흐름 불일치: $(seq_of '01-intake|test-01')"
 grep -q 'test-fix 01-intake' src/u01.txt || fail "I: test fix 변경이 반영되지 않음"
 grep -q 'UNIT-REVIEWER-CALLED\|^fixer ' "$MOCK_LOG" && fail "I: test fix 경로에서 리뷰어/수정자가 호출됨"
+# I-S: test-fix 는 새 세션이 아니라 같은 Feature Worker 세션의 resume 다 (워커 01 → fix 01 → 워커 02 → 워커 03, 세션 ID 1개)
+[ "$(awk '{print $1" "$3}' "$MOCK_LOG.sessions" | paste -sd'|' -)" = "claude-worker --session-id|claude-test-fix --resume|claude-worker --resume|claude-worker --resume" ] \
+  || fail "I-S: test-fix/후속 unit 이 같은 세션 resume 이 아님: $(cat "$MOCK_LOG.sessions")"
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 1 ] || fail "I-S: 세션 ID 가 하나가 아님: $(cat "$MOCK_LOG.sessions")"
 grep -q '01-note' "$MOCK_STATE/ctx-test-fix-01.txt" && fail "X-C: test-fix 프롬프트에 확정 전(pending) 01 fact 가 들어감"
 grep -q 'fixed-note' "$MOCK_STATE/ctx-worker-02.txt" || fail "X-C: fix 가 정정한 note 가 Unit 02 에 전달되지 않음"
 grep -q '01-note' "$MOCK_STATE/ctx-worker-02.txt" && fail "X-C: fix 이전 note 가 Unit 02 에 남음"
@@ -411,14 +433,142 @@ grep -q 'src/outside.txt' .agent-work/run-state.json || fail "S: 부분집합 �
 cp "$TMP/units.keep" .agent-work/implementation-units.json; fake_pass impl
 pass "S: manifest 스키마·중복·순번·금지 필드·부분집합 검증"
 
-# ===== 사례 T: claude 로 라우팅된 워커는 unit 마다 fresh 세션 (라우팅은 WORKER_CLI 로 명시 고정 — 모델 이름 추론에 의존하지 않는다) =====
+# ===== 사례 T: 워커는 Feature 당 단일 세션 — Unit 3개에 세션 ID 1개, 01 은 --session-id, 02/03 은 같은 ID 로 --resume =====
+# (라우팅은 WORKER_CLI 로 명시 고정 — 모델 이름 추론에 의존하지 않는다)
 reset_tree
 sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="claude-worker-x"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "T: exit 0 기대, 실제 $rc"; }
+sid="$(awk 'NR==1{print $4}' "$MOCK_LOG.sessions")"
+[ -n "$sid" ] || fail "T: 세션 ID 계측 없음: $(cat "$MOCK_LOG.sessions")"
 t_seq="$(paste -sd' ' "$MOCK_LOG.sessions")"
-[ "$t_seq" = "claude-worker 01-intake --session-id claude-worker 02-drop --session-id claude-worker 03-reassign --session-id" ] \
-  || fail "T: unit 워커가 fresh 세션이 아님: $t_seq"
-pass "T: claude 워커도 unit 마다 --session-id (fresh)"
+[ "$t_seq" = "claude-worker 01-intake --session-id $sid claude-worker 02-drop --resume $sid claude-worker 03-reassign --resume $sid" ] \
+  || fail "T: Feature 단일 세션(첫 unit --session-id, 이후 같은 ID --resume)이 아님: $t_seq"
+[ "$(cat .agent-work/.session-feature-worker)" = "$sid" ] || fail "T: .session-feature-worker 가 확정되지 않음"
+jq -e --arg sid "$sid" '.version==1 and .cli=="claude" and .model=="claude-worker-x" and .session_bound==true and .session_id==$sid and .last_completed_unit_id=="03-reassign" and (.contract_fingerprint|length)==64' \
+  .agent-work/worker-session.json >/dev/null || fail "T: worker-session.json 저널 계약 불일치: $(cat .agent-work/worker-session.json)"
+pass "T: Unit 3개 = Worker 세션 1개 (01 --session-id, 02/03 --resume 같은 ID), 저널 기록 일치"
+
+# ===== 사례 U: 워커 응답 직후·targeted test 직전 중단 → 유효한 결과 + after-tree 일치면 CLI 재호출 없이 테스트부터 재개 =====
+reset_tree; touch "$MOCK_STATE/crash-02"
+rc="$(run_runner)"
+[ "$rc" -eq 1 ] || { tail -20 "$TMP/run.log"; fail "U: 전제(02 호출 실패) exit 1 기대, 실제 $rc"; }
+[ -f .agent-work/units/01-intake/done.json ] && [ ! -f .agent-work/units/02-drop/done.json ] || fail "U: 전제 체크포인트 불일치"
+sid="$(cat .agent-work/.session-feature-worker)"
+# '02 워커 턴은 끝났는데 targeted test 전에 러너가 죽은' 상태를 만든다 — 유효한 DONE 결과 + after-tree == 현재 tree
+echo "worker 02-drop" >> src/u02.txt; echo "shared by 02-drop" >> src/shared.txt; mkdir -p src/gen; echo "gen by 02" > src/gen/new.txt
+printf '%s\n' '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u02.txt","technique":"t","basis":"b"}],"tests":[{"name":"u02","result":"PASS"}],"context_updates":{"upsert":[{"kind":"REUSE","subject":"InquiryStatus.isAssignable","note":"02-note"},{"kind":"INVARIANT","subject":"inquiry version check","note":"vl"}],"remove":[{"kind":"ENTRY_POINT","subject":"InquiryService.assignInitialAgent"}]}}' \
+  > .agent-work/units/02-drop/worker-result.json
+( source "$CFG"; snapshot_worktree_tree ) > .agent-work/units/02-drop/worker-after.tree || fail "U: after-tree 조작 실패"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "U: 재실행 exit 0 기대, 실제 $rc"; }
+grep -q '^worker 02-drop' "$MOCK_LOG" && fail "U: 유효 결과가 있는데 02 워커가 재호출됨"
+[ "$(paste -sd'|' "$MOCK_LOG")" = "test-02|worker 03-reassign|test-03|final-review|full-test|full-lint" ] \
+  || fail "U: 테스트부터 재개되지 않음: $(paste -sd'|' "$MOCK_LOG")"
+[ "$(paste -sd' ' "$MOCK_LOG.sessions")" = "claude-worker 03-reassign --resume $sid" ] || fail "U: 03 이 같은 세션을 resume 하지 않음: $(cat "$MOCK_LOG.sessions")"
+jq -e '.last_completed_unit_id=="03-reassign"' .agent-work/worker-session.json >/dev/null || fail "U: 저널 last_completed_unit_id 미갱신"
+grep -q '02-note' "$MOCK_STATE/ctx-worker-03.txt" || fail "U: 재개 확정된 02 context 가 03 에 전달되지 않음"
+pass "U: 유효 결과 + after-tree 일치 → CLI 재호출 없이 테스트만 재개, 이후 unit 은 같은 세션 resume"
+
+# ===== 사례 V: 세션 전제(모델·세션 파일) 불일치 → 자동 resume 금지 (워커·테스트 0회), 복구 후에만 같은 세션 재개 =====
+reset_tree; touch "$MOCK_STATE/crash-03"
+rc="$(run_runner)"; [ "$rc" -eq 1 ] || fail "V: 전제(03 중단) 실패"
+cp .agent-work/worker-session.json "$TMP/journal.keep"
+jq '.model="other-model"' "$TMP/journal.keep" > .agent-work/worker-session.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "V: exit 2/WORKER_SESSION_MISMATCH 기대, 실제 $rc/$(reason)"; }
+grep -q '^worker \|^test-' "$MOCK_LOG" && fail "V: 전제 불일치인데 워커/테스트가 호출됨: $(paste -sd'|' "$MOCK_LOG")"
+cp "$TMP/journal.keep" .agent-work/worker-session.json
+sid="$(jq -r '.session_id' "$TMP/journal.keep")"
+rm -f .agent-work/.session-feature-worker
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || fail "V: 세션 파일 소실인데 자동 fresh 세션으로 이어 감 ($rc/$(reason))"
+grep -q '^worker ' "$MOCK_LOG" && fail "V: 세션 파일 소실인데 워커가 호출됨"
+printf '%s' "$sid" > .agent-work/.session-feature-worker
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "V: 복구 후 재실행 exit 0 기대, 실제 $rc"; }
+[ "$(paste -sd' ' "$MOCK_LOG.sessions")" = "claude-worker 03-reassign --resume $sid" ] || fail "V: 복구 후 03 이 같은 세션으로 재개되지 않음: $(cat "$MOCK_LOG.sessions")"
+pass "V: 모델 불일치·세션 파일 소실 → WORKER_SESSION_MISMATCH(모델 호출 0회), 복구 후에만 같은 세션 재개"
+
+# ===== 사례 W: 예전 fresh-워커 실행 잔존 → 묵시적 단일 세션 마이그레이션 금지, 명시 마커 후에만 새 세션으로 재개 =====
+reset_tree; touch "$MOCK_STATE/crash-03"
+rc="$(run_runner)"; [ "$rc" -eq 1 ] || fail "W: 전제(03 중단) 실패"
+rm -f .agent-work/worker-session.json .agent-work/.session-feature-worker
+printf 'legacy' > .agent-work/.session-worker-unit-01-intake   # 예전 체계(unit 별 fresh 세션)의 흔적
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISSING ] || { tail -20 "$TMP/run.log"; fail "W: exit 2/WORKER_SESSION_MISSING 기대, 실제 $rc/$(reason)"; }
+grep -q '^worker \|^test-' "$MOCK_LOG" && fail "W: 묵시적 마이그레이션 금지인데 워커/테스트가 호출됨"
+touch .agent-work/worker-session.migrate   # 사용자의 명시적 마이그레이션 결정
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "W: 마커 후 재실행 exit 0 기대, 실제 $rc"; }
+[ "$(seq_of '^worker ')" = "worker 03-reassign" ] || fail "W: 마커 후 첫 미완료 unit(03)부터 재개되지 않음: $(seq_of '^worker ')"
+[ "$(awk '{print $1" "$2" "$3}' "$MOCK_LOG.sessions")" = "claude-worker 03-reassign --session-id" ] || fail "W: 마이그레이션이 새 세션(--session-id)으로 시작하지 않음: $(cat "$MOCK_LOG.sessions")"
+[ ! -f .agent-work/worker-session.migrate ] && ls .agent-work/worker-session.migrate.used.* >/dev/null 2>&1 || fail "W: 마이그레이션 마커가 1회 소비되지 않음"
+pass "W: 잔존 fresh-워커 세션 → WORKER_SESSION_MISSING(워커 0회), worker-session.migrate 후에만 새 세션으로 재개"
+
+# ===== 사례 R: 관측 토큰 임계치 도달 → unit 경계에서만 결정론적 세션 교체 (handoff 검증, test-fix 는 교체 지점 아님) =====
+reset_tree
+sed -i.bak 's/^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*/WORKER_SESSION_ROTATE_INPUT_TOKENS=1/' "$CFG" && rm -f "$CFG.bak"
+touch "$MOCK_STATE/fail-test-01"   # unit 01 에 test-fix 를 끼워 넣는다 — 교체는 unit 완료 뒤에만, fix 는 같은 세션이어야 한다
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "R: exit 0 기대, 실제 $rc"; }
+sidA="$(awk 'NR==1{print $4}' "$MOCK_LOG.sessions")"; sidB="$(awk 'NR==3{print $4}' "$MOCK_LOG.sessions")"; sidC="$(awk 'NR==4{print $4}' "$MOCK_LOG.sessions")"
+[ "$(paste -sd' ' "$MOCK_LOG.sessions")" = "claude-worker 01-intake --session-id $sidA claude-test-fix 01-intake --resume $sidA claude-worker 02-drop --session-id $sidB claude-worker 03-reassign --session-id $sidC" ] \
+  || fail "R: 교체 시퀀스 불일치(기대: 01→fix 같은 세션, 02/03 은 unit 경계마다 fresh): $(cat "$MOCK_LOG.sessions")"
+[ "$sidA" != "$sidB" ] && [ "$sidB" != "$sidC" ] && [ "$sidA" != "$sidC" ] || fail "R: 세대별 세션 ID 가 구분되지 않음"
+[ -f .agent-work/.session-feature-worker.gen1 ] && [ -f .agent-work/.session-feature-worker.gen2 ] || fail "R: 은퇴 세션 파일이 세대 접미사로 보존되지 않음"
+jq -e --arg sid "$sidC" '.generation==3 and .session_bound==true and .session_id==$sid and .last_completed_unit_id=="03-reassign"' .agent-work/worker-session.json >/dev/null \
+  || fail "R: 저널 세대·세션 ID 불일치: $(cat .agent-work/worker-session.json)"
+jq -e '.version==1 and .generation==3 and .last_completed_unit=="02-drop" and .next_unit=="03-reassign" and (.source_tree|test("^[0-9a-f]{40,64}$")) and .context_file==".agent-work/implementation-context.json"' \
+  .agent-work/worker-handoff.json >/dev/null || fail "R: worker-handoff.json 계약 불일치: $(cat .agent-work/worker-handoff.json)"
+[ -f .claude/skills/feature/schemas/worker-handoff.schema.json ] || fail "R: worker-handoff 스키마 파일 없음"
+# 교체 직후(세대 ≠ 이관 정보) 상태의 변조 — handoff 의 tree 가 현재와 다르면 fresh 세션을 만들지 않는다
+rm -rf .agent-work/units/03-reassign .agent-work/worker-result.json .agent-work/approved.fingerprint .agent-work/review-impl.json .agent-work/.session-feature-worker
+jq '.session_id=null' .agent-work/worker-session.json > "$TMP/j.tmp" && mv "$TMP/j.tmp" .agent-work/worker-session.json
+jq '.source_tree="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"' .agent-work/worker-handoff.json > "$TMP/h.tmp" && mv "$TMP/h.tmp" .agent-work/worker-handoff.json
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "R: 이관 tree 불일치가 막히지 않음 ($rc/$(reason))"; }
+grep -q '^worker ' "$MOCK_LOG" && fail "R: 이관 검증 실패인데 워커가 호출됨"
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-150000}"|' "$CFG" && rm -f "$CFG.bak"
+pass "R: 임계치 도달 시 unit 경계에서만 세션 교체(fix 는 같은 세션), handoff 스키마·tree 검증, 변조 시 fresh 세션 거부"
+
+# ===== 사례 Y: codex 워커도 Feature 당 세션 1개 — thread_id 는 원장에만, 저널은 session_bound 만 (불변식 fail-closed) =====
+reset_tree
+sed -i.bak 's/^WORKER_CLI=.*/WORKER_CLI="codex"/' "$CFG" && rm -f "$CFG.bak"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "Y: exit 0 기대, 실제 $rc"; }
+LEDGER=.agent-work/.session-feature-worker.codex.json
+[ -f "$LEDGER" ] || fail "Y: codex 세션 원장이 확정되지 않음"
+tid="$(jq -r '.thread_id' "$LEDGER")"
+y_seq="$(grep '^codex-worker' "$MOCK_LOG.sessions" | paste -sd'|' -)"
+[ "$y_seq" = "codex-worker 01-intake new|codex-worker 02-drop resume $tid|codex-worker 03-reassign resume $tid" ] \
+  || fail "Y: codex 워커가 같은 thread 를 resume 하지 않음(기대 tid $tid): $y_seq"
+jq -e '.cli=="codex" and .session_bound==true and .session_id==null' .agent-work/worker-session.json >/dev/null \
+  || fail "Y: 저널은 session_bound 만 기록해야 함(thread_id 복사 금지): $(cat .agent-work/worker-session.json)"
+grep -q "$tid" .agent-work/worker-session.json && fail "Y: codex thread_id 가 저널에 중복 저장됨"
+# 03 재실행 상태를 만든다(마지막 호출은 수용 완료 — resume marker 없음)
+prep_rerun_03() {
+  rm -rf .agent-work/units/03-reassign .agent-work/worker-result.json .agent-work/approved.fingerprint .agent-work/review-impl.json
+  printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
+}
+# 불변식 1: session_bound=true 인데 원장 소실 → '미생성'과 구별해 중단 (자동 fresh 금지)
+prep_rerun_03; cp "$LEDGER" "$TMP/ledger.keep"; rm -f "$LEDGER"
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "Y: 원장 소실이 막히지 않음 ($rc/$(reason))"; }
+grep -q '^worker \|^test-' "$MOCK_LOG" && fail "Y: 원장 소실인데 워커/테스트가 호출됨"
+# 불변식 2: 원장은 확정돼 있는데 저널이 미결속(session_bound=false) → 불일치 중단
+cp "$TMP/ledger.keep" "$LEDGER"
+jq '.session_bound=false' .agent-work/worker-session.json > "$TMP/j.tmp" && mv "$TMP/j.tmp" .agent-work/worker-session.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] || { tail -20 "$TMP/run.log"; fail "Y: 원장+미결속 불일치가 막히지 않음 ($rc/$(reason))"; }
+grep -q '^worker ' "$MOCK_LOG" && fail "Y: 불일치인데 워커가 호출됨"
+# 복구(결속 기록 원복) 후에만 같은 thread 로 재개
+jq '.session_bound=true' .agent-work/worker-session.json > "$TMP/j.tmp" && mv "$TMP/j.tmp" .agent-work/worker-session.json
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "Y: 복구 후 재실행 exit 0 기대, 실제 $rc"; }
+[ "$(grep '^codex-worker' "$MOCK_LOG.sessions")" = "codex-worker 03-reassign resume $tid" ] \
+  || fail "Y: 복구 후 03 이 같은 thread 로 재개되지 않음: $(grep '^codex-worker' "$MOCK_LOG.sessions")"
+pass "Y: codex 워커 세션 1 thread(원장에만 저장, 저널은 session_bound), 원장 소실·결속 불일치 → 중단(자동 fresh 금지), 복구 후 같은 thread 재개"
 
 echo "[SMOKE] 전부 통과 — 임시 저장소: $TMP (필요 없으면 직접 정리)"

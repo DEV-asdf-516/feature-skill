@@ -28,7 +28,7 @@ flowchart TD
     P0["Phase 0 · 오케스트레이터\nfeature-run.sh --new → 요구 기록(request.md)\n+ 설계 초안(design.md). 모호하면 사용자에게 질문"] --> P1
     P1["설계 합의 (러너)\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
     P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED)\n+ implementation-units.json(기능 단위 분할) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
-    P2["구현 (러너) — 구현 단위 직렬 실행\nunit 마다: fresh 워커(material contract 는 그대로, local expression 은 워커가 선택)\n→ targeted test(실패 시 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음"] --> P3
+    P2["구현 (러너) — 구현 단위 직렬 실행\nFeature 당 단일 Worker 세션(--session-id → --resume)이 unit 턴을 이어 감\nunit 턴마다: 구현(material contract 는 그대로, local expression 은 워커가 선택)\n→ targeted test(실패 시 같은 세션에 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음. 다음 unit 시작 권한은 러너만"] --> P3
     P3["리뷰 수렴 (러너)\n리뷰어 게이트(읽기 전용) → 수정자는 FIX_CODE 만\nRound 2 는 종결 검토. APPROVE + 이슈 0건까지"] --> P4
     P3 -.DOC_GAP → 사용자 결정 → review-gap 워커 → 리뷰.-> ESC
     P4["최종 검증 (러너)\n승인 지문 → TEST_CMD/LINT_CMD → 지문 재확인"] -->|통과| DONE["DONE → 오케스트레이터 보고\n(커밋은 사용자 지시 시 수정자에게 위임)"]
@@ -95,7 +95,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 큰 feature 를 워커 한 번에 맡기면 후반부로 갈수록 conventions 가 밀린다. 기존 utility/predicate 재구현, `a == X || a == Y || a == Z` 나열, 불필요한 if/else, 기존 책임 배치와 다른 구현이 누적된다. 작은 기능 범위에서는 워커가 컨벤션을 잘 따르므로 **설계는 feature 전체를 한 번만 합의하고 코드 작성만 unit 크기로 자른다.** 워커 모델은 그대로 둔다.
 
 - `implementation-units.json` 은 implementation.md/approach.md 가 확정된 뒤 그 범위를 **기능 단위**(접수+담당자 지정 / Drop 요청+상태 조회 / …)로 자른 것이다. 레이어(Repository/Service/Controller)로 나누지 않는다. 같은 파일을 여러 unit 이 순차 수정해도 된다. impl 합의의 입력이라 바꾸면 impl PASS 가 무효가 된다. 워커 진입 시에는 `implementation-units.lock.json` 으로 확정된다(원본≠lock 이면 사람에게).
-- 러너는 배열 순서대로 직렬로만 돈다. unit 마다 fresh 워커(이전 unit 의 대화 문맥 없이 worktree 의 코드만 이어받는다) → targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다. 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. 바뀐 것은 워커 호출 1회가 unit 별 여러 회가 된 것뿐이다. unit scope 는 전체 범위의 부분집합이다. write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 넣지 않았다.
+- 러너는 배열 순서대로 직렬로만 돈다. Feature 전체를 **하나의 Worker 세션**(claude 라우팅: 최초 `--session-id`, 이후 `--resume`; 저널 `worker-session.json` 이 cli·모델·effort·규칙 지문·세션 ID 를 고정 — 불일치 시 자동 resume·자동 fresh 없이 중단)이 unit 턴으로 이어 간다 → unit 턴마다 targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 같은 세션에 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다. 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. unit scope 는 전체 범위의 부분집합이다. write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 넣지 않았다. 세션이 임계치(`WORKER_SESSION_ROTATE_INPUT_TOKENS`, 관측 토큰 기준)에 닿으면 unit 완료 직후에만 `worker-handoff.json`(스키마·계약 지문·git tree 검증)을 거쳐 fresh 세대로 교체한다 — 논리적 워커는 하나, 물리적 CLI 세션만 결정론적으로 바뀐다.
 - 재실행은 첫 미완료 unit 부터(완료 체크포인트 + spec 지문 대조). 모든 unit 완료 후 **기존 전체 review 와 verify(TEST_CMD/LINT_CMD)를 그대로** 수행한다. unit gate 는 조기 품질 장치이고 최종 승인은 이 전체 review 가 한다.
 
 ## 신뢰성 장치
@@ -123,7 +123,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
   scope 없는 옛 형식 줄은 러너가 LLM 호출 전에 `DECISION_SCOPE_REQUIRED` 로 멈추고 사람이 태그를 붙인다(자동 추정 없음). 지문 의미가 바뀌면 `CONSENSUS_CHECKPOINT_VERSION` 을 올린다.
 - **커밋 통제**: 워커는 커밋·푸시 불가(claude 훅 + codex 훅 이중 차단). 커밋은 사용자가 요청했을 때만
   오케스트레이터가 1회용 `ALLOW_COMMIT` 플래그를 만들고 수정자에게 위임한다.
-- **토큰 절약**: 역할별 세션 재사용(`--session-id`/`--resume`)으로 라운드 간 저장소 재탐색을 없애고
+- **토큰 절약**: 역할별 세션 재사용(claude `--session-id`/`--resume`, codex `exec resume`)으로 라운드 간 저장소 재탐색을 없애고
   프롬프트 캐시를 살린다. 사용량은 `usage.jsonl`에 CLI invocation 한 번당 행 1개로 기록한다(아래 "usage telemetry").
 - **역할별 규칙 전달**: 필수 `core_rules.md`는 워커에게만 주입하고 선택 `conventions.md`는 디자이너·검증자·워커·리뷰어·수정자 모두에게 주입.
 - **실시간 관찰**: 두 루프의 판정, 상세 이슈, 참고사항, 디자이너 반영 결정을 `.agent-work/live.log`에 누적. 러너가 `feature-live` 뷰어 창을 스스로 연다(이미 열려 있으면 `.agent-work/.feature-live.lock/viewer.pid` 로 감지해 다시 열지 않음). 오케스트레이터는 직접 실행하지 않는다. 수동 관찰은 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"`.
@@ -289,8 +289,9 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 
 `usage.jsonl` 한 행 = CLI invocation 한 번의 관측 telemetry. 세션 누계가 아니며, 같은 Claude 세션을 `--resume`해도 행은 invocation 별로 기록한다.
 writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·가격 추정을 하지 않는다. 집계는 그 위에서 한다(`usage_summary` 또는 아래 jq).
-Claude 세션은 stage/attempt 단위다(`designer-design`/`designer-impl`, `reviewer-a01`, `fixer-a01`, `worker-unit-<id>`). 합의 루프의 검증자만 호출마다 fresh 세션이다(`validator-<target>-round-NN-<invocation id>`).
-같은 stage/attempt 안의 라운드·재시도만 `--resume` 하고 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
+세션은 key 로 관리하고 CLI 와 독립이다 — stage/attempt 단위(`designer-design`/`designer-impl`, `reviewer-a01`, `fixer-a01`)와 Feature 단위(워커 — `feature-worker` 세션 하나를 unit 턴으로 이어 쓴다, `worker-session.json` 저널). 합의 루프의 검증자만 호출마다 fresh 세션이다(`validator-<target>-round-NN-<invocation id>`).
+같은 key 안의 라운드·재시도만 잇고(claude `--resume` / codex `exec resume <thread_id>` — 원장 `.session-<key>.codex.json`) 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
+codex thread id 는 최초 실행 이벤트 JSONL 의 `thread.started` 에서만 얻으며, resume 실패·원장 불일치·수용 미확인(`.resume-pending.json` marker)은 새 세션으로 조용히 대체하지 않고 중단한다.
 
 ```json
 {"invocation_id":"…","label":"impl-review-a01-round-01","role":"REVIEWER","cli":"claude","model":"claude-sonnet-5","session":"…",

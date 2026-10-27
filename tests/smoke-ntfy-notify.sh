@@ -70,6 +70,8 @@ while [ "$#" -gt 0 ]; do case "$1" in
   *) prompt="$1"; shift;;
 esac; done
 usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
+# 실제 codex exec --json 은 첫 이벤트로 thread.started 를 낸다 — 세션 원장(config.sh codex 어댑터)이 이 계약을 읽는다
+[ "$cli" = codex ] && printf '{"type":"thread.started","thread_id":"mock-thread-%s"}\n' "$$"
 emit() { if [ "$cli" = codex ]; then if [ -n "$out" ]; then printf '%s\n' "$1" > "$out"; else printf '%s\n' "$1"; fi; else printf '{"structured_output":%s,%s}\n' "$1" "$usage"; fi; }
 case "$schema" in
   *'"blocking_issues"'*) emit "{\"schema_version\":$MOCK_VALIDATOR_CONTRACT,\"verdict\":\"PASS\",\"blocking_issues\":[]}"; exit 0;;
@@ -108,7 +110,8 @@ fake_pass design; fake_pass impl
 
 run_runner() { # [NTFY_*=... ...] → exit code, 로그 $TMP/run.log. mock curl·uname 스텁은 항상 적용
   : > "$MOCK_LOG"
-  env PATH="$TMP/bin:$PATH" NTFY_CURL_BIN="$TMP/bin/mock-curl" "$@" bash "$RUN" > "$TMP/run.log" 2>&1
+  # 호출자 셸의 실제 NTFY_* 설정이 새어 들지 않게 기본값을 비워 밀폐한다 — 사례별 "$@" 가 뒤에서 덮어쓴다
+  env PATH="$TMP/bin:$PATH" NTFY_CURL_BIN="$TMP/bin/mock-curl" NTFY_URL=https://ntfy.sh NTFY_TOPIC= NTFY_TOKEN= NTFY_TIMEOUT=5 "$@" bash "$RUN" > "$TMP/run.log" 2>&1
   echo $?
 }
 status() { jq -r '.status' .agent-work/run-state.json; }
@@ -119,7 +122,8 @@ reset_tree() { # 소스·산출물을 처음 상태로 (테스트 환경 정리)
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json \
     .agent-work/feature-scope.lock.json .agent-work/worker-baseline.tree .agent-work/worker-result.json \
     .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* \
-    .agent-work/.session-* .agent-work/doc-gap-resume.json .agent-work/notify-done.sent .agent-work/live.log
+    .agent-work/.session-* .agent-work/worker-session.json .agent-work/worker-session.migrate* .agent-work/worker-handoff.json \
+    .agent-work/doc-gap-resume.json .agent-work/notify-done.sent .agent-work/live.log
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }
 

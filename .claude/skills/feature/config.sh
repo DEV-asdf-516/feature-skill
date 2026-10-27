@@ -69,6 +69,11 @@ REVIEW_CHECKPOINT_VERSION=2
 MAX_SPEC_ROUNDS=1        # 명세 합의 최대 라운드
 MAX_IMPL_ROUNDS=1        # 구현 리뷰-수정 라운드 (리뷰는 +1회 — 마지막 수정도 종결 검토). 1 = Reviewer 2 + Fixer 1, 첫 수정으로 안 풀리면 사용자에게
 MAX_TEST_RETRIES=1       # 최종 테스트 실패 시 워커 재수정 허용 횟수
+# Feature Worker 세션 교체 임계치(claude 라우팅 전용). 논리적 워커는 하나지만, unit 완료(targeted test PASS) 직후에
+# 마지막 워커 invocation 의 '관측' 입력 토큰(usage.jsonl 의 input_effective = uncached+cache_read+cache_write)이 이 값 이상이면
+# worker-handoff.json(스키마·계약 지문·git tree 검증)을 거쳐 다음 unit 부터 fresh CLI 세션으로 교체한다(scripts/worker-invoke.sh).
+# 교체 시점은 unit 경계뿐이고, telemetry 가 없으면 임의 추정 없이 세션을 유지하며, 0 이면 교체하지 않는다.
+WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-150000}"
 
 # --- 산출물 디렉터리 (저장소 루트 기준 상대 경로) ---
 WORK_DIR=".agent-work"
@@ -219,13 +224,23 @@ snapshot_worktree_tree() {
   rm -f "$idx"
 }
 
-# 세션 재사용: 첫 호출은 --session-id <새 UUID>, 이후엔 --resume.
-# 세션 이름은 역할이 아니라 stage/attempt 단위다(designer-design, reviewer-a01, fixer-a01, worker-unit-<id>).
-# 예외: 합의 루프의 검증자는 호출마다 고유한 이름(validator-<target>-round-NN-<invocation id>)을 받아 항상 fresh 다 — 수정 뒤 재검증이 이전 판정 대화에 anchoring 되지 않게 한다.
+# =============================================================
+# CLI 독립 세션 정책 — 세션의 수명은 역할·실행 경계(session key)가 정하고, Claude/Codex CLI 는 그 정책을 수행하는 어댑터다.
+# 세션 key 는 역할이 아니라 실행 경계 단위다: stage/attempt(designer-design, reviewer-a01, fixer-a01) 또는 Feature(워커: feature-worker —
+# scripts/worker-invoke.sh 가 unit·test-fix·worker-fix·review-gap 전부에 같은 세션을 쓰고 worker-session.json 저널로 전제를 고정한다).
+# 모델·CLI 이름으로 정책을 추론하지 않는다 — 같은 key 로 두 번째 호출이 오면 그 key 의 '수용된' 세션을 잇고, key 가 바뀌면 fresh 다.
+# 예외: 합의 루프의 검증자는 호출마다 고유한 이름(validator-<target>-round-NN-<invocation id>)을 받아 항상 fresh 다 — 수정 뒤 재검증이 이전 판정 대화에 anchoring 되지 않게 한다. 도구가 resume 을 지원해도 의도적으로 재사용하지 않는다.
 # 같은 stage/attempt 안의 라운드·재시도만 이어가고(저장소 재탐색 없이 프롬프트 캐시 활용), 다른 stage/attempt 로는
 # 대화 문맥을 넘기지 않는다 — 상태 전달은 문서·JSON·체크포인트·지문으로만 한다. 넓은 세션은 turn 마다 누적 문맥을
-# 통째로 cache read 하므로 비용이 stage 수에 비례해 커진다.
-# 새 피처 시작 시 $WORK_DIR/.session-* 를 지워야 이전 피처 문맥이 섞이지 않는다.
+# 통째로 cache read 하므로 비용이 stage 수에 비례해 커진다. 이전 대화는 사실 참고일 뿐이다 —
+# 평가·승인 판정은 항상 코드·문서·JSON·지문으로 하며 세션에 쌓인 발화는 승인 증거가 아니다.
+# 저장 형식(두 어댑터, 같은 key 공간):
+#   claude: $WORK_DIR/.session-<key>        평문 session UUID. 첫 호출 --session-id <새 UUID>(.new 스테이징), 이후 --resume.
+#   codex : $WORK_DIR/.session-<key>.codex.json  세션 원장 {version,key,role,cli,model,effort,contract_version,thread_id,...}.
+#           thread_id 는 최초 실행 이벤트 JSONL 의 thread.started 에서만 취득한다(--last·최근 세션·역할명 자동 검색 금지).
+# 확정 시점: 두 어댑터 모두 invocation 이 유효한 결과를 내면 스테이징(.new)까지만 하고, 호출자가 결과를 수용
+# (role_session_accept — 스키마·계약·일관성 게이트 통과 뒤)해야 확정된다. 수용되지 않은 세션은 다음 실행에서 잇지 않는다.
+# 새 피처 시작 시 $WORK_DIR/.session-* 를 지워야 이전 피처 문맥이 섞이지 않는다(원장·marker 도 같은 glob 에 걸린다).
 claude_session_args() {
   local role="$1"
   local id_file="$WORK_DIR/.session-$role"
@@ -244,6 +259,147 @@ claude_session_args() {
 claude_session_commit() {
   local id_file="$WORK_DIR/.session-$1"
   if [ -f "$id_file.new" ]; then mv "$id_file.new" "$id_file"; fi
+}
+
+# 이 key 의 '확정된' 세션이 있는가 (claude 평문 파일 또는 codex 원장). 다른 스크립트가 "후속 턴인가"를 판단할 때 이 predicate 만 쓴다 —
+# 저장 형식(.session-<key> / .session-<key>.codex.json)은 어댑터 내부 사정이다.
+session_exists() { # key
+  [ -f "$WORK_DIR/.session-$1" ] || [ -f "$WORK_DIR/.session-$1.codex.json" ]
+}
+
+# 역할이 결속되는 계약 버전 — 원장의 세션이 '어느 계약 아래의 대화'인지 기록·대조한다. 계약이 바뀌면 이전 세션은 무효다.
+role_contract_version() { # ROLE → 버전 문자열(계약 없는 역할은 빈 값)
+  case "$1" in
+    VALIDATOR) printf '%s' "$VALIDATOR_CONTRACT_VERSION";;
+    REVIEWER|FIXER) printf '%s' "$REVIEWER_CONTRACT_VERSION";;   # 리뷰어 계약은 수정자 프롬프트까지 포함한다(config.sh 리뷰어 계약 버전 주석)
+    *) printf '';;
+  esac
+}
+
+# ---------- codex 세션 어댑터 ----------
+CODEX_SESSION_LEDGER_VERSION=1
+codex_session_ledger() { printf '%s' "$WORK_DIR/.session-$1.codex.json"; }
+# resume 중복 전송 방지 marker: resume 호출 직전에 기록하고 호출자가 결과를 수용해야 지운다.
+# 호출이 스레드에 메시지를 추가했지만 결과가 수용되지 않은 채 끝나면 marker 가 남아, 다음 실행이 같은 스레드에
+# 프롬프트를 무작정 재전송(리뷰 중복·상태 오독)하는 것을 모델 호출 0회로 막는다 — 자동 resume 도 자동 fresh 도 하지 않는다.
+codex_resume_marker() { printf '%s' "$WORK_DIR/.session-$1.resume-pending.json"; }
+codex_resume_marker_write() { # key invocation_id label
+  local marker; marker="$(codex_resume_marker "$1")"
+  jq -n --arg key "$1" --arg inv "$2" --arg label "$3" --arg now "$(date '+%FT%T%z')" \
+    '{key:$key, invocation_id:$inv, label:$label, recorded_at:$now}' > "$marker.tmp" && mv "$marker.tmp" "$marker"
+}
+
+# 설치된 codex 가 resume 계약(exec resume + --json/--output-schema/-o)을 지원하는지 — 미지원이면 스키마·출력 계약을
+# 조용히 포기하거나 새 세션으로 대체하지 않고 ENV_ERROR 로 중단한다(CLI 업그레이드가 복구 경로).
+# resume 서브커맨드에 --sandbox 플래그가 없는 버전(0.159.x)은 -c sandbox_mode=... 로 같은 샌드박스 의미를 전달한다(플래그가 있으면 둘 다).
+CODEX_RESUME_CHECKED=""
+CODEX_RESUME_HAS_SANDBOX_FLAG=0
+codex_resume_cli_check() {
+  local help opt
+  [ -z "$CODEX_RESUME_CHECKED" ] || return "$CODEX_RESUME_CHECKED"
+  if ! help="$("$CODEX_BIN" exec resume --help 2>&1)"; then
+    echo "[FAIL] ENV_ERROR: '$CODEX_BIN exec resume --help' 실패 — 설치된 codex 가 exec resume 을 지원하지 않음. 새 세션으로 자동 전환하지 않는다(CLI 업그레이드 또는 중단)." >&2
+    CODEX_RESUME_CHECKED=1; return 1
+  fi
+  for opt in --json --output-schema --output-last-message; do
+    case "$help" in *"$opt"*) ;; *)
+      echo "[FAIL] ENV_ERROR: 설치된 codex exec resume 이 '$opt' 를 지원하지 않음 — 스키마/출력 계약 없이 진행하지 않는다." >&2
+      CODEX_RESUME_CHECKED=1; return 1;;
+    esac
+  done
+  case "$help" in *"--sandbox"*) CODEX_RESUME_HAS_SANDBOX_FLAG=1;; esac
+  CODEX_RESUME_CHECKED=0
+}
+
+codex_events_thread_ids() { # events.jsonl → thread.started 의 고유 thread id 목록(한 줄 하나, 깨진 줄 무시)
+  jq -R -r 'fromjson? | select(type=="object" and .type=="thread.started") | (.thread_id // empty)' "$1" 2>/dev/null | sort -u
+}
+
+# 호출 전 결정: 같은 key 의 '수용된' 원장이 있으면 resume, 없으면 new. 원장이 현재 role 설정(model/effort/계약/프로젝트 루트)과
+# 다르면 자동으로 fresh 로 돌아가지 않고 명시적으로 중단한다 — attempt/계약이 바뀌면 호출자가 새 key 를 쓰는 것이 정상 경로다.
+# 전역 출력: CODEX_SESSION_MODE(new|resume), CODEX_SESSION_ID.
+codex_session_begin() { # ROLE key model effort
+  local role="$1" key="$2" model="$3" effort="$4" ledger marker
+  ledger="$(codex_session_ledger "$key")"; marker="$(codex_resume_marker "$key")"
+  CODEX_SESSION_MODE=new; CODEX_SESSION_ID=""
+  if [ -f "$marker" ]; then
+    echo "[STOP] SESSION_RESUME_UNCERTAIN: 직전 codex resume 호출($key)의 결과 수용이 확인되지 않음 — 같은 스레드에 프롬프트를 재전송하지 않는다. 이벤트 로그·결과 파일로 중복 여부를 확인한 뒤 $marker 를 삭제하고 재실행(자동 resume·자동 fresh 없음)." >&2
+    return 1
+  fi
+  # 같은 key 가 다른 CLI(claude 평문 세션)에 결속돼 있으면 조용히 fresh codex 세션으로 돌지 않는다 — CLI 변경은 새 key(새 attempt/--new)가 정상 경로.
+  if [ -f "$WORK_DIR/.session-$key" ]; then
+    echo "[FAIL] SESSION_CLI_MISMATCH: key '$key' 는 claude 세션($WORK_DIR/.session-$key)에 결속돼 있는데 지금은 codex 로 라우팅된다($role) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
+    return 1
+  fi
+  # 이전 invocation 이 스테이징만 하고 수용되지 못한 원장(.new)은 이번 호출의 것이 아니다 — 이번 스테이징이 생략돼도(thread id 미확정)
+  # 호출자의 accept 가 옛 .new 를 확정하는 일이 없도록 호출 시작 시 제거한다(스테이징은 invocation 전용).
+  rm -f "$ledger.new"
+  [ -f "$ledger" ] || return 0
+  jq -e --argjson v "$CODEX_SESSION_LEDGER_VERSION" --arg key "$key" --arg role "$role" \
+    '.version==$v and .key==$key and .role==$role and .cli=="codex" and (.thread_id|type=="string" and length>0)' "$ledger" >/dev/null 2>&1 \
+    || { echo "[FAIL] codex 세션 원장이 깨졌거나 key/role 이 다름: $ledger — 자동 새 세션 전환 없이 중단(원장 확인 후 삭제·재실행)." >&2; return 1; }
+  jq -e --arg model "$model" --arg effort "$effort" --arg cv "$(role_contract_version "$role")" --arg root "$PROJECT_ROOT" \
+    '.model==$model and .effort==$effort and ((.contract_version // "")|tostring)==$cv and .project_root==$root' "$ledger" >/dev/null 2>&1 \
+    || { echo "[FAIL] SESSION_LEDGER_MISMATCH: $key 원장(model/effort/contract/project_root)이 현재 설정과 다름 — 설정을 되돌리거나 새 attempt/단계로 시작한다(자동 resume·자동 fresh 없음)." >&2; return 1; }
+  CODEX_SESSION_MODE=resume
+  CODEX_SESSION_ID="$(jq -r '.thread_id' "$ledger")"
+}
+
+# 신규 세션 스테이징: 이번 invocation 의 이벤트 JSONL 에서 thread.started.thread_id 가 정확히 하나일 때만 원장 .new 를 쓴다.
+# 0개·복수는 세션 확정 금지(1) — 호출부는 WARN 후 세션 없이 진행하고, 세션 재사용이 계약인 호출자의 role_session_accept 가 명시적 오류를 낸다.
+codex_session_stage() { # ROLE key model effort events_jsonl
+  local role="$1" key="$2" model="$3" effort="$4" events="$5" ids n ledger
+  ids="$(codex_events_thread_ids "$events")"
+  n="$(printf '%s\n' "$ids" | grep -c . || true)"
+  if [ "$n" -ne 1 ]; then
+    echo "[FAIL] codex 이벤트 JSONL 의 thread.started.thread_id 가 유일하지 않음(개수 $n): $events — 세션 확정 금지." >&2
+    return 1
+  fi
+  ledger="$(codex_session_ledger "$key")"
+  jq -n --argjson v "$CODEX_SESSION_LEDGER_VERSION" --arg key "$key" --arg role "$role" --arg model "$model" --arg effort "$effort" \
+    --arg cv "$(role_contract_version "$role")" --arg root "$PROJECT_ROOT" --arg tid "$ids" --arg now "$(date '+%FT%T%z')" \
+    '{version:$v, key:$key, role:$role, cli:"codex", model:$model, effort:$effort, contract_version:$cv, project_root:$root,
+      thread_id:$tid, created_at:$now, last_accepted_label:"", last_accepted_at:""}' \
+    > "$ledger.new.tmp" && mv "$ledger.new.tmp" "$ledger.new"
+}
+
+# 재개 호출 대조: 이번 invocation 의 이벤트에 thread id 가 보이면 원장의 ID 와 같아야 한다(복수·불일치 1). 없으면 통과(확인 가능할 때만 대조).
+codex_session_check_resumed() { # key events_jsonl
+  local ids n
+  ids="$(codex_events_thread_ids "$2")"
+  n="$(printf '%s\n' "$ids" | grep -c . || true)"
+  [ "$n" -eq 0 ] && return 0
+  [ "$n" -eq 1 ] && [ "$ids" = "$(jq -r '.thread_id' "$(codex_session_ledger "$1")")" ]
+}
+
+# claude 어댑터 진입 가드: 같은 key 가 codex 원장에 결속돼 있으면 조용히 fresh claude 세션을 만들지 않는다(SESSION_CLI_MISMATCH).
+# codex 쪽 대칭 검사는 codex_session_begin 안에 있다. 거부된 스테이징(.new)·pending marker 는 수용된 세션이 아니므로 보지 않는다
+# (marker 는 확정 원장이 있을 때만 생기므로 원장 검사가 함께 덮는다).
+claude_session_cli_guard() { # ROLE key
+  local ledger; ledger="$(codex_session_ledger "$2")"
+  [ -f "$ledger" ] || return 0
+  echo "[FAIL] SESSION_CLI_MISMATCH: key '$2' 는 codex 세션 원장($ledger)에 결속돼 있는데 지금은 claude 로 라우팅된다($1) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
+  return 1
+}
+
+# 호출자가 결과를 수용한 뒤에만 세션 확정 — claude 는 .new session id 커밋, codex 는 원장 .new 확정 + resume marker 해제.
+# 재사용하지 않는 역할(합의 루프 검증자)은 호출마다 고유 key 를 쓰고 accept 를 부르지 않는다 — 스테이징은 커밋되지 않고 다음 key 와 만나지도 않는다.
+role_session_accept() { # ROLE key [label]
+  local role="$1" key="$2" label="${3:-}" cli ledger
+  cli="$(role_cli "$role")" || return 1
+  case "$cli" in
+    claude) claude_session_commit "$key" ;;
+    codex)
+      ledger="$(codex_session_ledger "$key")"
+      if [ -f "$ledger.new" ]; then mv "$ledger.new" "$ledger"; fi
+      # accept 를 부른다는 것은 이 key 의 세션 재사용이 계약이라는 뜻이다 — 확정할 세션이 없으면(첫 호출의 thread.started 미확정)
+      # 조용히 넘어가 다음 라운드가 소리 없이 fresh 로 돌지 않게 명시적 오류를 낸다(GOAL: 세션 확정 금지 + 명시적 오류).
+      [ -f "$ledger" ] || { echo "[FAIL] $key: 확정할 codex 세션이 없음 — 이번 호출의 이벤트 JSONL 에서 thread.started.thread_id 를 얻지 못했다." >&2; return 1; }
+      jq --arg label "$label" --arg now "$(date '+%FT%T%z')" '.last_accepted_label=$label | .last_accepted_at=$now' \
+        "$ledger" > "$ledger.tmp" && mv "$ledger.tmp" "$ledger"
+      rm -f "$(codex_resume_marker "$key")"
+      ;;
+  esac
 }
 
 # =============================================================
@@ -289,7 +445,9 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
 # 읽기 전용·스키마 강제 JSON 역할(검증자·리뷰어).
 #   결과 JSON → $out. 부산물: claude 는 $out.raw(전체 응답, structured_output 추출 전), codex 는 $out.events.jsonl(--json stdout) + $out.stderr.log.
 #   conventions: 프롬프트에 이미 들어 있으면 "" 를 넘긴다. claude 는 --append-system-prompt, codex 는 프롬프트 앞 블록으로 붙인다.
-#   claude 는 같은 session_name 이면 세션을 이어간다(codex exec 는 무상태). 호출자가 호출마다 다른 이름을 주면 fresh 다(합의 루프의 검증자). 두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
+#   두 CLI 모두 같은 session_name(key) 이면 '수용된' 세션을 이어간다(claude --resume / codex exec resume). 호출자가 호출마다 다른 이름을 주면
+#   fresh 다(합의 루프의 검증자). 세션 확정은 호출자의 role_session_accept 가 한다 — 이 함수는 스테이징까지만.
+#   두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
   local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
@@ -297,19 +455,38 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
+      # 세션 정책은 key 가 정한다: 같은 key 의 수용된 원장이 있으면 그 thread 로 exec resume, 없으면 새 exec (역할·CLI 이름으로 추론하지 않음).
+      codex_session_begin "$role" "$session" "$model" "$effort" || return 1
       # invocation 전용 임시 -o 경로: 이번 호출이 만든 파일은 이것 하나뿐이다. 이전 실행·픽스처가 $out 에 남긴 파일을 이번 결과로 오인하지 않고,
       # 내용·mtime 으로 provenance 를 추론하지도 않는다(같은 JSON 을 다시 써도 새 결과다). usable 할 때만 $out 으로 atomic move.
       local tmp_out="$out.invocation-$inv.tmp"
       rm -f "$tmp_out"
       # --json: stdout 은 이벤트 JSONL(usage telemetry 원천, $out.events.jsonl), stderr 는 진단($out.stderr.log) — 한 파일에 섞으면 JSONL 이 깨진다.
-      # structured result 는 계속 invocation 전용 -o 파일만 인정한다(telemetry 와 result provenance 는 별개).
-      "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
-        --output-schema "$schema" -o "$tmp_out" \
-        "$prompt" > "$out.events.jsonl" 2> "$out.stderr.log" || rc=$?
+      # structured result 는 계속 invocation 전용 -o 파일만 인정한다(telemetry 와 result provenance 는 별개) — resume 이어도 이전 결과를 새 결과로 오인하지 않는다.
+      if [ "$CODEX_SESSION_MODE" = resume ]; then
+        # 저장된 thread_id 로만 resume(--last·자동 검색 금지). 읽기 전용 샌드박스·스키마 강제·모델/effort·stdout/stderr 분리를 신규 호출과 동일하게 유지한다.
+        codex_resume_cli_check || return 1
+        local sandbox_args=(-c 'sandbox_mode="read-only"')
+        [ "$CODEX_RESUME_HAS_SANDBOX_FLAG" -eq 1 ] && sandbox_args+=(--sandbox read-only)
+        codex_resume_marker_write "$session" "$inv" "$label" || return 1
+        "$CODEX_BIN" exec resume "$CODEX_SESSION_ID" --json -m "$model" -c "model_reasoning_effort=\"$effort\"" \
+          "${sandbox_args[@]}" --output-schema "$schema" -o "$tmp_out" \
+          "$prompt" > "$out.events.jsonl" 2> "$out.stderr.log" || rc=$?
+      else
+        "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox read-only \
+          --output-schema "$schema" -o "$tmp_out" \
+          "$prompt" > "$out.events.jsonl" 2> "$out.stderr.log" || rc=$?
+      fi
       log_role_usage codex "$role" "$model" "$label" "$out.events.jsonl" "$rc" "$inv"   # raw exit code 그대로 (exit_code/success 위조 없음)
       if ! { [ -s "$tmp_out" ] && jq -e 'type=="object"' "$tmp_out" >/dev/null 2>&1; }; then
         rm -f "$tmp_out"
-        echo "[FAIL] codex 실행 실패 또는 결과 JSON 없음 (exit $rc, 모델 '$model', $role 확인)" >&2; tail -20 "$out.stderr.log" >&2; return 1
+        if [ "$CODEX_SESSION_MODE" = resume ]; then
+          # 스레드에 메시지가 전달됐을 수 있다 — 새 세션으로 자동 전환하지 않고 marker 를 유지해 다음 실행도 모델 호출 0회로 멈춘다.
+          echo "[FAIL] codex resume 실행 실패 또는 결과 JSON 없음 (exit $rc, $role/$session) — 자동 새 세션 전환 없음. resume marker 유지: $(codex_resume_marker "$session")" >&2
+        else
+          echo "[FAIL] codex 실행 실패 또는 결과 JSON 없음 (exit $rc, 모델 '$model', $role 확인)" >&2
+        fi
+        tail -20 "$out.stderr.log" >&2; return 1
       fi
       if [ "$rc" -ne 0 ]; then
         # rc ≠ 0 이어도 이번 호출이 파싱 가능한 결과 JSON 을 썼으면 즉시 폐기하지 않는다 — 호출자의 schema/contract 검사가 최종 게이트다.
@@ -317,9 +494,20 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
         echo "[WARN] CLI_EXIT_STATUS_MISMATCH: $role codex exited $rc, but current invocation produced a JSON result ($tmp_out); using it subject to the caller's schema/contract checks" >&2
         record_cli_anomaly "$role" codex "$label" "$rc" STRUCTURED_RESULT "$out"
       fi
+      if [ "$CODEX_SESSION_MODE" = resume ]; then
+        codex_session_check_resumed "$session" "$out.events.jsonl" \
+          || { rm -f "$tmp_out"; echo "[FAIL] codex resume($session) 이벤트의 thread id 가 원장과 다름 — 이번 호출 결과 불수용(marker 유지, 자동 재실행 없음)." >&2; return 1; }
+      else
+        # 신규 세션: thread.started.thread_id 가 유일할 때만 스테이징. 유일하지 않으면 세션 확정 금지(WARN) — 결과 자체는 유효할 수 있으므로
+        # 여기서 버리지 않고, 세션 재사용이 계약인 호출자의 role_session_accept 가 "확정할 세션 없음"으로 명시적 오류를 낸다.
+        # 재사용하지 않는 역할(호출마다 고유 key)은 accept 를 부르지 않으므로 영향이 없다.
+        codex_session_stage "$role" "$session" "$model" "$effort" "$out.events.jsonl" 2>/dev/null \
+          || echo "[WARN] codex 호출($session)의 thread.started.thread_id 미확정 — 세션 원장 스테이징 생략(이 key 는 세션을 잇지 못한다)" >&2
+      fi
       mv "$tmp_out" "$out"
       ;;
     claude)
+      claude_session_cli_guard "$role" "$session" || return 1
       local session_args conv_args=()
       [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
       session_args=$(claude_session_args "$session")
@@ -333,7 +521,7 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
         > "$out.raw" || rc=$?
       log_role_usage claude "$role" "$model" "$label" "$out.raw" "$rc" "$inv"
       [ "$rc" -eq 0 ] || { echo "[FAIL] claude 실행 실패 (모델 '$model', $role 확인)" >&2; return 1; }
-      claude_session_commit "$session"
+      # 세션 확정(.new 커밋)은 호출자의 role_session_accept 가 한다 — 스키마·계약 검사에 떨어진 호출의 세션을 잇지 않는다.
       jq -e '.structured_output' "$out.raw" > "$out" \
         || { echo "[FAIL] 응답에 structured_output 없음: $out.raw" >&2; return 1; }
       ;;
@@ -351,14 +539,38 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
+      # 읽기 전용 역할과 같은 세션 어댑터를 쓴다(역할별 복사 구현 없음). 수용된 같은 key 원장이 있을 때만 resume — 호출마다 고유 key 를
+      # 쓰거나 호출자가 accept 하지 않는 역할(현재 워커·디자이너)은 기존처럼 항상 새 exec 다.
+      codex_session_begin "$role" "$session" "$model" "$effort" || return 1
       local schema_args=()
       [ -z "$schema" ] || schema_args=(--output-schema "$schema" -o "$out")
       # --json stdout(이벤트 JSONL) 과 stderr 를 분리한다 — tee 로 합치면 JSONL 이 깨지고 pipe rc 가 섞인다. raw codex rc 를 그대로 돌려준다.
-      "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
-        ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+      if [ "$CODEX_SESSION_MODE" = resume ]; then
+        codex_resume_cli_check || return 1
+        local sandbox_args=(-c 'sandbox_mode="workspace-write"')
+        [ "$CODEX_RESUME_HAS_SANDBOX_FLAG" -eq 1 ] && sandbox_args+=(--sandbox workspace-write)
+        codex_resume_marker_write "$session" "$inv" "$label" || return 1
+        "$CODEX_BIN" exec resume "$CODEX_SESSION_ID" --json -m "$model" -c "model_reasoning_effort=\"$effort\"" \
+          "${sandbox_args[@]}" ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+      else
+        "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
+          ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+      fi
       log_role_usage codex "$role" "$model" "$label" "$raw.events.jsonl" "$rc" "$inv"
+      if [ "$CODEX_SESSION_MODE" = resume ]; then
+        # 불일치면 이번 호출의 -o 결과도 제거한다 — 호출자(run_worker 의 "rc≠0 + 유효 결과" 복구 경로)가
+        # 어느 스레드의 것인지 모르는 결과를 수용하지 못하게 한다. 작업 트리 변경은 원복하지 않는다(worker-outcome 가드가 판정).
+        codex_session_check_resumed "$session" "$raw.events.jsonl" \
+          || { [ -z "$schema" ] || rm -f "$out"; echo "[FAIL] codex resume($session) 이벤트의 thread id 가 원장과 다름 — 이번 호출 결과 불수용(marker 유지)." >&2; return 1; }
+      else
+        # 편집 역할의 신규 세션: 결과 게이트(worker_result_valid·지문·write-set)는 호출자에 있으므로 thread id 미확정이 호출 실패는 아니다 —
+        # 이 key 는 세션을 잇지 않을 뿐이다(WARN). 읽기 전용 역할의 strict 규칙과 의도적으로 다르다.
+        codex_session_stage "$role" "$session" "$model" "$effort" "$raw.events.jsonl" 2>/dev/null \
+          || echo "[WARN] codex 편집 호출($session)의 thread.started.thread_id 미확정 — 세션 원장 스테이징 생략(재사용 없음)" >&2
+      fi
       ;;
     claude)
+      claude_session_cli_guard "$role" "$session" || return 1
       local session_args conv_args=() schema_args=()
       [ -z "$conv" ] || conv_args=(--append-system-prompt "$conv")
       [ -z "$schema" ] || schema_args=(--json-schema "$(cat "$schema")")

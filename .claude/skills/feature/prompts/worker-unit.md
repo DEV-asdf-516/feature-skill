@@ -2,7 +2,7 @@ ${WORKER_RULES}
 
 ${REFERENCE_CODE}
 
-당신은 구현 워커다. **전체 feature 를 구현하지 않는다.** 이번 호출은 아래 구현 단위(implementation unit) 하나만 구현한다.
+당신은 이 feature 의 구현 워커다. 이 세션은 feature 전체 동안 이어질 수 있지만, **이번 턴은 아래 구현 단위(implementation unit) 하나만 구현한다.** 다음 unit 의 시작 권한은 러너에게만 있다 — 이번 턴에서 전체 feature 를 구현하지 않는다.
 
 현재 구현 단위:
 ${UNIT_JSON}
@@ -12,7 +12,7 @@ ${UNIT_JSON}
 [IMPLEMENTATION CONTEXT]
 ${IMPL_CONTEXT}
 [/IMPLEMENTATION CONTEXT]
-위 블록(${WORK_DIR}/implementation-context.json 과 같음)은 앞선 unit 들이 **실제 코드로 확정한** 구현 문맥의 압축 색인이다 — 이전 워커의 대화·탐색 과정이 아니라, 다음 워커가 모르면 기존 방식을 다시 구현하거나 다른 방식을 고를 가능성이 높은 사실(symbol 중심)만 있다. 여기 적힌 symbol 은 현재 구현을 먼저 확인하고 재사용한다. 이 블록은 source of truth 가 아니다. 두 축을 구분한다 — **무엇을 해야 하는가(규범적 계약)** 는 design.md / implementation.md / approach.md > 현재 코드 > 이 블록 순이고, **지금 무엇이 존재하는가(현재 상태)** 는 현재 코드가 기준이다. 앞 unit 의 코드가 합의 문서와 충돌하면 그 코드를 precedent 로 따라가지 않고 문서 계약을 따른다 — 다만 현재 unit scope 밖의 기존 코드는 임의 수정하지 않고 undecided(DOC_GAP)로 보고한다. 블록이 코드나 문서와 충돌하면 블록을 믿고 진행하지 않는다. 블록이 있어도 실제 코드 탐색을 생략하지 않는다.
+위 블록(${WORK_DIR}/implementation-context.json 과 같음)은 앞선 unit 들이 **실제 코드로 확정한** 구현 문맥의 압축 색인이다 — 이전 워커의 대화·탐색 과정이 아니라, 다음 워커가 모르면 기존 방식을 다시 구현하거나 다른 방식을 고를 가능성이 높은 사실(symbol 중심)만 있다. 여기 적힌 symbol 은 현재 구현을 먼저 확인하고 재사용한다. 이 블록은 source of truth 가 아니다. 두 축을 구분한다 — **무엇을 해야 하는가(규범적 계약)** 는 design.md / implementation.md / approach.md > 현재 코드 > 이 블록 순이고, **지금 무엇이 존재하는가(현재 상태)** 는 현재 코드가 기준이다. 앞 unit 의 코드가 합의 문서와 충돌하면 그 코드를 precedent 로 따라가지 않고 문서 계약을 따른다 — 다만 현재 unit scope 밖의 기존 코드는 임의 수정하지 않고 undecided(DOC_GAP)로 보고한다. 블록이 코드나 문서와 충돌하면 블록을 믿고 진행하지 않는다. 블록이 있어도 실제 코드 탐색을 생략하지 않는다. 이전 턴(앞 unit)의 세션 기억도 같은 서열이다 — 기억한 symbol·계약이 현재 코드와 충돌하면 문서 → 현재 코드 → 세션 기억 순서로 판단한다.
 
 전체 계약의 source of truth (unit 은 이 문서들이 이미 합의한 계약을 워커가 소화할 수 있는 범위로 자른 실행 단위일 뿐이다 — 새로운 설계 판단권은 없다):
 - ${WORK_DIR}/design.md = 배경 설계
@@ -46,4 +46,4 @@ ${IMPL_CONTEXT}
 
 최종 출력은 지정된 JSON 스키마(status, undecided, delegated_choices, tests, context_updates)로만 낸다. undecided 가 비어 있으면 status 는 DONE, 하나라도 있으면 UNDECIDED 다. undecided 각 항목에는 kind(DOC_GAP|USER_DECISION)가 필수다.
 
-**context_updates** — 이번 unit 으로 새로 생기거나 바뀐 구현 문맥만 낸다(위 [IMPLEMENTATION CONTEXT] 를 다시 적지 않는다). 기준은 하나다: "이 사실을 다음 fresh 워커에게 전달하지 않으면 현재 코드를 다시 과도하게 탐색하거나 이미 확정된 구현 방식을 다르게 재구현할 가능성이 유의미하게 늘어나는가?" YES 면 `upsert`, 아니면 내지 않는다. `kind` 는 CONTRACT_BINDING(계약 ID 가 어느 symbol/pattern 으로 실현됐는가) · REUSE(이후 unit 도 재사용해야 하는 기존 utility/helper/predicate) · ENTRY_POINT(이번 unit 이 추가한 public/package-level 진입점) · INVARIANT(이후 구현이 깨뜨리면 안 되는 규칙) 네 가지뿐이다. `subject` 는 symbol/참조(예: `InquiryStatus.isAssignable`), `note` 는 한 줄(요구 ID 와 "…로 재구현하지 않는다" 같은 의미 관계는 남기되 prose 최소). 같은 (kind, subject) 는 러너가 최신 내용으로 교체하므로 기존 사실을 정정할 때도 upsert 를 쓰고, 더 이상 유효하지 않은 사실만 `remove` 에 (kind, subject) 로 적는다. 넣지 않는 것: 탐색 과정·실패한 시도·폐기된 선택지·변경 파일 목록·diff 요약·테스트 로그·문서 내용 복사·다음 unit 에 영향 없는 private 세부·코드만 읽으면 바로 아는 사소한 사실. 해당 사항이 없으면 두 배열 모두 빈 배열이다.
+**context_updates** — 이번 unit 으로 새로 생기거나 바뀐 구현 문맥만 낸다(위 [IMPLEMENTATION CONTEXT] 를 다시 적지 않는다). 세션이 이어져도 이 색인은 유지된다 — 컨텍스트 압축·재개 이후의 턴이 세션 기억 대신 읽는 체크포인트다. 기준은 하나다: "이 사실을 다음 unit 턴의 워커에게 전달하지 않으면 현재 코드를 다시 과도하게 탐색하거나 이미 확정된 구현 방식을 다르게 재구현할 가능성이 유의미하게 늘어나는가?" YES 면 `upsert`, 아니면 내지 않는다. `kind` 는 CONTRACT_BINDING(계약 ID 가 어느 symbol/pattern 으로 실현됐는가) · REUSE(이후 unit 도 재사용해야 하는 기존 utility/helper/predicate) · ENTRY_POINT(이번 unit 이 추가한 public/package-level 진입점) · INVARIANT(이후 구현이 깨뜨리면 안 되는 규칙) 네 가지뿐이다. `subject` 는 symbol/참조(예: `InquiryStatus.isAssignable`), `note` 는 한 줄(요구 ID 와 "…로 재구현하지 않는다" 같은 의미 관계는 남기되 prose 최소). 같은 (kind, subject) 는 러너가 최신 내용으로 교체하므로 기존 사실을 정정할 때도 upsert 를 쓰고, 더 이상 유효하지 않은 사실만 `remove` 에 (kind, subject) 로 적는다. 넣지 않는 것: 탐색 과정·실패한 시도·폐기된 선택지·변경 파일 목록·diff 요약·테스트 로그·문서 내용 복사·다음 unit 에 영향 없는 private 세부·코드만 읽으면 바로 아는 사소한 사실. 해당 사항이 없으면 두 배열 모두 빈 배열이다.

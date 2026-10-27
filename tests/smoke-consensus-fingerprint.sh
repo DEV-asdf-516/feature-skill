@@ -50,8 +50,15 @@ export MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CO
 # --- fake codex: 모든 호출을 기록한다. 검증자(read-only)는 대상별로 기록하고 PASS 를 -o 에 쓴다. 워커는 USER_DECISION 으로 멈춘다 ---
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
+# codex 세션 계약: exec resume --help / thread.started 첫 이벤트(재개면 같은 id) — config.sh 세션 어댑터가 읽는다
+RESUME_TID=""
+if [ "$1" = exec ] && [ "$2" = resume ]; then
+  [ "$3" = --help ] && { echo "usage: codex exec resume [--json] [--output-schema] [--output-last-message] [--sandbox]"; exit 0; }
+  RESUME_TID="$3"
+fi
 out=""; readonly_sb=0; prompt=""
 while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --sandbox) [ "$2" = read-only ] && readonly_sb=1; shift 2;; *) prompt="$1"; shift;; esac; done
+printf '{"type":"thread.started","thread_id":"%s"}\n' "${RESUME_TID:-mock-thread-$$}"
 if [ "$readonly_sb" = 1 ]; then
   if printf '%s' "$prompt" | grep -q '설계 검증자'; then echo "validator design" >> "$MOCK_LOG"
   elif printf '%s' "$prompt" | grep -q '구현 문서 검증자'; then echo "validator impl" >> "$MOCK_LOG"

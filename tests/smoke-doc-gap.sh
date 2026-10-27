@@ -67,6 +67,8 @@ while [ "$#" -gt 0 ]; do case "$1" in
   *) prompt="$1"; shift;;
 esac; done
 usage='"session_id":"fake","total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
+# 실제 codex exec --json 은 첫 이벤트로 thread.started 를 낸다 — 세션 원장(config.sh codex 어댑터)이 이 계약을 읽는다
+[ "$cli" = codex ] && printf '{"type":"thread.started","thread_id":"mock-thread-%s"}\n' "$$"
 emit() { if [ "$cli" = codex ]; then if [ -n "$out" ]; then printf '%s\n' "$1" > "$out"; else printf '%s\n' "$1"; fi; else printf '{"structured_output":%s,%s}\n' "$1" "$usage"; fi; }
 role=""
 case "$schema" in
@@ -135,7 +137,8 @@ reset_tree() { # 테스트 환경 정리(파이프라인 동작 아님)
   git checkout -q -- src
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json .agent-work/feature-scope.lock.json .agent-work/worker-baseline.tree \
     .agent-work/worker-result.json .agent-work/review-gap-result.json .agent-work/review-gap-*.tree .agent-work/review-impl.json .agent-work/approved.fingerprint \
-    .agent-work/reviews/impl-attempt-* .agent-work/.session-* .agent-work/doc-gap-resume.json .agent-work/worker-outcome.guard.json "$MOCK_STATE"/*
+    .agent-work/reviews/impl-attempt-* .agent-work/.session-* .agent-work/worker-session.json .agent-work/worker-session.migrate* .agent-work/worker-handoff.json \
+    .agent-work/doc-gap-resume.json .agent-work/worker-outcome.guard.json "$MOCK_STATE"/*
   : > .agent-work/decisions.md; printf '# approach\n' > .agent-work/approach.md
   fake_pass impl   # decisions/approach 를 되돌렸으므로 impl PASS 지문 재동기화 (픽스처)
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
