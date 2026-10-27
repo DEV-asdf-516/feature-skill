@@ -22,19 +22,204 @@
 #   unit-dir 있음: 구현 단위 호출. unit-dir/unit.json 을 ${UNIT_JSON} 으로 렌더링하고, 결과·tree·원문 로그를 unit-dir/<RUN_TAG>-* 에 남기며,
 #                  전체 범위 검사 뒤에 unit-dir/scope.json 으로 같은 write-set 검사를 한 번 더 한다(UNIT_SCOPE_VIOLATION). units manifest 불변도 본다.
 #   RUN_TAG (기본 worker): 산출물 접두(unit 의 test-fix 호출은 test-fix-NN). TEST_LOG 는 템플릿 변수로만 쓰인다.
-# 세션: 전체 호출은 worker, unit 호출은 worker-unit-<id> — unit 마다 fresh 세션이며 이전 unit 의 문맥을 잇지 않는다(잇는 것은 worktree 뿐).
+# 세션: 모든 워커 호출(unit·test-fix·verify 의 worker-fix·review-gap)은 Feature 당 하나의 세션($FEATURE_WORKER_SESSION)을 쓴다 —
+#        최초 호출이 --session-id, 이후엔 --resume(claude 라우팅일 때. codex exec 는 무상태라 이름이 같아도 호출마다 fresh 다).
+#        Unit 은 구현·검증·재개 단위고 세션 단위가 아니다 — 러너가 Unit 마다 CLI 를 다시 부르되 같은 세션을 턴으로 이어 쓴다.
+#        전제(cli·모델·effort·워커 규칙 지문)는 worker-session.json 저널로 고정하고, 불일치하면 자동 resume 도 자동 fresh 도 없이 멈춘다.
+
+# ---------- Feature 단일 워커 세션 저널 ----------
+# worker-session.json: {version, session, cli, model, effort, contract_fingerprint, generation, session_bound, session_id, last_completed_unit_id, last_completed_tree, created_at}
+#   책임 분리 — 저널은 Feature Worker 의 실행 상태·계약·세대·unit 진행만 담는다. 실제 세션 ID 는 CLI 어댑터 한 곳에서만 관리한다:
+#     claude 는 .session-feature-worker(평문 UUID — session_id 필드는 과도기 중복), codex 는 .session-feature-worker.codex.json 원장(thread_id).
+#   codex thread_id 는 저널에 복사하지 않는다. 대신 session_bound(세션 연결 여부)만 둔다 — role_session_accept 성공 뒤에만 true 가 되고,
+#   "아직 세션을 만들지 않음(false + 원장 없음)"과 "원장 소실(true + 원장 없음)"을 구별해 후자는 WORKER_SESSION_MISMATCH 로 멈춘다.
+#   session_id 는 첫 '수용' 뒤 CLI 세션 파일(.session-feature-worker)에서 동기화된다(codex 는 null 유지).
+#   세션 1개 ≠ 결과 파일 1개 — unit 별 산출물·호출별 usage 기록은 기존대로 분리된다.
+#   Validator/Reviewer/Fixer 세션과 혼용하지 않고, 다른 피처·worktree 와도 공유하지 않는다(저널·세션 파일 모두 WORK_DIR 안).
+FEATURE_WORKER_SESSION="feature-worker"
+WORKER_SESSION_VERSION=1
+
+# 세션 계약 지문: 워커 규칙(core_rules + conventions + WORKER_SKILLS) + 워커 프롬프트 템플릿 + 결과 스키마.
+# 이 중 하나라도 피처 도중 바뀌면 같은 세션을 이어 쓰지 않는다(WORKER_SESSION_MISMATCH — 사용자가 재시작 방식을 명시).
+worker_contract_fingerprint() {
+  local rules p
+  rules="$(load_worker_rules)" || return 1
+  {
+    printf 'worker-session-v%s\0%s\0' "$WORKER_SESSION_VERSION" "$rules"
+    for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
+      printf '%s\0' "$p"; cat "$SKILL_DIR/prompts/$p"; printf '\0'
+    done
+    cat "$WORKER_SCHEMA"
+  } | sha256_stdin
+}
+
+worker_session_set_id() { # session-id — 확정(수용)된 세션 ID 반영이므로 결속 상태도 함께 true 가 된다
+  local journal="$WORK_DIR/worker-session.json"
+  jq --arg id "$1" '.session_id=$id | .session_bound=true' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal"
+}
+# role_session_accept 성공 뒤에만 호출된다 — 세션 연결 여부만 기록하고 codex thread_id 는 원장에만 둔다(멱등).
+worker_session_mark_bound() {
+  local journal="$WORK_DIR/worker-session.json"
+  jq -e '.session_bound==true' "$journal" >/dev/null 2>&1 && return 0
+  jq '.session_bound=true' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal"
+}
+# 수용 뒤 CLI 세션 파일의 ID 를 저널에 반영한다(claude 만 — codex 는 세션 파일이 없고 thread_id 를 저널에 복사하지 않는다).
+worker_session_sync_id() {
+  local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
+  [ "$(role_cli WORKER)" = claude ] || return 0
+  [ -f "$sid_file" ] || return 0
+  [ "$(jq -r '.session_id // ""' "$journal")" = "$(cat "$sid_file")" ] && return 0
+  worker_session_set_id "$(cat "$sid_file")"
+}
+worker_session_note_unit_done() { # unit-id tree
+  local journal="$WORK_DIR/worker-session.json"
+  [ -f "$journal" ] || return 0
+  jq --arg id "$1" --arg tree "$2" '.last_completed_unit_id=$id | .last_completed_tree=$tree' \
+    "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal"
+}
+
+# ---------- 세션 교체(회전): 논리적 워커는 하나, 물리적 CLI 세션만 unit 경계에서 교체 ----------
+# worker-handoff.json (schemas/worker-handoff.schema.json): 세션 이관 '제어' 정보만 담는다 — 구현 사실은 implementation-context.json 이다.
+# 교체는 unit 완료(targeted test PASS, done.json 확정) 직후에만 예약되고, 다음 세대의 첫 호출 전에
+# ensure_feature_worker_session 이 스키마·계약 지문·git tree 일치를 검증한 뒤에만 fresh 세션을 만든다.
+worker_handoff_valid_file() { # handoff-path
+  [ -f "$1" ] && jq -e '
+    type=="object" and ((keys - ["version","generation","last_completed_unit","next_unit","source_tree","contract_fingerprint","context_file"])|length)==0
+    and .version==1 and (.generation|type=="number" and .>=2)
+    and (.last_completed_unit|type=="string" and length>0) and (.next_unit|type=="string" and length>0)
+    and (.source_tree|type=="string" and test("^[0-9a-f]{40,64}$"))
+    and (.contract_fingerprint|type=="string" and length>0) and (.context_file|type=="string" and length>0)' \
+    "$1" >/dev/null 2>&1
+}
+
+# unit 완료 직후에만 호출된다(run_unit). 임계치는 '관측값'(usage.jsonl 의 마지막 WORKER claude invocation 의 input_effective)으로만
+# 판단한다 — telemetry 가 없으면 임의 추정 없이 세션을 유지한다. 마지막 unit 뒤에는 교체하지 않는다(이관할 다음 unit 이 없다).
+maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree
+  local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
+  local handoff="$WORK_DIR/worker-handoff.json"
+  local threshold="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-0}" observed next="" u old_gen new_gen fp
+  case "$threshold" in ''|*[!0-9]*) env_error "WORKER_SESSION_ROTATE_INPUT_TOKENS 가 정수가 아님: '$threshold'";; esac
+  [ "$threshold" -gt 0 ] || return 0
+  [ "$(role_cli WORKER)" = claude ] || return 0   # 교체는 현재 claude 세션만 — codex 원장 은퇴(ledger 교체)는 codex 세션 레이어와 함께 별도 결정
+  [ -f "$sid_file" ] && [ -f "$journal" ] || return 0
+  observed="$(jq -rs '[ .[] | select(.role=="WORKER" and .cli=="claude") ] | if length==0 then empty else (last.input_effective // empty) end' "$WORK_DIR/usage.jsonl" 2>/dev/null || true)"
+  if [ -z "$observed" ]; then
+    log "[WARN] 세션 교체 판단 보류 — usage telemetry 에 WORKER input_effective 가 없어 측정 불가(임의 추정 없이 세션 유지)"
+    return 0
+  fi
+  [ "$observed" -ge "$threshold" ] || return 0
+  for u in $(unit_ids); do unit_done_valid "$u" || { next="$u"; break; }; done
+  [ -n "$next" ] || return 0
+  old_gen="$(jq -r '.generation // 1' "$journal")"; new_gen=$((old_gen + 1))
+  fp="$(jq -r '.contract_fingerprint' "$journal")"
+  git cat-file -e "$2^{tree}" 2>/dev/null || env_error "세션 교체: 완료 tree 가 유효하지 않음: $2"
+  jq -n --argjson gen "$new_gen" --arg last "$1" --arg next "$next" --arg tree "$2" --arg fp "$fp" --arg ctx "$IMPL_CONTEXT_FILE" \
+    '{version:1, generation:$gen, last_completed_unit:$last, next_unit:$next, source_tree:$tree, contract_fingerprint:$fp, context_file:$ctx}' \
+    > "$handoff.tmp" && mv "$handoff.tmp" "$handoff" || env_error "worker-handoff.json 기록 실패"
+  worker_handoff_valid_file "$handoff" || env_error "worker-handoff.json 이 스키마(schemas/worker-handoff.schema.json)와 다름"
+  # 은퇴한 세션 ID 는 지우지 않고 세대 접미사로 보존한다. session_id 를 비워 두면 다음 호출이 fresh --session-id 로 시작한다.
+  mv "$sid_file" "$sid_file.gen$old_gen" || env_error "세션 파일 보존 실패"
+  jq --argjson gen "$new_gen" '.generation=$gen | .session_id=null | .session_bound=false' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal" \
+    || env_error "worker-session.json 세대 갱신 실패"
+  log "Feature Worker 세션 교체 예약: 관측 입력 ${observed}tok ≥ 임계치 ${threshold}tok — generation $new_gen, unit $next 부터 fresh 세션(계약 문서·context 색인 재주입)"
+}
+
+# 워커 호출 전 세션 전제 확정(모델 호출 0회). 호출자 계약: stop_need_user / env_error / log 가 정의돼 있다.
+#   저널 없음 + 이전 체계(unit 별 fresh 세션)의 흔적 또는 완료 unit 체크포인트 → 묵시적 마이그레이션 금지, 사용자에게.
+#     이어 돌리기로 결정했으면 $WORK_DIR/worker-session.migrate 파일을 만들고 재실행(마커는 1회 소비되고 새 세션 저널이 생긴다).
+#   저널 있음 + cli·모델·effort·계약 지문·세션 ID 불일치 → 자동 resume 금지, 자동 fresh 재생성 금지, 사용자에게.
+ensure_feature_worker_session() {
+  local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
+  local cli model effort fp legacy jsid
+  cli="$(role_cli WORKER)" || env_error "WORKER CLI 라우팅 실패"
+  model="$(role_model WORKER)"; effort="$(role_effort WORKER)"
+  fp="$(worker_contract_fingerprint)" || env_error "워커 세션 계약 지문 계산 실패 — 워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패"
+  if [ ! -f "$journal" ]; then
+    if [ -f "$WORK_DIR/worker-session.migrate" ]; then
+      mv "$WORK_DIR/worker-session.migrate" "$WORK_DIR/worker-session.migrate.used.$(date '+%s')" || env_error "마이그레이션 마커 소비 실패"
+      log "worker-session.migrate 확인 — 사용자 승인으로 남은 unit 을 새 Feature Worker 세션으로 이어 간다"
+    else
+      legacy="$(ls "$WORK_DIR"/.session-worker-unit-* "$WORK_DIR/.session-worker" "$WORK_DIR/.session-review-gap" 2>/dev/null | paste -sd, - || true)"
+      [ -z "$legacy" ] || stop_need_user WORKER_SESSION_MISSING "worker-session.json 없이 이전 fresh-워커 체계의 세션 파일($legacy)이 남아 있다 — 예전 실행을 묵시적으로 단일 워커 세션으로 마이그레이션하지 않는다. --new 로 새로 시작하거나, 이어 돌리려면 사용자가 $WORK_DIR/worker-session.migrate 파일을 만들고 재실행(유효한 완료 체크포인트는 건너뛰고 첫 미완료 unit 부터 새 세션으로)"
+      if ls "$WORK_DIR"/units/*/done.json >/dev/null 2>&1; then
+        stop_need_user WORKER_SESSION_MISSING "완료된 unit 체크포인트가 있는데 worker-session.json 이 없다(이 변경 이전의 fresh-워커 실행이거나 저널 삭제) — 자동으로 fresh 세션을 만들어 잇지 않는다. --new 로 새로 시작하거나, 이어 돌리려면 사용자가 $WORK_DIR/worker-session.migrate 파일을 만들고 재실행"
+      fi
+    fi
+    jq -n --arg session "$FEATURE_WORKER_SESSION" --arg cli "$cli" --arg model "$model" --arg effort "$effort" \
+      --arg fp "$fp" --arg now "$(date '+%FT%T%z')" --argjson v "$WORKER_SESSION_VERSION" \
+      '{version:$v, session:$session, cli:$cli, model:$model, effort:$effort, contract_fingerprint:$fp,
+        generation:1, session_bound:false, session_id:null, last_completed_unit_id:null, last_completed_tree:null, created_at:$now}' \
+      > "$journal.tmp" && mv "$journal.tmp" "$journal" || env_error "worker-session.json 기록 실패"
+    log "Feature Worker 세션 저널 생성: $journal (cli $cli, $model/$effort)"
+    return 0
+  fi
+  jq -e --argjson v "$WORKER_SESSION_VERSION" '.version==$v' "$journal" >/dev/null 2>&1 \
+    || stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 버전이 다르다(기대 $WORKER_SESSION_VERSION) — 다른 형식의 세션 저널을 해석하지 않는다. --new 또는 사용자 정리 후 재실행"
+  local mism
+  mism="$(jq -r --arg cli "$cli" --arg model "$model" --arg effort "$effort" --arg fp "$fp" \
+    '[ (select(.cli!=$cli)       | "cli \(.cli)→\($cli)"),
+       (select(.model!=$model)   | "model \(.model)→\($model)"),
+       (select(.effort!=$effort) | "effort \(.effort)→\($effort)"),
+       (select(.contract_fingerprint!=$fp) | "워커 규칙·프롬프트 계약 지문") ] | join(", ")' "$journal")"
+  [ -z "$mism" ] || stop_need_user WORKER_SESSION_MISMATCH "Feature Worker 세션 전제가 저널(worker-session.json)과 다르다($mism) — 다른 전제의 세션을 자동 resume 하지 않고 자동으로 새 세션을 만들지도 않는다. 설정·규칙을 피처 시작 시점으로 되돌려 재실행하거나, 의도한 변경이면 --new(또는 사용자가 재시작 방식을 명시)"
+  if [ "$cli" = claude ]; then
+    jsid="$(jq -r '.session_id // ""' "$journal")"
+    if [ -n "$jsid" ]; then
+      [ -f "$sid_file" ] && [ "$(cat "$sid_file")" = "$jsid" ] \
+        || stop_need_user WORKER_SESSION_MISMATCH "저널의 Feature Worker 세션 ID($jsid)와 CLI 세션 파일($sid_file: $([ -f "$sid_file" ] && cat "$sid_file" || echo 없음))이 다르다 — 그 세션 없이 자동으로 fresh 워커를 만들어 잇지 않는다. 사용자가 복구(세션 파일 원복) 또는 재시작(--new / worker-session 정리) 방식을 명시하라"
+    elif [ -f "$sid_file" ]; then
+      # 첫 수용 뒤 저널 동기화 전에 죽은 경우 — 수용이 확정된(commit 된) 세션 ID 이므로 저널에 반영하고 잇는다
+      worker_session_set_id "$(cat "$sid_file")" || env_error "worker-session.json 세션 ID 동기화 실패"
+      log "Feature Worker 세션 ID 를 세션 파일에서 저널로 동기화: $(cat "$sid_file")"
+    elif jq -e '.session_bound==true' "$journal" >/dev/null 2>&1; then
+      # 결속 기록은 있는데 세션 증거(ID·세션 파일)가 모두 없다 — 소실이지 '아직 미생성'이 아니다. 자동 fresh 금지.
+      stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 session_bound=true 인데 세션 ID 도 CLI 세션 파일($sid_file)도 없다 — 수용된 세션이 소실됐다. 자동으로 fresh 세션을 만들지 않는다. 세션 파일을 복구하거나 --new(또는 사용자가 재시작 방식을 명시)"
+    elif [ -f "$WORK_DIR/worker-handoff.json" ] \
+         && [ "$(jq -r '.generation' "$WORK_DIR/worker-handoff.json" 2>/dev/null)" = "$(jq -r '.generation // 1' "$journal")" ]; then
+      # 세션 교체 직후의 fresh 세대 — 이관 정보(worker-handoff.json)가 스키마·계약 지문·현재 tree 와 일치해야만 새 세션을 만든다
+      worker_handoff_valid_file "$WORK_DIR/worker-handoff.json" \
+        || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 이 스키마(schemas/worker-handoff.schema.json)와 다르다 — 이관 정보를 신뢰할 수 없으므로 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고, --new 또는 사용자 정리 후 재실행"
+      [ "$(jq -r '.contract_fingerprint' "$WORK_DIR/worker-handoff.json")" = "$fp" ] \
+        || stop_need_user WORKER_SESSION_MISMATCH "worker-handoff.json 의 계약 지문이 현재 워커 규칙·프롬프트와 다르다 — 이관 시점과 계약이 달라졌으므로 자동으로 fresh 세션을 만들지 않는다. 규칙을 교체 시점으로 되돌리거나 --new"
+      local handoff_tree cur_tree
+      handoff_tree="$(jq -r '.source_tree' "$WORK_DIR/worker-handoff.json")"
+      cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
+      [ "$handoff_tree" = "$cur_tree" ] \
+        || stop_need_user WORKER_SESSION_MISMATCH "세션 이관 시점 tree($handoff_tree)와 현재 작업 트리($cur_tree)가 다르다 — 이관 전제 위에서만 fresh 세션을 만든다. 변경을 확인한 뒤 그 tree 로 명시적으로 되돌리고 재실행하거나, 의도한 변경이면 사용자가 재시작 방식을 명시하라. 자동 원복 없음"
+      log "세션 이관 검증 통과 (generation $(jq -r '.generation' "$WORK_DIR/worker-handoff.json"), next unit $(jq -r '.next_unit' "$WORK_DIR/worker-handoff.json")) — fresh 세션으로 계약 문서·context 색인을 다시 받는다"
+    elif [ "$(jq -r '.generation // 1' "$journal")" -gt 1 ]; then
+      # 교체된 세대인데 세대가 일치하는 이관 정보가 없다(handoff 삭제·변조) — 검증 없는 fresh 세션을 만들지 않는다
+      stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 generation $(jq -r '.generation' "$journal")(교체된 세대)인데 그 세대의 worker-handoff.json 이 없다 — 이관 검증 없이 fresh 세션을 만들지 않는다. 체크포인트를 손으로 고치지 말고 --new 또는 사용자 정리 후 재실행"
+    fi
+  fi
+  if [ "$cli" = codex ]; then
+    # codex thread_id 는 원장(.session-<key>.codex.json) 한 곳에서만 관리한다 — 저널은 결속 여부(session_bound)만 기록하고
+    # 두 파일의 불변식을 대조한다. 원장 내용(모델·effort·계약·thread_id)의 호출 전 대조는 codex_session_begin 이 한다.
+    local ledger bound
+    ledger="$(codex_session_ledger "$FEATURE_WORKER_SESSION")"
+    bound="$(jq -r '.session_bound // false' "$journal")"
+    if [ "$bound" = true ] && [ ! -f "$ledger" ]; then
+      # '아직 세션 미생성'(false + 원장 없음)과 달리 이것은 수용된 세션의 소실이다 — 자동 fresh 금지
+      stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 session_bound=true 인데 codex 세션 원장($ledger)이 없다 — 수용된 세션이 소실됐다. 자동으로 fresh 세션을 만들지 않는다. 원장을 복구하거나 --new(또는 사용자가 재시작 방식을 명시)"
+    elif [ "$bound" != true ] && [ -f "$ledger" ]; then
+      # accept(원장 확정)와 저널 갱신 사이에 죽은 경우 포함 — 두 기록의 불일치 위에서 조용히 resume 하지 않는다
+      stop_need_user WORKER_SESSION_MISMATCH "codex 세션 원장($ledger)은 확정돼 있는데 worker-session.json 은 미결속(session_bound=false)이다 — 불일치 위에서 자동 resume 도 자동 fresh 도 하지 않는다. 원장과 저널을 확인한 뒤 사용자가 정리하고 재실행(--new 포함)"
+    fi
+  fi
+}
 run_worker() { # prompt-file [unit-dir]
   local prompt_file="$1" unit_dir="${2:-}" tag="${RUN_TAG:-worker}"
-  local prompt worker_rules result out_dir tree_prefix unit_json="" unit_id="" unit_scope="" session
+  local prompt worker_rules reference_code result out_dir tree_prefix unit_json="" unit_id="" unit_scope=""
+  # 세션은 산출물 경로와 달리 분기하지 않는다 — Feature 전체가 하나의 Worker 세션이다(상단 저널 참고)
+  local session="$FEATURE_WORKER_SESSION"
   if [ -n "$unit_dir" ]; then
     unit_json="$(cat "$unit_dir/unit.json")" && unit_id="$(jq -er '.id' "$unit_dir/unit.json")" || env_error "unit.json 읽기 실패: $unit_dir"
     out_dir="$unit_dir"; result="$unit_dir/$tag-result.json"; tree_prefix="$unit_dir/$tag"; unit_scope="$unit_dir/scope.json"
-    session="worker-unit-$unit_id"
   elif [ "$tag" = worker ]; then
-    out_dir="$WORK_DIR/reviews"; result="$WORKER_RESULT"; tree_prefix="$WORK_DIR/worker"; session=worker
+    out_dir="$WORK_DIR/reviews"; result="$WORKER_RESULT"; tree_prefix="$WORK_DIR/worker"
   else
     # 전체 호출이지만 다른 RUN_TAG(review-gap): 결과·tree 를 태그 이름으로 남겨 unit 결과를 합친 worker-result.json 을 덮어쓰지 않는다
-    out_dir="$WORK_DIR/reviews"; result="$WORK_DIR/$tag-result.json"; tree_prefix="$WORK_DIR/$tag"; session="$tag"
+    out_dir="$WORK_DIR/reviews"; result="$WORK_DIR/$tag-result.json"; tree_prefix="$WORK_DIR/$tag"
   fi
   # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
   require_baseline_guard_resolved \
@@ -42,13 +227,28 @@ run_worker() { # prompt-file [unit-dir]
   # 직전 워커 호출 결과가 불확실한 채 남은 변경 위에 같은 워커를 다시 부르지 않는다(사용자가 호출 전 tree 로 복구한 뒤에만)
   require_worker_outcome_guard_resolved \
     || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))의 완료 여부가 불확실한데 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 되돌린 뒤 재실행. 자동 원복·자동 재호출 없음"
-  # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다
-  worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
+  # 세션 전제(저널) 확정·검증 — 불일치는 모델 호출 0회로 멈춘다
+  ensure_feature_worker_session
+  # 턴 구분: 이 key 의 '수용된' 세션이 있으면(claude 평문 파일 또는 codex 원장 — session_exists) 후속 턴(resume)이다 —
+  # 공통 규칙·참조 코드는 최초 턴에 이미 세션에 있으므로 전체를 중복 주입하지 않고 짧은 재명시만 넣는다.
+  # 실제 강제는 러너의 shell 게이트(write-set·index·manifest)가 하므로 재명시가 잊혀도 통과하지 않는다.
+  # unit 템플릿 본문(턴별 필수 계약)은 매 턴 그대로 간다.
+  local resumed_turn=0
+  session_exists "$FEATURE_WORKER_SESSION" && resumed_turn=1
+  if [ "$resumed_turn" -eq 1 ]; then
+    worker_rules="[CORE RULES]
+(이 Feature Worker 세션의 최초 턴에 전달된 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 블록이 이 턴에도 그대로 계약이다. 필수 제약 재명시: 현재 unit scope 밖 편집 금지 · 이후 unit 선행 구현 금지 · 범위 밖 리팩터링·cleanup 금지 · git commit/push 금지 · git index 조작 금지 · 파일 삭제 금지 · 전체 테스트 스위트 실행 금지 · 최종 출력은 결과 JSON 스키마로만. 세션 기억이 문서·현재 코드와 충돌하면 합의 문서 → 현재 코드 → 세션 기억 순서로 판단하고, 컨텍스트가 압축·재개됐으면 $WORK_DIR/implementation-context.json 과 합의 문서를 다시 읽는다.)"
+    reference_code="[REFERENCE CODE 생략 — 이 세션 최초 턴에 전달됨. 앞선 구현으로 인용 줄 범위가 바뀌었을 수 있으니 approach.md 가 인용한 참조가 필요하면 현재 파일에서 다시 읽는다.]"
+  else
+    # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다
+    worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
+    reference_code="$(load_reference_code)" || env_error "REFERENCE CODE 로드 실패"
+  fi
   # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
   local impl_context=""
   if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
   # REVIEW_FILE / GAP_CONTEXT 는 review-gap 호출(worker-review-gap.md)에서만 채워진다 — 다른 템플릿에는 그 변수가 없다
-  prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$(load_reference_code)" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
+  prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$reference_code" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
     UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" REVIEW_FILE="${REVIEW_FILE:-}" GAP_CONTEXT="${GAP_CONTEXT:-}" \
     render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT}')" \
     || env_error "워커 프롬프트 렌더링 실패"
@@ -69,6 +269,11 @@ run_worker() { # prompt-file [unit-dir]
   run_edit_role WORKER "$session" "$tag-$stamp" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$result" --allowedTools "Bash"
   worker_rc=$?
   set -e
+  # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 그 불확실성이 해소됐다.
+  # 결과를 수용할지는 아래 게이트·가드(index·manifest·기준선·write-set·결과 계약·worker-outcome)가 따로 판정하고,
+  # 게이트 중단 뒤 사용자가 복구하고 재실행하는 재호출은 같은 스레드에 보내는 '의도된 새 턴'이다 — marker 로 막지 않는다.
+  # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다.)
+  [ "$(role_cli WORKER)" != codex ] || rm -f "$(codex_resume_marker "$FEATURE_WORKER_SESSION")"
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료하면 가드가 남지 않아
   # 사용자가 보고된 문제만 고치고 재실행할 때 변조된 기준선이 새 기준선으로 읽힌다. 종료 우선순위(index → manifest → 기준선)는 그대로.
   local baseline_changed=0
@@ -135,6 +340,15 @@ run_worker() { # prompt-file [unit-dir]
   if { [ "$status" = DONE ] && [ "$n" -gt 0 ]; } || { [ "$status" = UNDECIDED ] && [ "$n" -eq 0 ]; }; then
     env_error "모순된 워커 결과: status=$status / undecided=$n"
   fi
+  # ---------- 결과 수용: 모든 게이트(index·manifest·기준선·write-set)와 결과 계약 검사를 지난 뒤에만 ----------
+  # 세션 확정은 어댑터 공용 role_session_accept 가 한다 — claude 는 .new 세션 ID 커밋, codex 는 원장 .new 확정 + resume marker 해제.
+  # 워커는 세션 재사용이 계약이므로 수용 실패(codex thread.started 미확정 등)는 조용히 fresh 로 돌지 않고 명시적으로 멈춘다.
+  # UNDECIDED 결과도 유효한 턴이다(사용자 결정 뒤 같은 세션이 이어 받는다) — 수용은 status 와 무관하게 여기서 한다.
+  role_session_accept WORKER "$FEATURE_WORKER_SESSION" "$tag-$stamp${unit_id:+ (unit $unit_id)}" \
+    || env_error "워커 세션 수용(role_session_accept) 실패 — 이번 호출의 세션을 확정하지 못했다(codex 면 thread.started.thread_id 미확정). 자동 fresh 전환 없음"
+  # 수용 뒤 저널 갱신: claude 는 세션 ID 동기화(+결속), codex 는 결속 여부만 — thread_id 는 원장에만 둔다
+  worker_session_sync_id || env_error "worker-session.json 세션 ID 동기화 실패"
+  worker_session_mark_bound || env_error "worker-session.json 세션 결속(session_bound) 기록 실패"
   log "워커${unit_id:+ (unit $unit_id)} status: $status / undecided: $n / delegated_choices: $(jq '.delegated_choices|length' "$result")"
   jq -r '.undecided[]? | "  [UNDECIDED] \(.location): \(.decision_needed)"' "$result"
   if [ "$status" = UNDECIDED ]; then

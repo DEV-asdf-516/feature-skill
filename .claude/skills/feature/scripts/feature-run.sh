@@ -18,13 +18,15 @@
 #   preflight → design → impl → worker → review → verify → done
 #   design : consensus-loop.sh design
 #   impl   : consensus-loop.sh impl        (implementation.md + approach.md + implementation-units.json 필요)
-#   worker : implementation-units.json 을 lock 으로 확정하고 units 배열 순서대로 **직렬** 실행 — unit 마다
-#            fresh 워커(worker-unit.md, 결과 JSON DONE|UNDECIDED) → targeted_test(실패 시 unit 범위 수정 → 재테스트)
+#   worker : implementation-units.json 을 lock 으로 확정하고 units 배열 순서대로 **직렬** 실행 — Feature 전체를 **하나의 Worker
+#            세션**(worker-invoke.sh 의 FEATURE_WORKER_SESSION, 저널 worker-session.json)이 턴 단위로 이어 간다: unit 마다
+#            같은 세션의 워커 턴(worker-unit.md, 결과 JSON DONE|UNDECIDED) → targeted_test(실패 시 같은 세션에 unit 범위 수정 → 재테스트)
 #            → context-updates.json(워커·수정 결과의 context_updates 를 순서대로 보존) → units/<id>/done.json.
-#            unit 사이에 이어지는 것은 worktree 의 코드 + 합의 문서 + implementation-context.json(앞 unit 이 확정한 사실의 압축 색인,
-#            워커가 낸 upsert/remove 를 러너가 (kind,subject) 키로 기계적으로 fold — 별도 요약 모델·추가 호출 없음)뿐이다. unit 별 리뷰·수정자·설계는 없다. Unit N 이 끝나기 전에는 N+1 을 시작하지 않는다.
-#            병렬·DAG·우선순위 없음. 재실행은 첫 미완료 unit 부터. 모든 unit 완료 후 unit 결과를 worker-result.json 으로 합쳐
-#            기존 전체 review 로 — 기존 `run_worker worker-implement.md` 1회를 unit 별 fresh 워커 여러 회로 바꾼 것뿐이다.
+#            unit 사이에 이어지는 것은 worktree 의 코드 + 합의 문서 + 같은 Worker 세션의 대화 문맥 + implementation-context.json(앞 unit 이
+#            확정한 사실의 압축 색인 — 세션 기억은 source of truth 가 아니고 이 색인·문서가 체크포인트다). unit 별 리뷰·수정자·설계는 없다.
+#            Unit N 이 끝나기 전에는 N+1 을 시작하지 않는다 — 다음 unit 시작 권한은 러너만 갖는다.
+#            병렬·DAG·우선순위·worker pool 없음. 재실행은 첫 미완료 unit 부터(유효한 결과 + after-tree 일치면 워커 재호출 없이 테스트부터).
+#            모든 unit 완료 후 unit 결과를 worker-result.json 으로 합쳐 기존 전체 review 로.
 #   review : impl-review-loop.sh (리뷰어 게이트 → FIX_CODE 만 수정자 → 종결 검토)
 #            DOC_GAP → 사용자(REVIEW_DOC_GAP, doc-gap-resume.json), DEADLOCK/MAX_ROUNDS → 사용자
 #   doc-gap: 구현 후 DOC_GAP 재개 경로(doc-gap-resume.json 이 pending 인 동안 impl 지문 추론보다 우선). impl consensus 는 최초 워커 진입 전
@@ -40,7 +42,8 @@
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED(워커 DOC_GAP/USER_DECISION) | REVIEW_DOC_GAP | DOC_GAP_SOURCE_CHANGED | DOC_GAP_SCOPE_EXCEEDED |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
-#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION)
+#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
+#                 WORKER_SESSION_MISMATCH(세션 전제 불일치 — 자동 resume·자동 fresh 금지) | WORKER_SESSION_MISSING(이전 fresh-워커 실행의 묵시적 마이그레이션 금지))
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING)
 #   1 ENV_ERROR   환경·CLI 오류
 #
@@ -357,10 +360,13 @@ source "$SKILL_DIR/scripts/worker-invoke.sh"
 source "$SKILL_DIR/scripts/notify-done.sh"
 
 # ---------- 구현 단위 하나 실행 ----------
-# fresh 워커 → targeted test(실패 시 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json. unit 별 리뷰·수정자는 없다 —
-# 품질 승인은 모든 unit 뒤의 전체 review/verify 가 한다. targeted test 는 다음 unit 이 깨진 코드 위에 쌓이는 것을 막는 장치이지 리뷰의 대체가 아니다.
-# 완료 체크포인트가 유효하면(내용 + spec 지문) 통째로 건너뛴다. 중간에 멈춘 unit 은 워커부터 다시 돌되 before.tree 는 첫 시도의 것을
-# 재사용한다(unit 시작 시점의 증거). 러너는 unit 을 건너뛸지 판단하지 않는다(체크포인트가 유효한가만 본다).
+# Feature Worker 세션의 워커 턴 → targeted test(실패 시 같은 세션에 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json.
+# unit 별 리뷰·수정자는 없다 — 품질 승인은 모든 unit 뒤의 전체 review/verify 가 한다. targeted test 는 다음 unit 이 깨진 코드 위에
+# 쌓이는 것을 막는 장치이지 리뷰의 대체가 아니다. 완료 체크포인트가 유효하면(내용 + spec 지문) 통째로 건너뛴다.
+# 중간에 멈춘 unit 의 재개는 대화 진도가 아니라 **결과 JSON + 실제 tree** 로 판정한다: 직전 시도의 유효한 DONE 결과의 after-tree 가
+# 현재 tree 와 일치하면 워커 재호출 없이 테스트부터, tree 가 바뀌었는데 일치하는 유효 결과가 없으면 WORKER_OUTCOME_UNCERTAIN 으로
+# 멈춘다(새 세션 생성·같은 세션 임의 재호출 금지). 그 외에는 워커 턴부터 다시 돌되 before.tree 는 첫 시도의 것을 재사용한다
+# (unit 시작 시점의 증거). 러너는 unit 을 건너뛸지 판단하지 않는다(체크포인트가 유효한가만 본다).
 run_unit() { # unit-id
   local id="$1" unit_dir="$WORK_DIR/units/$1" test_cmd test_log test_rc test_retries=0 test_n=0 title
   local pending=()   # 이번 시도의 결과 파일(워커 → test-fix 순). targeted test 최종 PASS 전까지 context_updates 는 pending 이다
@@ -388,10 +394,51 @@ run_unit() { # unit-id
   fi
   # 앞 unit 들이 확정한 rolling context 를 재구성(완료 체크포인트가 유효한 것만) — 워커·test-fix 프롬프트에 들어간다
   impl_context_write "$id" || env_error "unit $id: implementation-context.json 재구성 실패 — 앞선 unit 의 완료 체크포인트가 유효하지 않음"
-  write_state worker RUNNING "" "unit $id: worker"
-  log "=== unit $id ($title) : fresh 워커 — context facts $(jq '.facts|length' "$IMPL_CONTEXT_FILE")건 — scope $(jq -c '{files:(.files|length), roots:(.new_file_roots|length)}' "$unit_dir/scope.json") ==="
-  RUN_TAG=worker run_worker worker-unit.md "$unit_dir"
-  pending+=("$unit_dir/worker-result.json")
+  # 세션 전제는 워커 호출 여부와 무관하게 unit 진입 시 확정한다(이전 체계 산출물의 묵시적 마이그레이션도 여기서 막힌다)
+  ensure_feature_worker_session
+  # ---------- 재개 판정: 대화 진도가 아니라 결과 JSON + 실제 tree ----------
+  # 직전 시도의 마지막 결과(worker → test-fix-NN 순)가 유효한 DONE 이고 그 after-tree 가 현재 tree 와 같으면
+  # CLI 호출은 끝났고 targeted test 전(또는 중)에 죽은 것이다 — 같은 워커를 재호출하지 않고 테스트부터 재개한다.
+  # 건너뛴 호출 몫의 범위 게이트(전체 scope + unit scope)는 모델 호출 0회로 여기서 다시 돈다.
+  local cur_tree resume_tag="" latest="" last_attempt="" fixes=0 fix_i fix_tag
+  cur_tree="$(snapshot_worktree_tree)" || env_error "unit $id: 작업 트리 스냅샷 실패"
+  [ ! -f "$unit_dir/worker-result.json" ] || latest=worker
+  [ ! -f "$unit_dir/worker-before.tree" ] || last_attempt=worker
+  for ((fix_i=1; fix_i<=MAX_TEST_RETRIES; fix_i++)); do
+    fix_tag="test-fix-$(printf '%02d' "$fix_i")"
+    [ ! -f "$unit_dir/$fix_tag-before.tree" ] || last_attempt="$fix_tag"
+    [ -f "$unit_dir/$fix_tag-result.json" ] || break
+    latest="$fix_tag"; fixes=$fix_i
+  done
+  if [ -n "$latest" ] && worker_result_valid "$unit_dir/$latest-result.json" \
+     && [ -f "$unit_dir/$latest-after.tree" ] && [ "$(cat "$unit_dir/$latest-after.tree")" = "$cur_tree" ] \
+     && jq -e '.status=="DONE"' "$unit_dir/$latest-result.json" >/dev/null 2>&1; then
+    # 유효한 UNDECIDED 결과 + tree 일치는 DOC_GAP 해결 후 재개 — resume 이 아니라 워커 턴을 다시 돈다(아래 일반 경로)
+    resume_tag="$latest"
+  elif [ -n "$last_attempt" ] && [ ! -f "$unit_dir/$last_attempt-after.tree" ] \
+       && [ "$cur_tree" != "$(cat "$unit_dir/$last_attempt-before.tree")" ]; then
+    # run_worker 는 CLI 반환 직후(게이트 전에) after-tree 를 기록한다 — before-tree 만 있고 after-tree 가 없는 시도는
+    # CLI 호출 중에 죽은 것이고, 그 위에 tree 까지 바뀌었으면 세션이 얼마나 진행됐는지 알 수 없다.
+    # (게이트 중단·실행 실패는 after-tree 가 남으므로 여기 걸리지 않고 기존 가드·재호출 규칙을 따른다.)
+    stop_need_user WORKER_OUTCOME_UNCERTAIN "unit $id: 직전 시도($last_attempt)가 CLI 호출 중에 중단됐고(after-tree 없음) 작업 트리가 호출 전 tree($(cat "$unit_dir/$last_attempt-before.tree"))와 다르다 — 대화 세션이 얼마나 진행됐는지 알 수 없으므로 새 세션을 만들거나 같은 세션을 자동 재호출하지 않고 원복도 하지 않는다. 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리고 재실행하거나, 변경을 유지하려면 사용자가 정리 방식을 명시하라"
+  fi
+  if [ -n "$resume_tag" ]; then
+    local baseline_resume violations
+    baseline_resume="$(read_worker_baseline_tree)" || env_error "unit $id: worker-baseline.tree 가 유효한 tree 를 가리키지 않음"
+    violations="$(feature_scope_violations "$(cat "$unit_dir/before.tree")" "$cur_tree" "$baseline_resume")"
+    [ -z "$violations" ] || stop_need_user SCOPE_VIOLATION "unit $id 재개 검사: feature-scope 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)) — 자동 원복 없음"
+    violations="$(SCOPE_MANIFEST_OVERRIDE="$unit_dir/scope.json" feature_scope_violations "$(cat "$unit_dir/before.tree")" "$cur_tree" "$baseline_resume")"
+    [ -z "$violations" ] || stop_need_user UNIT_SCOPE_VIOLATION "unit $id 재개 검사: unit scope 밖 경로가 바뀜($(printf '%s' "$violations" | paste -sd, -)) — 자동 원복 없음, 다음 unit 으로 가지 않음"
+    pending+=("$unit_dir/worker-result.json")
+    for ((fix_i=1; fix_i<=fixes; fix_i++)); do pending+=("$unit_dir/test-fix-$(printf '%02d' "$fix_i")-result.json"); done
+    test_retries=$fixes
+    log "unit $id: 직전 시도의 유효한 결과($resume_tag)가 현재 tree 와 일치 — 워커 재호출 없이 targeted test 부터 재개 (test_retries=$test_retries)"
+  else
+    write_state worker RUNNING "" "unit $id: worker"
+    log "=== unit $id ($title) : Feature Worker 세션 턴 — context facts $(jq '.facts|length' "$IMPL_CONTEXT_FILE")건 — scope $(jq -c '{files:(.files|length), roots:(.new_file_roots|length)}' "$unit_dir/scope.json") ==="
+    RUN_TAG=worker run_worker worker-unit.md "$unit_dir"
+    pending+=("$unit_dir/worker-result.json")
+  fi
   while :; do
     test_n=$((test_n + 1)); test_log="$unit_dir/targeted-test-$(printf '%02d' "$test_n").log"
     write_state worker RUNNING "" "unit $id: targeted test #$test_n"
@@ -417,6 +464,11 @@ run_unit() { # unit-id
     '{version:1, unit_id:$id, spec_hash:$h, worker_status:"DONE", targeted_test_status:"PASS", completed_at:$now}' \
     > "$unit_dir/done.json.tmp" && mv "$unit_dir/done.json.tmp" "$unit_dir/done.json" || env_error "unit $id: done.json 기록 실패"
   impl_context_write || env_error "unit $id: implementation-context.json 갱신 실패"
+  # 세션 저널의 진행 체크포인트 갱신 — 상태 문자열이 아니라 done.json·실제 tree 와 함께 대조되는 보조 기록이다
+  local done_tree; done_tree="$(snapshot_worktree_tree)" || env_error "unit $id: 완료 tree 스냅샷 실패"
+  worker_session_note_unit_done "$id" "$done_tree" || env_error "unit $id: worker-session.json 갱신 실패"
+  # 세션 교체 판단은 unit 경계에서만 — 관측 토큰이 임계치 이상이면 worker-handoff.json 을 쓰고 다음 unit 부터 fresh 세대
+  maybe_rotate_feature_worker_session "$id" "$done_tree"
   log "=== unit $id 완료 (done.json, context facts $(jq '.facts|length' "$IMPL_CONTEXT_FILE")건) ==="
 }
 

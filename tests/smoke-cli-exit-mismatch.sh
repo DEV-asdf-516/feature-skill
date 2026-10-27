@@ -71,9 +71,16 @@ EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 #     FAKE_WORKER_EXTRA(index|outside|baseline|manifest): valid 에 더해 기존 안전 게이트 위반을 만든다
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
+# codex 세션 계약(config.sh 어댑터): exec resume --help 는 resume 플래그 도움말, 이벤트 첫 줄은 thread.started(재개면 같은 id)
+RESUME_TID=""
+if [ "$1" = exec ] && [ "$2" = resume ]; then
+  [ "$3" = --help ] && { echo "usage: codex exec resume [--json] [--output-schema] [--output-last-message] [--sandbox]"; exit 0; }
+  RESUME_TID="$3"
+fi
 case " $* " in *" --json "*) ;; *) echo "codex without --json: $*" >&2; exit 9;; esac   # usage telemetry 는 --json 이벤트 JSONL 에서만 읽는다
 out=""; readonly_sb=0; prompt=""
 while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --sandbox) [ "$2" = read-only ] && readonly_sb=1; shift 2;; *) prompt="$1"; shift;; esac; done
+printf '{"type":"thread.started","thread_id":"%s"}\n' "${RESUME_TID:-mock-thread-$$}"
 printf '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":3,"output_tokens":10,"reasoning_output_tokens":4}}\n'   # usage.jsonl 행이 기록되게(stdout JSONL)
 echo "diagnostic line" >&2
 if [ "$readonly_sb" = 1 ]; then
@@ -154,7 +161,8 @@ reset_tree() { # 테스트 환경 정리(파이프라인 동작 아님)
   git checkout -q -- src; rm -rf src/gen/new.txt
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json .agent-work/feature-scope.lock.json \
     .agent-work/worker-baseline.tree .agent-work/worker-baseline.guard.json .agent-work/worker-outcome.guard.json .agent-work/worker-result.json \
-    .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* .agent-work/usage.jsonl .agent-work/cli-anomalies.jsonl
+    .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* \
+    .agent-work/worker-session.json .agent-work/worker-session.migrate* .agent-work/worker-handoff.json .agent-work/usage.jsonl .agent-work/cli-anomalies.jsonl
   rm -f "$MOCK_STATE"/*.n
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }

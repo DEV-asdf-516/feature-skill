@@ -346,6 +346,13 @@ FAKE_CODEX="$LOG_TARGET/fake-codex"
 printf '%s\n' \
   '#!/usr/bin/env bash' \
   'set -e' \
+  '# codex 세션 계약: exec resume --help / thread.started 첫 이벤트(재개면 같은 id)' \
+  'RESUME_TID=""' \
+  'if [ "$1" = exec ] && [ "$2" = resume ]; then' \
+  '  [ "$3" = --help ] && { echo "usage: codex exec resume [--json] [--output-schema] [--output-last-message] [--sandbox]"; exit 0; }' \
+  '  RESUME_TID="$3"' \
+  'fi' \
+  'printf "{\"type\":\"thread.started\",\"thread_id\":\"%s\"}\n" "${RESUME_TID:-mock-thread-$$}"' \
   'output_file=""' \
   'while [ "$#" -gt 0 ]; do' \
   '  case "$1" in -o) output_file="$2"; shift 2;; *) shift;; esac' \
@@ -431,6 +438,9 @@ fake_consensus_pass "$LOG_TARGET" impl
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 (cd "$LOG_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree > .agent-work/worker-baseline.tree')   # 기준선에 existing-under-root.txt 포함
 cp "$LOG_TARGET/.agent-work/worker-baseline.tree" "$LOG_TARGET/.agent-work/worker-baseline.tree.keep"
+# 이전 하위 사례의 unit 시도 산출물(UNDECIDED 결과 + 옛 tree)을 치운다 — 위에서 파일을 커밋해 작업 트리가 그 시도와 달라졌고,
+# 러너의 재개 판정은 그런 드리프트를 WORKER_OUTCOME_UNCERTAIN 으로 막는다(생산 동작). 이 하위 사례는 워커 진입 직후 시나리오를 새로 구성한다.
+rm -rf "$LOG_TARGET/.agent-work/units" "$LOG_TARGET/.agent-work/implementation-context.json"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"
 set +e
@@ -614,6 +624,7 @@ printf '%s\n' \
   'case " $* " in *" --output-schema "*) ;; *) echo "codex reviewer without --output-schema: $*" >&2; exit 9;; esac' \
   'case " $* " in *" -m gpt-6-astra "*) ;; *) echo "codex reviewer with wrong model: $*" >&2; exit 9;; esac' \
   'out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done' \
+  'printf "{\"type\":\"thread.started\",\"thread_id\":\"mock-thread-%s\"}\n" "$$"' \
   'printf "codex\n" >> "$FAKE_COUNT.codex"; cp "$FAKE_REVIEW" "$out"' \
   > "$REVIEW_SIDE/fake-codex-reviewer"
 printf '%s\n' '#!/usr/bin/env bash' 'printf "claude\n" >> "$FAKE_COUNT.claude"; exit 9' > "$REVIEW_SIDE/fake-claude-never"

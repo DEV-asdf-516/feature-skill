@@ -210,6 +210,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
     render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT} ${USER_DECISIONS_FILE}')"$VALIDATOR_OVERLAY"
   # conventions 는 검증자 프롬프트 본문에 이미 렌더링돼 있으므로 "" 를 넘긴다.
   # 검증자 세션은 호출마다 fresh 다(이름에 invocation id) — 종결 검토가 직전 검증자 대화에 anchoring 되지 않게 하고, 같은 라운드 재시도·Round 1 재시작도 옛 대화를 --resume 하지 않는다.
+  # 이 정책은 CLI 독립이다: codex 로 라우팅돼도 key 가 호출마다 다르고 accept 를 부르지 않으므로 codex exec resume 은 쓰이지 않는다(도구가 지원해도 의도적 미사용).
   # 라운드 간 상태는 위 prev_context 의 파일로만 넘긴다. 디자이너는 판정자가 아니라 문서 수정자이므로 stage 세션을 그대로 이어간다(아래).
   run_readonly_json_role VALIDATOR "validator-$TARGET-round-$tag-$(new_invocation_id)" "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
     || exit 1

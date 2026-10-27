@@ -270,6 +270,11 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
     exit 1
   fi
 
+  # 스키마·계약·근거·일관성 게이트를 모두 지난 뒤에만 이 invocation 의 세션을 수용한다 — 리뷰어 세션은 같은 attempt 안에서만
+  # 재사용되고(claude --resume / codex exec resume), 거부된 응답의 대화는 다음 실행이 잇지 않는다. attempt 가 바뀌면 key 가 바뀌어 fresh 다.
+  role_session_accept REVIEWER "reviewer-a$attempt_tag" "impl-review-a$attempt_tag-round-$tag" \
+    || { echo "[FAIL] 리뷰어 세션 확정 실패" >&2; exit 1; }
+
   # 승인은 verdict 와 issues 가 일치할 때만 인정 (API가 조건부 스키마를 막아 여기서 강제)
   if [ "$verdict" = "APPROVE" ]; then
     current_fingerprint=$(compute_approval_fingerprint)
@@ -346,6 +351,10 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   run_edit_role FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
   fixer_rc=$?
   set -e
+  # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 해소됐다(워커와 같은 편집 역할 의미).
+  # 결과 판정은 아래 index·manifest·기준선·write-set·지문 게이트가 하고, 게이트 중단 뒤의 재실행은 같은 스레드의 '의도된 새 턴'이다.
+  # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다. 리뷰어(읽기 전용) marker 는 건드리지 않는다.)
+  [ "$(role_cli FIXER)" != codex ] || rm -f "$(codex_resume_marker "fixer-a$attempt_tag")"
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료해도 재실행 가드는 남아야 한다
   baseline_changed=0
   baseline_file_after=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_after="$(cat "$WORK_DIR/worker-baseline.tree")"
@@ -392,6 +401,9 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
     echo "[WARN] CLI_EXIT_STATUS_MISMATCH: FIXER $(role_cli FIXER) exited $fixer_rc, but current invocation changed the working tree/decisions within scope; forwarding to the reviewer instead of replaying the fixer"
     record_cli_anomaly FIXER "$(role_cli FIXER)" "impl-fix-a$attempt_tag-round-$tag" "$fixer_rc" FORWARD_TO_REVIEWER "$fix_result"
   fi
+  # index·manifest·기준선·write-set 게이트와 CLI 판정을 지나 이 수정 결과가 다음 리뷰로 넘어가는 시점 — 수정자 세션도 attempt 단위로 수용한다.
+  role_session_accept FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" \
+    || { echo "[FAIL] 수정자 세션 확정 실패" >&2; exit 1; }
   echo "--- 수정자 판정 (decisions.md 신규 기록) ---"
   tail -n +"$((decisions_lines_before + 1))" "$WORK_DIR/decisions.md" | sed 's/^/  /'
 

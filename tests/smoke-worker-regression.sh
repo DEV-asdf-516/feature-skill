@@ -35,6 +35,7 @@ cat > "$TMP/bin/fake-codex-worker" <<'EOF'
 out=""; while [ "$#" -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done
 [ -n "$out" ] || { echo "no -o" >&2; exit 9; }
 echo "worker $FAKE_WORKER_MODE" >> "$FAKE_WORKER_LOG"
+printf '{"type":"thread.started","thread_id":"mock-thread-%s"}\n' "$$"   # codex 세션 계약 — 워커 세션 수용(role_session_accept)이 이 이벤트를 요구한다
 printf '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}\n'
 case "$FAKE_WORKER_MODE" in
   DONE) printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > "$out";;

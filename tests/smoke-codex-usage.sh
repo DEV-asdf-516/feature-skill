@@ -89,7 +89,8 @@ rowf() { row "$1" | jq -r "$2"; }
 reset_tree() {
   git checkout -q -- src
   rm -rf .agent-work/units .agent-work/implementation-context.json .agent-work/implementation-units.lock.json .agent-work/feature-scope.lock.json .agent-work/worker-baseline.tree \
-    .agent-work/worker-result.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* .agent-work/usage.jsonl \
+    .agent-work/worker-result.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/reviews/impl-attempt-* .agent-work/.session-* \
+    .agent-work/worker-session.json .agent-work/worker-session.migrate* .agent-work/worker-handoff.json .agent-work/usage.jsonl \
     .agent-work/cli-anomalies.jsonl .agent-work/worker-outcome.guard.json "$MOCK_STATE"/*
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }

@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "feature worker session handoff",
+  "description": "Feature Worker 세션 교체(회전) 제어 정보. 러너가 unit 완료(targeted test PASS) 직후에만 쓰고, 다음 세대의 첫 호출 전에 스키마·계약 지문·git tree 일치를 검증한다. 구현 사실은 여기 담지 않는다 — 그것은 implementation-context.json 의 몫이다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "generation", "last_completed_unit", "next_unit", "source_tree", "contract_fingerprint", "context_file"],
+  "properties": {
+    "version": { "const": 1 },
+    "generation": { "type": "integer", "minimum": 2, "description": "교체 후 세대 번호 (최초 세션이 1)" },
+    "last_completed_unit": { "type": "string", "minLength": 1 },
+    "next_unit": { "type": "string", "minLength": 1 },
+    "source_tree": { "type": "string", "pattern": "^[0-9a-f]{40,64}$", "description": "교체 시점 작업 트리의 git tree — 새 세대 첫 호출 전과 일치해야 한다" },
+    "contract_fingerprint": { "type": "string", "minLength": 1, "description": "worker-session.json 과 같은 워커 규칙·프롬프트 계약 지문" },
+    "context_file": { "type": "string", "minLength": 1, "description": "새 세션이 다시 읽을 구현 사실 색인(implementation-context.json)" }
+  }
+}
