@@ -202,9 +202,26 @@ stop_need_user() { # reason detail
   write_state "$STAGE" NEED_USER "$1" "$2"
   exit 2
 }
+# 오케스트레이터가 문서를 쓰기 직전에 읽는 유일한 출력이 이 반환이다. 그래서 설계·구현 문서 요청(DESIGN_MISSING / IMPL_DOCS_MISSING)에는
+# 이 worktree 의 conventions.md 본문을 그대로 덧붙여 "작성 직전 재대조" 를 강제한다 — 세션 첫 프롬프트에 주입된 원본 conventions 는
+# 긴 세션에서 멀어지고 snapshot 된 worktree 사본과 다를 수 있다. CONVENTIONS_FILE 은 위에서 worktree 로 재바인딩돼 있다.
+# 훅(PreToolUse 거부)으로 하지 않는 이유: 거부는 대조를 강제하지 못하고 문서 본문 재출력만 만든다. 러너 흐름 밖의 임의 문서 수정은
+# 검증자(v18 부터 impl 검증자도 conventions 수신)가 하류에서 잡는다.
+print_conventions_for_docs() { # reason
+  case "$1" in DESIGN_MISSING|IMPL_DOCS_MISSING) ;; *) return 0;; esac
+  [ -f "$CONVENTIONS_FILE" ] || return 0
+  local doc_names="design.md"
+  [ "$1" = IMPL_DOCS_MISSING ] && doc_names="implementation.md·approach.md"
+  echo
+  echo "[PROJECT CONVENTIONS] ($CONVENTIONS_FILE) — $doc_names 작성 직전 재대조용. 이 worktree 사본이 기준이다."
+  echo "대조 절차: ① 아래 규칙 중 이번 문서의 변경 대상·계약·책임 배치에 적용되는 항목을 고른다 ② 그 항목이 요구하는 방식을 문서에 명시 반영한다(명시적 project convention 이 직접 요구한 방식은 material decision 이다 — 워커 재량으로 남기지 않는다) ③ 적용 규칙이 하나도 없으면 문서 전제·비범위 절에 '적용 conventions: 없음 — <사유>' 한 줄을 남긴다(decisions.md 는 합의 지문 대상이므로 거기엔 쓰지 않는다)."
+  cat "$CONVENTIONS_FILE"
+  echo
+}
 stop_need_docs() {
   log "NEED_DOCS ($1): $2"
   write_state "$STAGE" NEED_DOCS "$1" "$2"
+  print_conventions_for_docs "$1"
   exit 3
 }
 env_error() {

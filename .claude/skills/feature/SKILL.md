@@ -25,7 +25,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id> --new    # 같은 worktre
 ```
 
 2. 사용자 요구를 `<worktree>/.agent-work/request.md`에 기록(원문 + 해석한 범위 + 명시적 제외). 스펙 폴더(`<skill_dir>/specs/feature_<번호>/`)에 문서·이미지가 있으면 전부 읽어 반영. **모호하면 추측 대신 사용자에게 질문**하고 `decisions.md`에 `- [USER-QUESTION][scope=design] <질문> → <답>` 형식으로 기록(Phase 0 의 요구·설계 질문은 항상 `scope=design`).
-3. `<worktree>/.agent-work/design.md` 초안: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위. 갈리는 설계 판단은 옵션을 제시해 사용자 결정을 받는다. 아래에서 `.agent-work/…` 는 항상 피처 worktree 안의 경로다.
+3. `<worktree>/.agent-work/design.md` 초안: 목표, API/데이터 계약, 에러·동시성 처리, 테스트 기준, 비범위. 갈리는 설계 판단은 옵션을 제시해 사용자 결정을 받는다. 아래에서 `.agent-work/…` 는 항상 피처 worktree 안의 경로다. **문서 작성 직전 conventions 재대조.** 러너는 `NEED_DOCS`(`DESIGN_MISSING` / `IMPL_DOCS_MISSING`) 로 돌아올 때 출력 끝에 **그 worktree 의** `conventions.md` 본문을 `[PROJECT CONVENTIONS]` 블록으로 덧붙인다(worktree 에 없으면 생략). 세션 첫 프롬프트에 주입된 원본 conventions 가 아니라 snapshot 된 worktree 사본이 기준이다. 문서를 쓰기 전에 그 블록과 대조해 적용 규칙을 골라 문서에 명시 반영한다(명시적 convention 이 직접 요구한 방식은 material decision 이다 — 워커 재량으로 남기지 않는다). 적용 규칙이 없으면 문서 전제·비범위 절에 `적용 conventions: 없음 — <사유>` 한 줄을 남긴다(`decisions.md` 는 합의 지문 대상이므로 거기엔 쓰지 않는다). 러너 흐름 밖에서 문서를 임의 수정한 경우의 누락은 검증자가 잡는다(검증자 계약 v18 부터 impl 검증자도 conventions 를 받는다).
 
 ## Phase 1 — 러너 실행
 
@@ -64,7 +64,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id>
 
 ### 구현 문서 작성 (`IMPL_DOCS_MISSING` 반환 시)
 
-합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다.
+합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다. `IMPL_DOCS_MISSING` 반환 출력 끝의 `[PROJECT CONVENTIONS]` 블록(worktree 사본)과 대조해 적용 규칙을 REQUIRED 로 반영한다(Phase 0 3번과 같은 절차).
 
 1. `.agent-work/implementation.md` — **무엇을** 구현하는가(도메인 지식)를 **material implementation contract** 수준으로 확정한다. 계획서가 아니지만 코드 blueprint 도 아니다 — 워커가 제품·아키텍처·책임 경계·재사용 관계·비용 특성을 새로 선택하지 않을 만큼만 구체화한다. 구현 대상마다 필요한 것만 확정한다: 변경·생성 대상 / material public·package symbol 과 signature / 입력·출력 계약 / 책임 경계(누가 판단·조립하는가) / 외부 상태 변경 / 중요한 호출 관계 / 중요한 상태 변경 순서 / 테스트할 observable behavior / 테스트 계약. 자동으로 쓰지 않는 것: private helper 이름·개수, local 변수 이름, local collection 배치, for/stream, 동일 overload 중 하나, 의미 차이 없는 intermediate result type, production pseudocode(material control-flow 가 복잡해 오해를 막을 때만). 형식 예:
    ```

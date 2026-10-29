@@ -59,6 +59,10 @@ fi
 for prompt_file in "$VALIDATOR_PROMPT_FILE" "$DESIGNER_PROMPT_FILE"; do
   [ -f "$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $prompt_file" >&2; exit 1; }
 done
+# 검증자에게 conventions 는 run_readonly_json_role 인자("")가 아니라 프롬프트 본문의 ${PROJECT_CONVENTIONS} 로만 전달된다.
+# 플레이스홀더가 빠진 프롬프트는 conventions.md 를 조용히 누락시키므로(2026-10-29 impl 검증자 사고) 유료 호출 전에 막는다.
+grep -qF '${PROJECT_CONVENTIONS}' "$VALIDATOR_PROMPT_FILE" \
+  || { echo "[FAIL] 검증자 프롬프트에 \${PROJECT_CONVENTIONS} 플레이스홀더 없음 — conventions.md 가 검증자에게 전달되지 않는다: $VALIDATOR_PROMPT_FILE" >&2; exit 1; }
 # 검증자 오버레이(판정 전략)는 유료 호출 전에 한 번만 확정한다 — 프로필 이름이 있는데 파일이 없으면 여기서 중단.
 VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1
 echo "검증자: $VALIDATOR_MODEL / effort=$VALIDATOR_EFFORT / profile=$(validator_profile)"
@@ -208,7 +212,8 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
     grep -E "^[[:space:]]*- \[USER-QUESTION\]\[scope=($user_decision_scopes)\]" "$WORK_DIR/decisions.md" || true; } > "$user_decisions"
   validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" USER_DECISIONS_FILE="$user_decisions" \
     render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT} ${USER_DECISIONS_FILE}')"$VALIDATOR_OVERLAY"
-  # conventions 는 검증자 프롬프트 본문에 이미 렌더링돼 있으므로 "" 를 넘긴다.
+  # conventions 는 검증자 프롬프트 본문(validator-review-design.md / -impl.md 1행의 ${PROJECT_CONVENTIONS})에 이미 렌더링돼 있으므로 "" 를 넘긴다.
+  # 두 프롬프트 파일 모두 이 플레이스홀더를 가져야 한다 — 하나라도 빠지면 그 단계 검증자는 conventions.md 를 받지 못한다(위 start-up 검사가 막는다).
   # 검증자 세션은 호출마다 fresh 다(이름에 invocation id) — 종결 검토가 직전 검증자 대화에 anchoring 되지 않게 하고, 같은 라운드 재시도·Round 1 재시작도 옛 대화를 --resume 하지 않는다.
   # 이 정책은 CLI 독립이다: codex 로 라우팅돼도 key 가 호출마다 다르고 accept 를 부르지 않으므로 codex exec resume 은 쓰이지 않는다(도구가 지원해도 의도적 미사용).
   # 라운드 간 상태는 위 prev_context 의 파일로만 넘긴다. 디자이너는 판정자가 아니라 문서 수정자이므로 stage 세션을 그대로 이어간다(아래).

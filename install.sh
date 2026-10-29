@@ -110,13 +110,15 @@ else
   # (contains 검사는 "echo disabled ...guard.sh" 같은 비활성 문자열도 통과시킨다)
   for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh"; do
     hook_event="${hook_entry%%:*}"; hook_script="${hook_entry#*:}"
-    expected_command="$(jq -r --arg event "$hook_event" \
-      '.hooks[$event][].hooks[] | select(.type == "command") | .command' "$SOURCE_ROOT/.claude/settings.json")"
+    # 같은 이벤트에 훅이 여러 개일 수 있으므로 스크립트 이름으로 해당 항목 하나만 고른다(여러 줄 비교로 항상 실패하던 버그 수정).
+    expected_command="$(jq -r --arg event "$hook_event" --arg script "/$hook_script" \
+      '[.hooks[$event][].hooks[] | select(.type == "command" and (.command | endswith($script))) | .command][0]' "$SOURCE_ROOT/.claude/settings.json")"
     if ! jq -e --arg event "$hook_event" --arg cmd "$expected_command" \
         '[.hooks[$event][]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length > 0' \
         "$TARGET_SETTINGS" >/dev/null; then
       echo "[WARN] $TARGET_SETTINGS 의 $hook_event 에 $hook_script 미등록. 아래를 hooks 에 직접 추가하세요:"
-      jq --arg event "$hook_event" '{hooks: {($event): .hooks[$event]}}' "$SOURCE_ROOT/.claude/settings.json"
+      jq --arg event "$hook_event" --arg script "/$hook_script" \
+        '{hooks: {($event): [.hooks[$event][] | select(any(.hooks[]; .type == "command" and (.command | endswith($script))))]}}' "$SOURCE_ROOT/.claude/settings.json"
       manual_steps=1
     fi
   done

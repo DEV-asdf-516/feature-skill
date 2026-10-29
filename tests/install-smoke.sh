@@ -300,10 +300,13 @@ mkdir -p "$LOG_TARGET/.agent-work"
 printf '이전 피처 로그\n' > "$LOG_TARGET/.agent-work/live.log"
 printf '이전 산출물\n' > "$LOG_TARGET/.agent-work/previous.txt"
 set +e
-(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh" --new --archive-as live-regression) >/dev/null 2>&1
+(cd "$LOG_TARGET" && bash "$LOG_SKILL/scripts/feature-run.sh" --new --archive-as live-regression) >"$LOG_TARGET/.need-docs-design.out" 2>&1
 new_rc=$?
 set -e
 [ "$new_rc" = 3 ] || fail "live.log 아카이브: 새 피처 초기화 종료 코드가 3이 아님 ($new_rc)"
+# NEED_DOCS 반환은 worktree conventions.md 를 덧붙인다 — 이 시점엔 conventions.md 가 없으므로 블록이 없어야 한다
+grep -q '\[PROJECT CONVENTIONS\]' "$LOG_TARGET/.need-docs-design.out" \
+  && fail "NEED_DOCS conventions 주입: conventions.md 가 없는데 블록이 출력됨"
 [ "$(cat "$LOG_TARGET/.agent-work/archive/live-regression/live.log")" = '이전 피처 로그' ] \
   || fail "live.log 아카이브: 이전 로그 내용이 보존되지 않음"
 [ -f "$LOG_TARGET/.agent-work/archive/live-regression/previous.txt" ] \
@@ -316,10 +319,18 @@ mkdir -p "$LOG_TARGET/.agent-work/reviews"
 # 설계 검증자는 PASS 를 실제 -o 경로에 쓰는 가짜 codex 로 돈다(미리 깔아 둔 리뷰 파일은 이번 invocation 의 결과로 인정되지 않는다)
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 set +e
-(cd "$LOG_TARGET" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+printf 'SMOKE-CONV-RULE-1: 러너 NEED_DOCS 주입 확인용\n' > "$LOG_TARGET/conventions.md"
+(cd "$LOG_TARGET" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" bash "$LOG_SKILL/scripts/feature-run.sh") >"$LOG_TARGET/.need-docs-impl.out" 2>&1
 resume_rc=$?
 set -e
 [ "$resume_rc" = 3 ] || fail "중첩 tee: 설계 합의 후 구현 문서 대기 종료 코드가 3이 아님 ($resume_rc)"
+# IMPL_DOCS_MISSING 반환 출력 끝에 그 worktree 의 conventions.md 본문이 [PROJECT CONVENTIONS] 블록으로 붙어야 한다(오케스트레이터 작성 직전 재대조)
+grep -q '\[PROJECT CONVENTIONS\]' "$LOG_TARGET/.need-docs-impl.out" \
+  || fail "NEED_DOCS conventions 주입: IMPL_DOCS_MISSING 출력에 [PROJECT CONVENTIONS] 블록 없음"
+grep -q 'SMOKE-CONV-RULE-1' "$LOG_TARGET/.need-docs-impl.out" \
+  || fail "NEED_DOCS conventions 주입: conventions.md 본문이 출력에 없음"
+grep -q 'implementation.md·approach.md 작성 직전' "$LOG_TARGET/.need-docs-impl.out" \
+  || fail "NEED_DOCS conventions 주입: 대상 문서 안내(implementation.md·approach.md)가 없음"
 consensus_start_count="$(grep -c 'consensus-loop design 시작' "$LOG_TARGET/.agent-work/live.log")"
 [ "$consensus_start_count" = 1 ] \
   || fail "중첩 tee: consensus-loop 시작 로그가 ${consensus_start_count}회 기록됨 (1회여야 함)"
