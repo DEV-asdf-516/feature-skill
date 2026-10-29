@@ -47,7 +47,8 @@ FIXER_CLI=""
 # 15: 검증 대상을 production diff 동일성 → material decision 으로 되돌림. CODE_SPEC_GAP 은 material 구현 계약 하나가 열린 경우만(일곱 입장 조건 + "무엇이 달라지는가" gate), helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection 은 워커 소유 local expression. REUSE_DISCOVERY_GAP 은 새 responsibility boundary 에만(feature-local DTO/entity/private helper 제외). "두 워커 다른 diff" 기준 폐기.
 # 16: 판정 격리 — 검증자는 호출마다 fresh 세션, 종결 검토 입력은 직전 blocker 의 구조화된 주장·증거(prev-blockers-*.json — why_blocks_now 제외)와 decisions.md 를 뺀 문서 diff 뿐. [round N] ACCEPT/REJECT 이력은 판정 입력이 아니며 "REJECT 된 이슈 재제기 금지" 는 폐기(검증자가 독립 재판정, 불일치는 DEADLOCK 으로 사용자에게).
 # 17: 검증자 입력에서 decisions.md 원본을 뺐다 — 러너가 추린 확정 사용자 결정 파일(reviews/user-decisions-<target>.md, [USER-QUESTION][scope=…] 줄만)을 준다. v16 실모델에서 검증자가 decisions.md 의 REJECT 사유를 읽고 추론에 쓴 것이 관측됨.
-VALIDATOR_CONTRACT_VERSION=17
+# 18: validator-review-impl.md 1행에 ${PROJECT_CONVENTIONS} 추가 — design 검증자만 conventions.md 본문을 받고 impl 검증자는 받지 못하던 누락 수정(consensus-loop 는 두 검증자 모두에 인자 "" 를 넘기고 프롬프트 본문 렌더링에만 의존한다). 루프 start-up 에서 플레이스홀더 부재를 fail-closed 로 검사.
+VALIDATOR_CONTRACT_VERSION=18
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.

@@ -360,6 +360,7 @@ bash tests/worker-regression.sh      # 워커 material-contract 충실도. 사�
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).
 - **이전 피처 문맥이 섞임**: `.agent-work/.session-*` 가 남아 있는 것. 새 피처 시작 시 Phase 0의 archive 절차를 따른다.
 - **오케스트레이터에 conventions 가 안 보임**: 훅은 세션당 첫 프롬프트에만 넣는다(마커 `$TMPDIR/claude-conventions-injected/<session_id>`). 새 세션을 열거나 마커를 지우면 다시 주입된다. `FEATURE_ROLE_CHILD=1` 환경에서는 의도적으로 넣지 않는다.
+- **`NEED_DOCS` 출력 끝에 `[PROJECT CONVENTIONS]` 블록이 붙음**: 의도된 동작. 러너가 `DESIGN_MISSING`·`IMPL_DOCS_MISSING` 로 돌아올 때 문서가 놓이는 worktree 의 `conventions.md` 를 그대로 덧붙여, 오케스트레이터가 문서 작성 직전에 다시 대조하게 한다. worktree 에 `conventions.md` 가 없으면 생략된다.
 - **`[FINALIZE_CONFLICT]`**: 피처(B→F)와 원본(B→O)이 같은 부분을 바꿨다. 아무것도 반영되지 않았고 worktree·브랜치·index 도 그대로다. `finalize.json.conflict_files` 의 파일을 원본이나 worktree 에서 정리한 뒤(worktree 를 고쳤으면 러너 재실행으로 재승인) 같은 명령을 다시 낸다.
 - **`[FAIL] feature.json ... 에 finalize 기준선(bootstrap_tree)이 없다`**: 생성 시점 tree 를 알 수 없는 경우다. version 1 metadata 의 `new-from-branch` worktree 가 여기에 해당한다. 기준선을 추측하지 않으므로 결과를 사람이 직접 옮긴다(worktree·브랜치 유지).
 - **`APPLIED_CLEANUP_INCOMPLETE`**: 원본 반영은 끝났고 되돌리지 않는다. `finalize.json.cleanup.error` 의 원인(브랜치가 다른 worktree 에 체크아웃, ref lock 등)을 해소하고 같은 명령을 다시 내면 정리만 재시도한다.
