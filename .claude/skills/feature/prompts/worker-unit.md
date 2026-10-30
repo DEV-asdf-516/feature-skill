@@ -14,6 +14,11 @@ ${IMPL_CONTEXT}
 [/IMPLEMENTATION CONTEXT]
 위 블록(${WORK_DIR}/implementation-context.json 과 같음)은 앞선 unit 들이 **실제 코드로 확정한** 구현 문맥의 압축 색인이다 — 이전 워커의 대화·탐색 과정이 아니라, 다음 워커가 모르면 기존 방식을 다시 구현하거나 다른 방식을 고를 가능성이 높은 사실(symbol 중심)만 있다. 여기 적힌 symbol 은 현재 구현을 먼저 확인하고 재사용한다. 이 블록은 source of truth 가 아니다. 두 축을 구분한다 — **무엇을 해야 하는가(규범적 계약)** 는 design.md / implementation.md / approach.md > 현재 코드 > 이 블록 순이고, **지금 무엇이 존재하는가(현재 상태)** 는 현재 코드가 기준이다. 앞 unit 의 코드가 합의 문서와 충돌하면 그 코드를 precedent 로 따라가지 않고 문서 계약을 따른다 — 다만 현재 unit scope 밖의 기존 코드는 임의 수정하지 않고 undecided(DOC_GAP)로 보고한다. 블록이 코드나 문서와 충돌하면 블록을 믿고 진행하지 않는다. 블록이 있어도 실제 코드 탐색을 생략하지 않는다. 이전 턴(앞 unit)의 세션 기억도 같은 서열이다 — 기억한 symbol·계약이 현재 코드와 충돌하면 문서 → 현재 코드 → 세션 기억 순서로 판단한다.
 
+[RESOLVED GAPS]
+${GAP_CONTEXT}
+[/RESOLVED GAPS]
+[RESOLVED GAPS] 블록이 비어 있으면 이 unit 의 최초 턴이다. 비어 있지 않으면 이 unit 의 이전 턴에서 당신이 undecided 로 보고했고 **사용자가 이미 결정한** 항목이다 — 각 항목의 ID·원 질문·사용자 결정(decisions.md 의 `[USER-QUESTION][scope=impl][worker-gap=<ID>]` 줄)이 그대로 최종 계약이고 approach.md 에도 반영돼 있다. 구현 전에 ${WORK_DIR}/decisions.md 의 그 줄과 ${WORK_DIR}/approach.md 의 해당 절을 다시 읽고, 결정된 option 그대로 구현한다. 결정을 다른 접근으로 바꾸거나 "더 낫게" 해석하지 않으며, **같은 ID·같은 질문을 다시 undecided 로 내지 않는다**(러너가 RESOLVED_GAP_REPEATED 로 중단한다). 문서를 읽고도 그 결정으로는 구현이 불가능한 **새로운** material 질문이 생겼을 때만 그 새 질문을 undecided 로 낸다.
+
 전체 계약의 source of truth (unit 은 이 문서들이 이미 합의한 계약을 워커가 소화할 수 있는 범위로 자른 실행 단위일 뿐이다 — 새로운 설계 판단권은 없다):
 - ${WORK_DIR}/design.md = 배경 설계
 - ${WORK_DIR}/implementation.md = **무엇을** 구현하는지 — 변경·생성 대상, material public/package symbol 과 signature, 입력/출력 계약, 책임 경계, 외부 상태 변경, 중요한 호출 관계·상태 변경 순서, observable behavior, 테스트 계약

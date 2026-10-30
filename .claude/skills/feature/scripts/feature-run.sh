@@ -43,6 +43,7 @@
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
 #                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
+#                 RESOLVED_GAP_REPEATED(이미 사용자가 결정한 unit 미결정을 워커가 같은 질문으로 재반환 — 자동 재시도 없음) |
 #                 WORKER_SESSION_MISMATCH(세션 전제 불일치 — 자동 resume·자동 fresh 금지) | WORKER_SESSION_MISSING(이전 fresh-워커 실행의 묵시적 마이그레이션 금지))
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING)
 #   1 ENV_ERROR   환경·CLI 오류
@@ -197,9 +198,22 @@ write_state() { # stage status reason detail
     > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 }
 log() { echo "[$(date '+%F %T')] [feature-run] $*"; }
+# [Added: GOAL-6] 종료 공통 비용 보고 — DONE 뿐 아니라 NEED_USER/NEED_DOCS/ENV_ERROR 로 멈출 때도 usage_summary 의 같은 숫자로 보고하고 usage-summary.json 을 갱신한다.
+# usage.jsonl 을 다시 집계할 뿐이라 이중 카운트가 없다. usage.jsonl 이 없으면(실제 invocation 전 실패) 빈 상태로 표시한다. 모델 호출 없음, 종료 코드·상태 불변.
+report_usage_on_exit() {
+  if [ -s "$WORK_DIR/usage.jsonl" ]; then
+    usage_summary > "$WORK_DIR/usage-summary.json.tmp" && mv "$WORK_DIR/usage-summary.json.tmp" "$WORK_DIR/usage-summary.json" || true
+    local cost_line; cost_line="$(usage_cost_report_line)" || cost_line=""
+    [ -z "$cost_line" ] || log "$cost_line (상세: $WORK_DIR/usage-summary.json)"
+  else
+    log "비용(usage_summary): child invocation 없음 — usage.jsonl 없음(시작 전 중단)"
+  fi
+  return 0
+}
 stop_need_user() { # reason detail
   log "NEED_USER ($1): $2"
   write_state "$STAGE" NEED_USER "$1" "$2"
+  report_usage_on_exit
   exit 2
 }
 # 오케스트레이터가 문서를 쓰기 직전에 읽는 유일한 출력이 이 반환이다. 그래서 설계·구현 문서 요청(DESIGN_MISSING / IMPL_DOCS_MISSING)에는
@@ -221,15 +235,24 @@ print_conventions_for_docs() { # reason
 stop_need_docs() {
   log "NEED_DOCS ($1): $2"
   write_state "$STAGE" NEED_DOCS "$1" "$2"
+  report_usage_on_exit
   print_conventions_for_docs "$1"
   exit 3
 }
 env_error() {
   log "ENV_ERROR: $*"
   write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "$*"
+  report_usage_on_exit
   exit 1
 }
-trap 'rc=$?; case $rc in 0|2|3) ;; *) jq -e ".status==\"ENV_ERROR\"" "$STATE" >/dev/null 2>&1 || write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "예기치 않은 종료 (exit $rc)";; esac; release_runner_lock' EXIT
+# [Modified: 리뷰 3] 예기치 않은 종료(set -e·시그널 등 명시적 종료 함수를 거치지 않은 경로)에도 비용 보고를 남긴다. 명시적 경로(DONE/stop_need_user/
+# stop_need_docs/env_error)는 이미 report_usage_on_exit 를 불렀고 상태를 기록했으므로, 여기서는 상태가 아직 ENV_ERROR 가 아닐 때만 1회 보고한다(이중 출력 없음).
+on_unexpected_exit() { # rc
+  jq -e '.status=="ENV_ERROR"' "$STATE" >/dev/null 2>&1 && return 0
+  write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "예기치 않은 종료 (exit $1)"
+  [ -z "${WORK_DIR:-}" ] || report_usage_on_exit
+}
+trap 'rc=$?; case $rc in 0|2|3) ;; *) on_unexpected_exit "$rc";; esac; release_runner_lock' EXIT
 [ -z "$FEATURE_ID" ] || log "피처 worktree: $ROOT (feature $FEATURE_ID, branch $BRANCH, $FEATURE_WORKTREE_MODE${FEATURE_SNAPSHOT_TREE:+, snapshot tree $FEATURE_SNAPSHOT_TREE}) — 문서·산출물은 $ROOT/$WORK_DIR"
 
 # ---------- preflight ----------
@@ -669,6 +692,9 @@ while :; do
       notify_feature_done || true   # DONE 기록 성공 뒤에만, 피처당 1회 — 실패해도 exit 0 그대로
       anomaly_n="$(cli_anomaly_count)"
       [ "$anomaly_n" -eq 0 ] || log "[WARN] CLI 종료코드 불일치 복구 $anomaly_n 건 — $CLI_ANOMALY_LOG (raw exit code 는 usage.jsonl 에 그대로)"
+      # [Added] 완료 보고: usage_summary 의 같은 숫자로 Claude 보고 비용 + Codex 추정 비용(API 표준 요금 환산) + 추정 불가 건수를 모두 적는다.
+      # reported+estimated 는 실제 청구액이 아니다. interactive 오케스트레이터 자체 비용은 usage.jsonl 범위 밖이라 섞지 않는다. (중단 경로도 같은 함수)
+      report_usage_on_exit
       log "DONE"
       exit 0;;
 

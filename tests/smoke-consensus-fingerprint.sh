@@ -67,7 +67,7 @@ if [ "$readonly_sb" = 1 ]; then
   exit 0
 fi
 echo "worker" >> "$MOCK_LOG"
-printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u01.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[]}' > "$out"
+printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u01.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' > "$out"
 exit 0
 EOF
 # --- mock claude: 디자이너·리뷰어·수정자 — 이 스모크에서는 호출되면 안 된다 (검증자 픽스처가 항상 PASS) ---

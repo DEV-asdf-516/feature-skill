@@ -115,8 +115,9 @@ for k in invocations=1 tokens_total=10500 input_effective=10000 output=500 reaso
 done
 est="$(printf '%s' "$summary" | sed -n 's/.* estimated_cost_usd=\([0-9.e-]*\).*/\1/p')"
 comb="$(printf '%s' "$summary" | sed -n 's/.* combined_cost_usd_estimate=\([0-9.e-]*\).*/\1/p')"
-[ "$(awk -v e="$est" 'BEGIN{printf "%.7f", e}')" = "0.0007100" ] && [ "$comb" = "$est" ] || fail "D: codex 추정 비용 불일치(기대 0.00071): estimated=$est combined=$comb — $summary"
-grep -q 'reported_cost_usd=n/a estimated_cost_usd=0.00071' "$TMP/state/DOCGAP.out" || fail "D: 행 단위 출력에 reported(n/a)/estimated 가 없음 — $TMP/state/DOCGAP.out"
+# gpt-6-luna(GOAL-6 요금표): uncached 3000*0.1 + cache_read 6000*0.01 + cache_write 1000*0.125(30m) + output 500*0.5 = 300+60+125+250 = 735 /1M
+[ "$(awk -v e="$est" 'BEGIN{printf "%.7f", e}')" = "0.0007350" ] && [ "$comb" = "$est" ] || fail "D: codex 추정 비용 불일치(기대 0.000735): estimated=$est combined=$comb — $summary"
+grep -q 'reported_cost_usd=n/a estimated_cost_usd=0.000735' "$TMP/state/DOCGAP.out" || fail "D: 행 단위 출력에 reported(n/a)/estimated 가 없음 — $TMP/state/DOCGAP.out"
 ! grep -q 'cost_usd(보고된 행만)\|input_effective(claude)\|tokens_total(codex)' "$TMP/state/DOCGAP.out" || fail "D: 옛 provider 라벨이 남아 있음"
 pass "D. usage summary: usage_summary(schema v3) 재사용 — codex 행 reported=null 이어도 estimated/combined 비용·tokens_total·cost_unknown=0 이 provider 중립 라벨로 출력"
 

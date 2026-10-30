@@ -255,6 +255,53 @@ ensure_feature_worker_session() {
     fi
   fi
 }
+# ---------- [Added] 해결된 unit 미결정의 재개 컨텍스트 (P0-3) ----------
+# unit 워커가 UNDECIDED 로 멈춘 뒤 사용자가 decisions.md 에 답을 적고 러너가 체크포인트를 WORKER_PENDING 으로 수리했을 때,
+# 같은 unit 의 다음 워커 턴에만 "원 질문·ID·답·approach.md 참조"를 ${GAP_CONTEXT} 로 넣는다. 연결은 ID 로만 한다 —
+# doc-gap-resume.json 의 gaps[].key(<unit-id>#<n>) 와 decisions.md 의 [worker-gap=<unit-id>#<n>] 태그. 다른 unit 의 gap 은 넣지 않는다.
+# 정상 최초 호출(체크포인트 없음/다른 unit/미수리)에는 빈 문자열이다. 답이 없는 항목은 doc_gap_resolved_current 가 거르므로 여기 오지 않는다.
+# 부산물: unit-dir/resolved-gaps.json(이번 턴에 전달한 해결 항목 — RESOLVED_GAP_REPEATED 판정의 근거). 모델 호출 없음.
+unit_resolved_gaps_json() { # unit-id → JSON 배열([{key,tag,question,options,location,answer}]) 또는 빈 출력
+  local id="$1" tag answer rows='[]'
+  [ -f "$DOC_GAP_RESUME" ] || return 0
+  [ "$(doc_gap_next_step)" = WORKER_PENDING ] && [ "$(doc_gap_field '.origin')" = worker ] && [ "$(doc_gap_field '.unit_id')" = "$id" ] || return 0
+  doc_gap_resolved_current || return 0
+  while IFS= read -r tag; do
+    answer="$(doc_gap_answer_line "$tag")"
+    [ -n "$answer" ] || return 0   # 일부만 해결된 상태는 해결로 추정하지 않는다(러너가 먼저 막지만 fail-closed)
+    rows="$(printf '%s' "$rows" | jq -c --arg tag "$tag" --arg a "$answer" --slurpfile g "$DOC_GAP_RESUME" \
+      '. + [ ($g[0].gaps[] | select(.tag==$tag) | {key, tag, question, options, location, answer:$a}) ]')"
+  done < <(jq -r --arg p "$id#" '.gaps[] | select(.key|startswith($p)) | .tag' "$DOC_GAP_RESUME")
+  [ "$(printf '%s' "$rows" | jq 'length')" -gt 0 ] || return 0
+  printf '%s' "$rows"
+}
+# RESOLVED_GAP_REPEATED 가드(unit-dir/resolved-gap-repeated.json): 활성이면 현재 작업 트리가 expected(반복 턴 이전 tree)와 같아야 통과(가드 비활성화).
+# 다르면 1 — 호출자가 모델 호출 없이 중단. 반복 턴의 변경은 이미 결정된 사항을 모른 채 만들어졌으므로 자동으로 이어 받지 않는다(자동 원복도 없음).
+require_resolved_gap_repeated_guard_resolved() { # unit-dir
+  local g="$1/resolved-gap-repeated.json" expected current
+  [ -f "$g" ] || return 0
+  jq -e '.active == true' "$g" >/dev/null 2>&1 || return 0
+  expected="$(jq -r '.expected' "$g")"
+  current="$(snapshot_worktree_tree)" || return 1
+  if [ "$current" != "$expected" ]; then
+    echo "[STOP] 직전 워커 턴($(jq -r '.label' "$g"))이 이미 결정된 미결정을 다시 반환했고 그 턴의 코드 변경이 남아 있음 — 기대: $expected / 현재: $current. 자동 복구하지 않음." >&2
+    return 1
+  fi
+  jq '.active = false' "$g" > "$g.tmp" && mv "$g.tmp" "$g"
+}
+# 반복 판정: 해결 항목(resolved-gaps)과 이번 결과의 undecided 를 '질문 + 위치(location)' 완전 일치(공백 trim)로 대조한다 — 질문 문자열만 비교하면
+# 같은 문구가 다른 위치에서 새로 생긴 미결정을 오탐한다. 출력: 반복 항목 JSON 배열(없으면 []).
+resolved_gap_repeated_items() { # resolved-gaps-json result-path
+  jq -c --argjson rg "$1" '
+    def norm: (. // "") | gsub("^\\s+|\\s+$"; "");
+    [ .undecided[] | (.decision_needed|norm) as $q | (.location|norm) as $loc
+      | ($rg[] | select((.question|norm) == $q and (.location|norm) == $loc)) as $r
+      | {key:$r.key, tag:$r.tag, question:$r.question, location:$r.location, answer:$r.answer, returned:{location, decision_needed, options, kind}} ]' "$2"
+}
+unit_resolved_gap_context() { # resolved-gaps-json → 프롬프트 블록 텍스트
+  printf '%s' "$1" | jq -r '.[] | "- [\(.key)] (\(.location)) 질문: \(.question)\n  선택지: \(.options | join(" | "))\n  사용자 결정(decisions.md 원문): \(.answer)\n  approach.md: 이 결정이 반영돼 있다 — 해당 절을 다시 읽고 그대로 구현한다"'
+}
+
 run_worker() { # prompt-file [unit-dir]
   local prompt_file="$1" unit_dir="${2:-}" tag="${RUN_TAG:-worker}"
   local prompt worker_rules reference_code result out_dir tree_prefix unit_json="" unit_id="" unit_scope=""
@@ -275,6 +322,13 @@ run_worker() { # prompt-file [unit-dir]
   # 직전 워커 호출 결과가 불확실한 채 남은 변경 위에 같은 워커를 다시 부르지 않는다(사용자가 호출 전 tree 로 복구한 뒤에만)
   require_worker_outcome_guard_resolved \
     || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))의 완료 여부가 불확실한데 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 되돌린 뒤 재실행. 자동 원복·자동 재호출 없음"
+  # [Added] 직전 턴이 이미 해결된 미결정을 다시 돌려보내 멈췄으면(RESOLVED_GAP_REPEATED 가드) 그 턴의 코드 변경을 사용자가 확인하고
+  # 작업 트리를 그 턴 이전 tree(expected)로 되돌리기 전에는 같은 턴을 반복하지 않는다(worker-outcome 가드와 같은 fail-closed, 자동 원복 없음).
+  # 되돌려졌으면 가드를 비활성화하고 같은 세션의 워커 턴을 다시 돈다. 가드 파일 삭제는 복구가 아니다(문서 계약).
+  if [ -n "$unit_dir" ]; then
+    require_resolved_gap_repeated_guard_resolved "$unit_dir" \
+      || stop_need_user RESOLVED_GAP_REPEATED "unit $unit_id: 직전 워커 턴이 이미 사용자가 결정한 미결정($(jq -r '[.repeated[].key] | join(",")' "$unit_dir/resolved-gap-repeated.json"))을 같은 질문·같은 위치로 다시 반환해 멈췄고, 그 턴의 코드 변경이 아직 남아 있다(기대 tree: $(jq -r .expected "$unit_dir/resolved-gap-repeated.json") / 현재: $(snapshot_worktree_tree)). 변경을 확인(git diff <expected> <observed>)한 뒤 작업 트리를 기대 tree 로 되돌리고 decisions.md 의 답과 approach.md 반영(결정이 워커가 읽는 절에 실제로 들어갔는지)을 확인해 재실행하면 같은 세션의 워커 턴이 다시 돈다 — 자동 원복·자동 재시도·세션 초기화 없음(근거: $unit_dir/resolved-gap-repeated.json). approach.md 를 더 고쳐야 하면 기존 post-DOC_GAP 계약대로 doc-gap-resume.json 을 치우고 재실행(impl 재합의)"
+  fi
   # 세션 전제(저널) 확정·검증 — 불일치는 모델 호출 0회로 멈춘다
   ensure_feature_worker_session
   # 턴 구분: 이 key 의 '수용된' 세션이 있으면(claude 평문 파일 또는 codex 원장 — session_exists) 후속 턴(resume)이다 —
@@ -295,9 +349,27 @@ run_worker() { # prompt-file [unit-dir]
   # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
   local impl_context=""
   if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
-  # REVIEW_FILE / GAP_CONTEXT 는 review-gap 호출(worker-review-gap.md)에서만 채워진다 — 다른 템플릿에는 그 변수가 없다
+  # REVIEW_FILE / GAP_CONTEXT 는 review-gap 호출(worker-review-gap.md)에서 호출자가 채운다. [Modified] unit 워커 턴(worker-unit.md)에서는
+  # 이 unit 의 해결된 미결정(doc-gap-resume.json ↔ decisions.md, ID 연결)만 GAP_CONTEXT 로 들어가고 그 외(정상 최초 호출)는 빈 문자열이다.
+  local gap_context="${GAP_CONTEXT:-}" resolved_gaps=""
+  if [ -n "$unit_dir" ]; then
+    rm -f "$unit_dir/resolved-gaps.json"
+    if [ "$tag" = worker ]; then
+      resolved_gaps="$(unit_resolved_gaps_json "$unit_id")" || env_error "unit $unit_id: 해결된 미결정 컨텍스트 구성 실패"
+      if [ -n "$resolved_gaps" ]; then
+        # [Added] 재개 턴은 체크포인트가 기록한 source tree 에서만 시작한다 — 가드 파일(resolved-gap-repeated.json)의 존재와 무관하게,
+        # 반복 턴(또는 다른 무엇)이 남긴 source 변경이 있으면 모델 호출 0회로 멈춘다. 가드 파일만 지우고 코드를 되돌리지 않는 우회를 막는다.
+        # 판정 근거는 doc-gap-resume.json 의 source_tree(WAITING_USER 단계의 같은 검사와 동일 계약, DOC_GAP_SOURCE_CHANGED).
+        doc_gap_source_unchanged \
+          || stop_need_user DOC_GAP_SOURCE_CHANGED "unit $unit_id 재개 워커 턴 직전 source worktree 가 체크포인트 tree($(doc_gap_field '.source_tree'))와 다르다(현재 $(snapshot_worktree_tree)) — 직전 턴(반복 미결정 등)의 변경이 남아 있으면 확인한 뒤 그 tree 로 명시적으로 되돌리고 재실행, 변경을 유지하려면 doc-gap-resume.json 을 치우고 재실행. 자동 restore·자동 재호출 없음"
+        printf '%s\n' "$resolved_gaps" > "$unit_dir/resolved-gaps.json"
+        gap_context="$(unit_resolved_gap_context "$resolved_gaps")"
+        log "unit $unit_id: 해결된 미결정 $(printf '%s' "$resolved_gaps" | jq 'length')건을 재개 프롬프트에 전달 ($(printf '%s' "$resolved_gaps" | jq -r '[.[].key] | join(",")'))"
+      fi
+    fi
+  fi
   prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$reference_code" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
-    UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" REVIEW_FILE="${REVIEW_FILE:-}" GAP_CONTEXT="${GAP_CONTEXT:-}" \
+    UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" REVIEW_FILE="${REVIEW_FILE:-}" GAP_CONTEXT="$gap_context" \
     render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT}')" \
     || env_error "워커 프롬프트 렌더링 실패"
   local stamp raw; stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
@@ -317,6 +389,8 @@ run_worker() { # prompt-file [unit-dir]
   run_edit_role WORKER "$session" "$tag-$stamp" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$result" --allowedTools "Bash"
   worker_rc=$?
   set -e
+  # [Added] CLI 의 실제 종료 코드와 claude result 판정 진단은 따로 보존한다 — result 가 유일하지 않으면 worker_rc 는 실패지만 cli_rc 는 CLI 값 그대로다
+  local cli_rc="${RUN_EDIT_ROLE_CLI_RC:-$worker_rc}" result_diag="${RUN_EDIT_ROLE_RESULT_DIAG:-}"
   # 세션 교체 판단이 '이 unit 의 이 호출' usage 행만 보도록 label 을 남긴다(usage.jsonl 의 마지막 WORKER 행 = 이전 unit 일 수 있다)
   [ -z "$unit_dir" ] || printf '%s\n' "$tag-$stamp" > "$unit_dir/last-usage-label"
   # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 그 불확실성이 해소됐다.
@@ -370,19 +444,28 @@ run_worker() { # prompt-file [unit-dir]
   #   rc≠0 + 유효한 결과 JSON(worker_result_valid: parse·필드 구조·DONE/UNDECIDED 모순) → CLI 종료코드 불일치로 기록하고 재실행 없이 계속
   #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 없음 → 기존 실행 실패(재실행해도 같은 편집이 중복될 위험이 없다)
   #   rc≠0 + 결과 없음/깨짐 + 작업 트리 변화 있음 → WORKER_OUTCOME_UNCERTAIN 으로 중단, 가드 기록, 자동 원복·자동 재호출 없음
-  if [ "$worker_rc" -ne 0 ]; then
-    local worker_cli; worker_cli="$(role_cli WORKER)"
-    if worker_result_valid "$result"; then
-      log "[WARN] CLI_EXIT_STATUS_MISMATCH: WORKER $worker_cli exited $worker_rc, but current invocation produced a valid worker result ($result); continuing without replay"
-      record_cli_anomaly WORKER "$worker_cli" "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" STRUCTURED_RESULT "$result" || env_error "cli-anomalies.jsonl 기록 실패"
-    elif [ "$after_tree" = "$before_tree" ]; then
-      role_raw_diag_tail "$raw" >&2
-      env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인)"
-    else
-      record_worker_outcome_guard "$before_tree" "$after_tree" WORKER "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$worker_rc" "$result" || env_error "worker-outcome 가드 기록 실패"
-      role_raw_diag_tail "$raw" >&2
-      stop_need_user WORKER_OUTCOME_UNCERTAIN "워커${unit_id:+ (unit $unit_id)} $worker_cli 가 exit $worker_rc 로 끝났고 유효한 결과 JSON($result)이 없는데 작업 트리는 바뀜(전: $before_tree / 후: $after_tree). 완료 여부를 알 수 없으므로 같은 워커를 자동 재호출하지 않고 변경도 원복하지 않음 — 사용자가 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리면 재실행 시 워커가 다시 돈다(worker-outcome.guard.json)"
+  # [Modified: GOAL-6] 판정 순서를 "결과 유효성 → CLI rc" 로 둔다. CLI rc 가 0 이어도 결과가 스키마/의미 검증(worker_result_valid)에 실패했고 작업 트리가
+  # 바뀌었으면 같은 WORKER_OUTCOME_UNCERTAIN 가드(before/after tree·invocation_id·raw 로그·원본 rc·이유)로 멈춘다 — ENV_ERROR 로만 끝나 변경이 가드 없이 남지 않게.
+  # 트리 변경이 없으면 기존 실행 실패(재실행 허용). 유효 결과 + rc≠0 의 CLI_EXIT_STATUS_MISMATCH 복구는 그대로다. 자동 원복·재호출·세션 교체 없음.
+  local worker_cli; worker_cli="$(role_cli WORKER)"
+  if ! worker_result_valid "$result"; then
+    local why="${result_diag:-}"
+    if [ -z "$why" ]; then
+      if [ -s "$result" ]; then why="WORKER_RESULT_SCHEMA_INVALID"; else why="WORKER_RESULT_MISSING"; fi
     fi
+    if [ "$after_tree" = "$before_tree" ]; then
+      role_raw_diag_tail "$raw" >&2
+      env_error "워커 실행 실패 (모델 '$WORKER_MODEL' 확인, CLI exit $cli_rc, 결과 판정: $why — 결과 $result, 원본 로그 $raw${result_diag:+.stream.jsonl})"
+    fi
+    record_worker_outcome_guard "$before_tree" "$after_tree" WORKER "$tag-$stamp${unit_id:+ (unit $unit_id)} [$why]" "$cli_rc" "$result" \
+      "${RUN_EDIT_ROLE_INVOCATION_ID:-}" "$raw" "$why" || env_error "worker-outcome 가드 기록 실패"
+    role_raw_diag_tail "$raw" >&2
+    stop_need_user WORKER_OUTCOME_UNCERTAIN "워커${unit_id:+ (unit $unit_id)} $worker_cli 가 exit $cli_rc 로 끝났고 유효한 결과 JSON($result)이 없는데(결과 판정: $why, 원본 로그 $raw, invocation ${RUN_EDIT_ROLE_INVOCATION_ID:-?}) 작업 트리는 바뀜(전: $before_tree / 후: $after_tree). 완료 여부를 알 수 없으므로 같은 워커를 자동 재호출하지 않고 변경도 원복하지 않음 — 사용자가 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리면 재실행 시 워커가 다시 돈다(worker-outcome.guard.json)"
+  fi
+  if [ "$worker_rc" -ne 0 ]; then
+    # CLI_EXIT_STATUS_MISMATCH 복구는 '유일하고 유효한 결과'에만(위에서 유효성이 확인된 뒤에만 여기 온다)
+    log "[WARN] CLI_EXIT_STATUS_MISMATCH: WORKER $worker_cli exited $cli_rc, but current invocation produced a valid worker result ($result); continuing without replay"
+    record_cli_anomaly WORKER "$worker_cli" "$tag-$stamp${unit_id:+ (unit $unit_id)}" "$cli_rc" STRUCTURED_RESULT "$result" || env_error "cli-anomalies.jsonl 기록 실패"
   fi
   jq -e '.status' "$result" >/dev/null 2>&1 || env_error "워커 결과 JSON 이 스키마와 다름: $result"
   local status; status="$(jq -r '.status' "$result")"
@@ -390,7 +473,26 @@ run_worker() { # prompt-file [unit-dir]
   if { [ "$status" = DONE ] && [ "$n" -gt 0 ]; } || { [ "$status" = UNDECIDED ] && [ "$n" -eq 0 ]; }; then
     env_error "모순된 워커 결과: status=$status / undecided=$n"
   fi
-  # ---------- 결과 수용: 모든 게이트(index·manifest·기준선·write-set)와 결과 계약 검사를 지난 뒤에만 ----------
+  # [Added] 반복 미결정 판정은 세션 수용보다 앞에 둔다 — 이번 턴에 해결 항목을 전달했는데 같은 질문·같은 위치(공백 trim 후 완전 일치)를 다시
+  # undecided 로 냈으면 RESOLVED_GAP_REPEATED: 이 턴은 수용하지 않고(role_session_accept·저널 갱신 없음) 근거(해결 ID·답·반환 항목·반복 턴 전/후 tree)를
+  # unit-dir/resolved-gap-repeated.json 에 남겨 멈춘다. 새 체크포인트를 쓰지 않고(사용자 답은 유효한 채로 남는다) 자동 재시도·세션 초기화·자동 원복도 없다.
+  # 재실행은 사용자가 작업 트리를 expected(반복 턴 이전)로 되돌린 뒤에만 같은 세션으로 돈다(위 사전 가드). 표현만 비슷한 새 질문·같은 질문의 다른 위치는
+  # 완전 일치가 아니므로 정상 UNDECIDED 로 간다(별도 모델 검증 없음). 이미 확정된 세션에 반복 턴의 문맥이 남는 것은 되돌릴 수 없어 재개 프롬프트의
+  # 서열(합의 문서 → 현재 코드 → 세션 기억)이 덮는다 — 완전한 격리는 명시적 handoff(세션 교체)가 필요하며 여기서는 하지 않는다.
+  if [ "$status" = UNDECIDED ] && [ -n "$resolved_gaps" ]; then
+    local repeated
+    repeated="$(resolved_gap_repeated_items "$resolved_gaps" "$result")" || env_error "RESOLVED_GAP_REPEATED 판정(jq) 실패"
+    if [ "$(printf '%s' "$repeated" | jq 'length')" -gt 0 ]; then
+      jq -n --arg unit "$unit_id" --arg label "$tag-$stamp" --arg result "$result" --argjson rep "$repeated" \
+        --arg expected "$before_tree" --arg observed "$after_tree" --arg now "$(date '+%FT%T%z')" \
+        '{active:true, unit_id:$unit, label:$label, result:$result, repeated:$rep, expected:$expected, observed:$observed, session_accepted:false, recorded_at:$now}' \
+        > "$unit_dir/resolved-gap-repeated.json.tmp" && mv "$unit_dir/resolved-gap-repeated.json.tmp" "$unit_dir/resolved-gap-repeated.json" \
+        || env_error "resolved-gap-repeated.json 기록 실패"
+      log "[RESOLVED_GAP_REPEATED] unit $unit_id: 이미 결정된 미결정을 같은 질문·같은 위치로 재반환(세션 미수용) — $(printf '%s' "$repeated" | jq -r '[.[] | "[\(.key)] (\(.location)) \(.question) → \(.answer)"] | join(" ; ")')"
+      stop_need_user RESOLVED_GAP_REPEATED "unit $unit_id 워커가 사용자가 이미 결정한 미결정($(printf '%s' "$repeated" | jq -r '[.[].key] | join(",")'))을 같은 질문·같은 위치로 다시 반환했다 — 이 턴은 수용하지 않았고 자동 재시도·세션 초기화·자동 원복 없음. 그 턴의 코드 변경(git diff $before_tree $after_tree)을 확인한 뒤 작업 트리를 $before_tree 로 되돌리고, 결정이 approach.md 의 이 unit 절에 실제로 반영됐는지 확인해 재실행(같은 세션 워커 턴 재개; 근거: $unit_dir/resolved-gap-repeated.json, 결과 $result). approach.md 를 더 고쳐야 하면 기존 post-DOC_GAP 계약대로 doc-gap-resume.json 을 치우고 재실행(impl 재합의)"
+    fi
+  fi
+  # ---------- 결과 수용: 모든 게이트(index·manifest·기준선·write-set)와 결과 계약 검사·반복 미결정 판정을 지난 뒤에만 ----------
   # 세션 확정은 어댑터 공용 role_session_accept 가 한다 — claude 는 .new 세션 ID 커밋, codex 는 원장 .new 확정 + resume marker 해제.
   # 워커는 세션 재사용이 계약이므로 수용 실패(codex thread.started 미확정 등)는 조용히 fresh 로 돌지 않고 명시적으로 멈춘다.
   # UNDECIDED 결과도 유효한 턴이다(사용자 결정 뒤 같은 세션이 이어 받는다) — 수용은 status 와 무관하게 여기서 한다.
