@@ -180,7 +180,7 @@ case "$kind" in
     if [ -f "$MOCK_STATE/outside-$n" ]; then echo "outside by $unit" >> src/outside.txt; fi          # 전체 범위 밖
     if [ -f "$MOCK_STATE/unitscope-$n" ]; then echo "unit-scope leak by $unit" >> src/u03.txt; fi   # 전체 범위 안, unit scope 밖 (01/02 에서)
     if [ -f "$MOCK_STATE/undecided-$n" ]; then
-      emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[]}' "$n")"
+      emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n")"
       release; exit 0
     fi
     emit "$(printf '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u%s.txt","technique":"t","basis":"b"}],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":%s}' "$n" "$n" "$ctx")";;

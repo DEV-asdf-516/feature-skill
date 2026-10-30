@@ -534,14 +534,40 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
   esac
 }
 
+# ---------- 워커 CLI 도구 제한 (role=WORKER 에만, SH 강제) ----------
+# 워커가 CLI 관리형 하위 Agent·내장 백그라운드 실행을 쓰면 한 invocation 에 result 이벤트가 여러 개 남고(claude) 결과 판정이 깨진다
+# (2026-10 Unit 13: result 10개 → 약 $17 작업 폐기). 프롬프트 지시가 아니라 CLI 인자·child 환경변수로 막는다 — 최초 호출·resume·
+# handoff 뒤 새 세대 모두 같은 run_edit_role 경로를 지나므로 정책이 같다. 배열로 조립하고 eval 은 쓰지 않는다.
+#   claude: --disallowedTools Agent,ScheduleWakeup + child 환경변수 CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_AGENT_VIEW=1.
+#           SendMessage 는 금지하지 않는다. Monitor 등 무관한 도구도 임의로 막지 않는다. --allowedTools 는 독점 허용 목록이 아니므로 Agent 차단을 대체하지 못한다.
+#   codex : exec / exec resume 모두 -c 'agents.enabled=false' (전역 ~/.codex/config.toml 은 건드리지 않는다). 다른 -c 보다 뒤에 두어
+#           호출별 설정이 덮어쓰지 못하게 한다.
+# 설치된 CLI 가 이 옵션을 거부하면 그 호출은 그대로 실패한다 — 제한을 풀거나 무제한으로 재실행하지 않는다.
+# 이 제한이 막는 것은 CLI 관리형 하위 Agent 와 내장 백그라운드 기능이다. 워커가 일반 Bash 에서 `&`/nohup/별도 CLI 를 직접 띄우는 것까지
+# OS 수준에서 막지는 않으며, 그걸 위한 프로세스 감시는 두지 않는다(런너의 shell 게이트·result 유일성 판정이 사후에 잡는다).
+WORKER_CLAUDE_DISALLOWED_TOOLS="Agent,ScheduleWakeup"   # 아래 run_edit_role 이 배열로 조립한다(bash 3.2 호환 — mapfile 미사용)
+
 # 편집 역할(디자이너·수정자·워커). 원문 출력을 $raw(claude) 또는 $raw.events.jsonl + $raw.stderr.log(codex) 에 남기고 CLI 종료 코드를 그대로 돌려준다(호출자가 set +e 로 받는다).
 #   schema_file/out_json 이 비어 있지 않으면 스키마 강제 JSON 을 out_json 에 남긴다(워커). claude 는 structured_output 을 추출한다.
 #   conventions 는 run_readonly_json_role 과 같다. 나머지 인자는 claude 에만 붙는 추가 플래그(예: --allowedTools Bash).
+#   role=WORKER 면 위 워커 CLI 도구 제한이 두 CLI 모두에 붙는다(DESIGNER/FIXER 는 그대로).
+#   [Added] 전역 출력: RUN_EDIT_ROLE_CLI_RC = CLI 프로세스의 실제 종료 코드(반환값과 다를 수 있다 — claude result 판정 실패 시 반환값은 1 이지만 CLI rc 는 그대로 남긴다),
+#   RUN_EDIT_ROLE_RESULT_DIAG = claude result 판정 진단(CLAUDE_RESULT_MISSING|MULTIPLE|INVALID, 정상이면 빈 값). 호출자가 가드·보고에 쓴다.
+RUN_EDIT_ROLE_CLI_RC=0; RUN_EDIT_ROLE_RESULT_DIAG=""; RUN_EDIT_ROLE_INVOCATION_ID=""
 run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions schema_file out_json [claude_extra_args...]
   local role="$1" session="$2" label="$3" raw="$4" prompt="$5" conv="$6" schema="$7" out="$8"; shift 8
   local model effort cli rc=0 inv
+  RUN_EDIT_ROLE_CLI_RC=0; RUN_EDIT_ROLE_RESULT_DIAG=""; RUN_EDIT_ROLE_INVOCATION_ID=""
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
-  inv="$(new_invocation_id)"
+  inv="$(new_invocation_id)"; RUN_EDIT_ROLE_INVOCATION_ID="$inv"   # CLI 실행 전 preflight 실패(위 return 1)는 invocation 이 아니다
+  # [Added] 워커 전용 CLI 정책 — 배열로 조립(eval 없음). 다른 역할은 빈 배열.
+  local policy_args=() policy_env=()
+  if [ "$role" = WORKER ]; then
+    case "$cli" in
+      claude) policy_args=(--disallowedTools "$WORKER_CLAUDE_DISALLOWED_TOOLS"); policy_env=(CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 CLAUDE_CODE_DISABLE_AGENT_VIEW=1) ;;
+      codex)  policy_args=(-c 'agents.enabled=false') ;;
+    esac
+  fi
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
@@ -551,18 +577,20 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       local schema_args=()
       [ -z "$schema" ] || schema_args=(--output-schema "$schema" -o "$out")
       # --json stdout(이벤트 JSONL) 과 stderr 를 분리한다 — tee 로 합치면 JSONL 이 깨지고 pipe rc 가 섞인다. raw codex rc 를 그대로 돌려준다.
+      # 워커 정책(-c agents.enabled=false)은 resume/new 양쪽에 같은 위치(다른 -c 뒤)로 들어간다.
       if [ "$CODEX_SESSION_MODE" = resume ]; then
         codex_resume_cli_check || return 1
         local sandbox_args=(-c 'sandbox_mode="workspace-write"')
         [ "$CODEX_RESUME_HAS_SANDBOX_FLAG" -eq 1 ] && sandbox_args+=(--sandbox workspace-write)
         codex_resume_marker_write "$session" "$inv" "$label" || return 1
         "$CODEX_BIN" exec resume "$CODEX_SESSION_ID" --json -m "$model" -c "model_reasoning_effort=\"$effort\"" \
-          "${sandbox_args[@]}" ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+          "${sandbox_args[@]}" ${policy_args[@]+"${policy_args[@]}"} ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
       else
         "$CODEX_BIN" exec --json -m "$model" -c "model_reasoning_effort=\"$effort\"" --sandbox workspace-write \
-          ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
+          ${policy_args[@]+"${policy_args[@]}"} ${schema_args[@]+"${schema_args[@]}"} "$prompt" > "$raw.events.jsonl" 2> "$raw.stderr.log" || rc=$?
       fi
       log_role_usage codex "$role" "$model" "$label" "$raw.events.jsonl" "$rc" "$inv"
+      RUN_EDIT_ROLE_CLI_RC="$rc"
       if [ "$CODEX_SESSION_MODE" = resume ]; then
         # 불일치면 이번 호출의 -o 결과도 제거한다 — 호출자(run_worker 의 "rc≠0 + 유효 결과" 복구 경로)가
         # 어느 스레드의 것인지 모르는 결과를 수용하지 못하게 한다. 작업 트리 변경은 원복하지 않는다(worker-outcome 가드가 판정).
@@ -582,19 +610,36 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
       [ -z "$schema" ] || schema_args=(--json-schema "$(cat "$schema")")
       session_args=$(claude_session_args "$session")
       # stream-json: model 호출(assistant 메시지)마다 usage 가 오므로 '마지막 턴의 실제 컨텍스트'(context_last_turn)를 잴 수 있다.
-      # 마지막 result 이벤트는 --output-format json 의 결과와 같은 객체다 — 그걸 $raw 로 뽑아 아래 소비자(structured_output·usage)는 그대로 둔다.
-      FEATURE_ROLE_CHILD=1 "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
+      # 유일한 result 이벤트는 --output-format json 의 결과와 같은 객체다 — 그걸 $raw 로 뽑아 아래 소비자(structured_output·usage)는 그대로 둔다.
+      # [Modified] 워커 정책: child 프로세스에만 환경변수(env …)와 --disallowedTools 를 붙인다. 다른 역할은 두 배열이 비어 있어 인자가 같다.
+      env ${policy_env[@]+"${policy_env[@]}"} FEATURE_ROLE_CHILD=1 "$CLAUDE_BIN" -p $session_args --model "$model" --effort "$effort" --permission-mode acceptEdits \
         ${conv_args[@]+"${conv_args[@]}"} \
         ${schema_args[@]+"${schema_args[@]}"} \
-        "$@" --verbose --output-format stream-json \
+        "$@" ${policy_args[@]+"${policy_args[@]}"} --verbose --output-format stream-json \
         "$prompt" \
         > "$raw.stream.jsonl" || rc=$?
-      claude_stream_extract_result "$raw.stream.jsonl" "$raw"
-      log_role_usage claude "$role" "$model" "$label" "$raw" "$rc" "$inv"   # 실패해도 파싱 가능한 usage 는 남긴다
-      if [ "$rc" -eq 0 ]; then
-        claude_session_commit "$session"
-        # 스키마 역할이면 structured_output 을 꺼낸다. 없으면 out 은 빈 파일로 남고 호출자의 스키마 검사가 잡는다.
-        [ -z "$schema" ] || jq -e '.structured_output' "$raw" > "$out" 2>/dev/null || rc=1
+      # [Modified] result 이벤트가 정확히 하나일 때만 $raw 를 만든다. 0개·복수·파싱 실패는 명시적 오류(CLAUDE_RESULT_*)이며 중간의 유효해 보이는
+      # 이벤트를 골라 승인하지 않는다 — $raw 가 없으면 아래 structured_output 추출이 실패하고 호출자(run_worker)는 "rc≠0 + 유효 결과 없음" 경로
+      # (작업 트리가 바뀌었으면 WORKER_OUTCOME_UNCERTAIN 가드, 아니면 실행 실패)를 탄다. 원본 stream.jsonl·CLI rc·호출 전후 tree 는 그대로 남는다.
+      # CLI 가 0 으로 끝났어도 결과가 유일하지 않으면 성공으로 돌려주지 않는다(세션도 확정하지 않는다). 같은 작업을 자동 재호출하지 않는다.
+      RUN_EDIT_ROLE_CLI_RC="$rc"
+      if claude_stream_extract_result "$raw.stream.jsonl" "$raw" "$role/$label"; then
+        log_role_usage claude "$role" "$model" "$label" "$raw" "$RUN_EDIT_ROLE_CLI_RC" "$inv"   # exit_code 는 CLI 의 실제 값
+      else
+        RUN_EDIT_ROLE_RESULT_DIAG="$CLAUDE_RESULT_DIAG"
+        [ "$rc" -ne 0 ] || rc=1
+        # [Added: GOAL-6] 결과를 판정할 수 없어도 실제로 시작한 invocation 이므로 usage 행 1개(cost unknown)를 남긴다 — 숨은 0건 금지, 모델 재호출 없음
+        log_claude_usage_unavailable "$label" "$role" "$model" "$raw.stream.jsonl" "$RUN_EDIT_ROLE_CLI_RC" "$inv" "$CLAUDE_RESULT_DIAG"
+      fi
+      # [Modified: 리뷰 2] 세션 확정은 결과 검증 뒤에만 — 스키마 역할(워커)은 여기서 확정하지 않고 호출자의 role_session_accept 가
+      # worker_result_valid 통과 뒤에 확정한다(codex 원장 .new 와 같은 2단계). 첫 턴의 결과가 무효면 .session-<key>.new 만 남고 다음 실행은
+      # 그 대화를 잇지 않는다(실패 세션 격리). 이미 확정된 세션의 후속 턴이 무효로 끝난 경우는 되돌릴 수 없으므로 재개 프롬프트의
+      # 서열(문서 → 현재 코드 → 세션 기억)이 그 턴의 기억을 덮는다. 스키마 없는 편집 역할(디자이너·수정자)은 종전처럼 rc 0 에서 확정한다.
+      [ "$rc" -ne 0 ] || [ -n "$schema" ] || claude_session_commit "$session"
+      # [Modified] 스키마 역할: 유일한 result($raw)가 있으면 CLI rc 와 무관하게 structured_output 을 꺼낸다 — codex 의 -o 파일과 같은 의미다.
+      # rc≠0 + 유일하고 유효한 결과를 수용할지는 호출자의 CLI_EXIT_STATUS_MISMATCH 판정이 정한다(세션 확정도 호출자의 accept). structured_output 이 없으면 out 을 남기지 않는다.
+      if [ -n "$schema" ] && [ -f "$raw" ]; then
+        jq -e '.structured_output' "$raw" > "$out" 2>/dev/null || { rm -f "$out"; [ "$rc" -ne 0 ] || rc=1; }
       fi
       ;;
   esac
@@ -809,9 +854,12 @@ require_designer_scope_guard_resolved() {
 # 호출 전 tree(expected)를 남겨, 사용자가 작업 트리를 그 tree 로 명시적으로 되돌리기 전에는 재실행이 모델 호출 0회로 같은 사유로 다시 멈춘다.
 # 자동 restore/reset/checkout/stash 없음. worker-baseline.guard.json 과 같은 fail-closed 패턴이며 워커 전용의 최소 구현이다.
 WORKER_OUTCOME_GUARD="$WORK_DIR/worker-outcome.guard.json"
-record_worker_outcome_guard() { # expected(before-tree) observed(after-tree) role label raw_exit_code result_path
-  jq -n --arg expected "$1" --arg observed "$2" --arg role "$3" --arg label "$4" --argjson rc "$5" --arg result "$6" --arg now "$(date '+%FT%T%z')" \
-    '{active:true, expected:$expected, observed:$observed, role:$role, label:$label, raw_exit_code:$rc, result:$result, recorded_at:$now}' \
+record_worker_outcome_guard() { # expected(before-tree) observed(after-tree) role label raw_exit_code result_path [invocation_id] [raw_log] [reason]
+  # [Modified: GOAL-6] invocation_id·raw 로그 경로·오류 이유를 함께 남긴다(CLI rc 가 0 이어도 결과 검증 실패 + 트리 변경이면 같은 가드를 쓴다)
+  jq -n --arg expected "$1" --arg observed "$2" --arg role "$3" --arg label "$4" --argjson rc "$5" --arg result "$6" \
+    --arg inv "${7:-}" --arg raw "${8:-}" --arg reason "${9:-}" --arg now "$(date '+%FT%T%z')" \
+    '{active:true, expected:$expected, observed:$observed, role:$role, label:$label, raw_exit_code:$rc, result:$result,
+      invocation_id:(if $inv=="" then null else $inv end), raw_log:(if $raw=="" then null else $raw end), reason:(if $reason=="" then null else $reason end), recorded_at:$now}' \
     > "$WORKER_OUTCOME_GUARD.tmp" && mv "$WORKER_OUTCOME_GUARD.tmp" "$WORKER_OUTCOME_GUARD"
 }
 # 활성 가드가 있으면 현재 작업 트리가 expected(호출 전 tree)와 같아야 통과(가드 비활성화). 다르면 1 — 호출자가 모델 호출 없이 중단.
@@ -1308,21 +1356,65 @@ verify_approved_fingerprint() {
 #     reasoning_output=Σreasoning_output_tokens(output 의 부분집합 — total/cost 에 다시 더하지 않음), num_turns=turn.completed 개수.
 #     input_uncached = input_total − cache_read − cache_write (진단 partition), input_effective = 그 셋의 합 = input_total, tokens_total = input_total + output.
 #   schema_version 3: codex 행에 input/cache/output/reasoning_output/num_turns 채움, cost_kind/estimated_cost_usd/pricing_basis 추가. usage_summary 는 v2·legacy 행도 읽는다.
+#   schema_version 4 [Modified]: codex 추정 수식을 (uncached×input + cache_read×cached + cache_write×cache_write_rate + output×output)/1M 으로 바꾸고
+#     turn 단위로 가격 구간(단문/장문)을 고른다. pricing_assumptions(판단 불가 과금 조건을 명시한 가정 목록)·long_context_turns 추가.
+#     v3 까지는 cache_write 토큰을 일반 입력 단가로 계산했다(캐시 쓰기 별도율 없음) — 옛 행은 rewrite 하지 않는다.
 # =============================================================
-USAGE_SCHEMA_VERSION=3
+USAGE_SCHEMA_VERSION=4
 
-# codex 모델 가격표 — per 1M tokens USD: "<input> <cached input> <output>". 한 곳에만 둔다(파서 안에 숫자를 흩뿌리지 않는다).
-# 기준: 2026-09-23 공개 standard token rate(사용자 제공 표: GPT-5.6/6 Sol·Luna). 실제 청구(월정액·long-context·특수 billing)가 아니라 모델/루프 비용 비교용 추정치다.
-# 실제로 쓰는 모델만 둔다 — 여기 없는 모델은 estimated_cost_usd=null, cost_kind=unknown 으로 집계된다(추측 가격 금지).
-CODEX_PRICING_BASIS="openai-standard-token-rate-2026-09-23"
-codex_model_pricing() { # model → "input cached output" (per 1M USD) / 가격표에 없으면 1
+# codex 모델 가격표 — 한 곳에만 둔다(파서 안에 숫자를 흩뿌리지 않는다). per 1M tokens USD, JSON:
+#   {input, cached(캐시 입력), cache_write_30m, cache_write_12h, output, long:{같은 키}|null, long_context_input_tokens}
+#   long = 장문 구간(요청 입력이 long_context_input_tokens 를 초과하면 그 요청 전체가 장문 요금).
+#   등록된 5종은 cache_write_*·long 에 null 이 없다. 어떤 구간의 캐시 쓰기 단가가 null 이면 추측하지 않고 estimated=null(unknown) 로 둔다.
+#   실제 청구(ChatGPT/Codex 구독 결제액·크레딧 차감·service tier·리전 할증)가 아니라 API 표준 요금 환산 추정치다.
+#   여기 없는 모델은 estimated_cost_usd=null, cost_kind=unknown 으로 집계된다(추측 가격 금지).
+# [Modified: GOAL-6] 5종 전부 short/long 두 구간과 30분/12시간 캐시 쓰기 단가를 등록한다(null 없음). 기준: OpenAI API Standard, 2026-10-30 조회
+#   (developers.openai.com/api/docs/pricing · /guides/prompt-caching · /models/<id>). 규칙: long = 요청 입력 > 272,000(정확히 272,000 은 short) 일 때
+#   그 요청 전체에 적용, long 단가 = 입력·캐시 입력·캐시 쓰기 short×2 / 출력 short×1.5, 30분 캐시 쓰기 = 구간 입력 단가×1.25, 12시간 = ×2.5
+#   (캐시 쓰기는 입력 단가 위에 더하는 할증이 아니라 배타적 입력 토큰 분류). 정확한 모델 ID 만 매칭한다(gpt-6-sol ≠ gpt-6.1-sol).
+#   gpt-5.6-sol 단가는 2026-11-21 까지 최소 유지 예정인 프로모션 단가다 — 이 날짜 뒤에는 요금표 재확인이 필요하다(basis 의 날짜가 그 근거).
+CODEX_PRICING_BASIS="openai-api-standard-2026-10-30"
+codex_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
   case "$1" in
-    gpt-5.6-sol)  printf '4.00 0.40 20.00';;
-    gpt-6-sol)    printf '2.00 0.20 10.00';;
-    gpt-5.6-luna) printf '0.20 0.02 1.20';;
-    gpt-6-luna)   printf '0.10 0.01 0.50';;
-    *) return 1;;
+    gpt-6-astra)
+      printf '%s' '{"input":10,"cached":1,"cache_write_30m":12.5,"cache_write_12h":25,"output":50,"long_context_input_tokens":272000,"long":{"input":20,"cached":2,"cache_write_30m":25,"cache_write_12h":50,"output":75}}' ;;
+    gpt-5.6-sol)
+      printf '%s' '{"input":4,"cached":0.4,"cache_write_30m":5,"cache_write_12h":10,"output":20,"long_context_input_tokens":272000,"long":{"input":8,"cached":0.8,"cache_write_30m":10,"cache_write_12h":20,"output":30}}' ;;
+    gpt-6-sol)
+      printf '%s' '{"input":2,"cached":0.2,"cache_write_30m":2.5,"cache_write_12h":5,"output":10,"long_context_input_tokens":272000,"long":{"input":4,"cached":0.4,"cache_write_30m":5,"cache_write_12h":10,"output":15}}' ;;
+    gpt-5.6-luna)
+      printf '%s' '{"input":0.2,"cached":0.02,"cache_write_30m":0.25,"cache_write_12h":0.5,"output":1.2,"long_context_input_tokens":272000,"long":{"input":0.4,"cached":0.04,"cache_write_30m":0.5,"cache_write_12h":1,"output":1.8}}' ;;
+    gpt-6-luna)
+      printf '%s' '{"input":0.1,"cached":0.01,"cache_write_30m":0.125,"cache_write_12h":0.25,"output":0.5,"long_context_input_tokens":272000,"long":{"input":0.2,"cached":0.02,"cache_write_30m":0.25,"cache_write_12h":0.5,"output":0.75}}' ;;
+    *) return 1 ;;
   esac
+}
+# codex turn 목록 [{i,c,w,w12,o,r}] + 가격 JSON → {estimated_cost_usd, long_context_turns, assumptions[]} (jq 만 사용).
+#   turn 마다: uncached = max(0, i − c − w − w12) · 구간 = (long 이 있고 i > long_context_input_tokens 이면 long, 아니면 short — 272,000 은 short) ·
+#   cache_write: w12(12시간 캐시 쓰기 토큰이 이벤트에 **관측**된 경우 — cache_write_12h_input_tokens)는 12시간 단가, 나머지 w 는 30분 단가.
+#   w 와 w12 는 서로 겹치지 않는 분류라고 가정한다(w12 가 w 의 부분집합으로 중복 보고되면 캐시 쓰기가 이중 계산된다 — 그 가정도 assumptions 에 남긴다).
+#   TTL 근거(observed/assumed)는 w 또는 w12 중 하나라도 0 보다 크면 기록한다(12시간만 있는 turn 도 포함).
+#   TTL 분류가 관측되지 않으면(w12 없음) 전부 30분으로 보고 assumptions 에 남긴다. 구간의 캐시 쓰기 단가가 없으면(미등록) 추측하지 않고 estimated=null(unknown).
+#   장문 기준은 API 요청 단위다. codex 이벤트는 요청 단위 입력을 주지 않으므로 turn.completed 입력을 proxy 로 쓰고 long_context_tier=turn_proxy 로 한계를 명시한다 —
+#   invocation 누적 토큰으로 판정하지 않는다(작은 turn 여럿의 합이 272K 를 넘어도 long 이 아니다).
+codex_estimate_cost() { # turns_json pricing_json → JSON
+  jq -nc --argjson t "$1" --argjson p "$2" '
+    def nz: if . == null or . < 0 then 0 else . end;
+    def tier($i): if ($p.long != null and $p.long_context_input_tokens != null and $i > $p.long_context_input_tokens) then $p.long else $p end;
+    [ $t[] | (.i|nz) as $i | (.c|nz) as $c | (.w|nz) as $w | (.w12|nz) as $w12 | (.o|nz) as $o | tier($i) as $r
+      | { long: ($r != $p),
+          rate_missing: (($w > 0 and $r.cache_write_30m == null) or ($w12 > 0 and $r.cache_write_12h == null)),
+          cost: ( (([$i - $c - $w - $w12, 0] | max) * $r.input + $c * $r.cached + $w * ($r.cache_write_30m // 0) + $w12 * ($r.cache_write_12h // 0) + $o * $r.output) / 1000000 ) } ] as $rows
+    | ($rows | any(.rate_missing)) as $missing
+    | { estimated_cost_usd: (if $missing then null else ($rows | map(.cost) | add // 0) end),
+        long_context_turns: ($rows | map(select(.long)) | length),
+        assumptions: (if $missing then ["cache_write_rate=unregistered(estimate withheld — no guessed price)"] else
+          ["service_tier=standard(assumed; Flex/Batch/Fast tier and regional surcharge not observable)"]
+          + (if (($t | map(.w|nz) | add // 0) > 0) or (($t | map(.w12|nz) | add // 0) > 0) then
+               (if ($t | map(.w12|nz) | add // 0) > 0 then ["cache_write_ttl=observed(30m/12h split from events; cache_write_12h_input_tokens assumed disjoint from cache_write_input_tokens)"]
+                else ["cache_write_ttl=30m(assumed; TTL not observable in events)"] end) else [] end)
+          + (if $p.long != null then ["long_context_tier=turn_proxy(per turn.completed input_tokens>\($p.long_context_input_tokens); request-level input not observable, a turn may aggregate several requests)"]
+             else ["long_context_tier=not_registered(short tier applied to every turn)"] end) end) }'
 }
 
 new_invocation_id() { # 호출 직전 생성. 같은 label 재시도를 구분한다
@@ -1330,13 +1422,50 @@ new_invocation_id() { # 호출 직전 생성. 같은 label 재시도를 구분�
   else printf '%s-%s-%s' "$(date +%s)" "$$" "$RANDOM$RANDOM"; fi
 }
 
-# claude stream-json JSONL → 마지막 result 이벤트를 단일 JSON(= --output-format json 과 같은 객체)으로 뽑는다.
-# result 이벤트가 없고 파일이 type 없는 단일 객체면(구형 출력·mock) 그 객체를 그대로 쓴다. 둘 다 아니면 out 은 만들지 않는다(호출자 진단은 stream 파일).
-claude_stream_extract_result() { # stream_jsonl out_json
-  local line
-  line="$(jq -c 'select(type=="object" and (.type=="result" or (has("type")|not)))' "$1" 2>/dev/null | tail -1)"
-  [ -n "$line" ] || { cp "$1" "$2" 2>/dev/null; return 0; }
-  printf '%s\n' "$line" > "$2"
+# [Modified] claude stream-json JSONL → type=result 이벤트가 **정확히 하나**일 때만 그 객체(= --output-format json 과 같은 객체)를 out 에 쓴다(0).
+# 그 외에는 out 을 만들지 않고 1 을 돌려주며 사유를 stderr 에 남긴다 — 중간의 유효해 보이는 이벤트를 골라 승인하지 않는다(`tail -1` 선택 제거):
+#   CLAUDE_RESULT_MISSING  result 0개(빈 파일 포함)        CLAUDE_RESULT_MULTIPLE result n≥2 개(하위 Agent·백그라운드 실행이 result 를 여러 번 남긴 경우)
+#   CLAUDE_RESULT_INVALID  result 0개 + JSON 으로 못 읽는 줄이 있음
+# 레거시 단일 객체 경로(별도·명시): 파일 전체가 `type` 필드 없는 JSON 객체 정확히 한 줄이면(구형 --output-format json 출력, 테스트 mock) 그 객체를 result 로 쓴다.
+# 실제 stream-json 은 모든 이벤트에 type 이 있으므로 이 경로에 들어오지 않는다. 판정은 셸/jq 만 쓴다(추가 모델 호출 없음).
+CLAUDE_RESULT_DIAG=""   # 마지막 claude_stream_extract_result 의 진단 코드(성공이면 빈 값) — 호출자가 가드·메시지에 남긴다
+claude_stream_extract_result() { # stream_jsonl out_json [label]
+  local f="$1" out="$2" label="${3:-}" n_r=0 n_u=0 n_b=0 n_o=0 kind n
+  CLAUDE_RESULT_DIAG=""
+  rm -f "$out"
+  [ -f "$f" ] || { CLAUDE_RESULT_DIAG=CLAUDE_RESULT_MISSING; echo "[FAIL] CLAUDE_RESULT_MISSING${label:+ ($label)}: stream 파일 없음 — $f" >&2; return 1; }
+  while read -r n kind; do
+    case "$kind" in R) n_r=$n;; U) n_u=$n;; B) n_b=$n;; O) n_o=$n;; esac
+  done < <(jq -R -r 'if length==0 then empty else ((fromjson? // {"__bad__":true})
+            | if (type=="object" and .__bad__==true) then "B"
+              elif (type=="object" and .type=="result") then "R"
+              elif (type=="object" and (has("type")|not)) then "U"
+              else "O" end) end' "$f" 2>/dev/null | sort | uniq -c | awk '{print $1, $2}')
+  # [Modified: GOAL-6] result 가 1개여도 JSON 으로 읽을 수 없는 줄이 섞여 있으면 조용히 성공시키지 않는다(원본 보존, INVALID)
+  if [ "$n_r" -eq 1 ] && [ "$n_b" -gt 0 ]; then
+    CLAUDE_RESULT_DIAG=CLAUDE_RESULT_INVALID
+    echo "[FAIL] CLAUDE_RESULT_INVALID${label:+ ($label)}: result 이벤트 1개 + JSON 으로 읽을 수 없는 줄 $n_b 개 — 손상된 stream 을 수용하지 않는다. 원본: $f" >&2
+    return 1
+  fi
+  if [ "$n_r" -eq 1 ]; then
+    jq -c 'select(type=="object" and .type=="result")' "$f" > "$out" && return 0
+    rm -f "$out"; CLAUDE_RESULT_DIAG=CLAUDE_RESULT_INVALID; echo "[FAIL] CLAUDE_RESULT_INVALID${label:+ ($label)}: result 이벤트를 다시 읽지 못함 — $f" >&2; return 1
+  fi
+  if [ "$n_r" -eq 0 ] && [ "$n_b" -eq 0 ] && [ "$n_o" -eq 0 ] && [ "$n_u" -eq 1 ]; then
+    jq -c 'select(type=="object")' "$f" > "$out" && return 0   # 레거시 단일 객체 경로
+    rm -f "$out"; CLAUDE_RESULT_DIAG=CLAUDE_RESULT_INVALID; echo "[FAIL] CLAUDE_RESULT_INVALID${label:+ ($label)}: 단일 객체를 다시 읽지 못함 — $f" >&2; return 1
+  fi
+  if [ "$n_r" -ge 2 ]; then
+    CLAUDE_RESULT_DIAG=CLAUDE_RESULT_MULTIPLE
+    echo "[FAIL] CLAUDE_RESULT_MULTIPLE${label:+ ($label)}: stream-json 에 result 이벤트가 $n_r 개 — 어느 것도 자동 선택하지 않는다(하위 Agent/백그라운드 실행 의심). 원본: $f" >&2
+  elif [ "$n_b" -gt 0 ]; then
+    CLAUDE_RESULT_DIAG=CLAUDE_RESULT_INVALID
+    echo "[FAIL] CLAUDE_RESULT_INVALID${label:+ ($label)}: result 이벤트 없음 + JSON 으로 읽을 수 없는 줄 $n_b 개. 원본: $f" >&2
+  else
+    CLAUDE_RESULT_DIAG=CLAUDE_RESULT_MISSING
+    echo "[FAIL] CLAUDE_RESULT_MISSING${label:+ ($label)}: stream-json 에 result 이벤트가 없음(이벤트 $((n_u + n_o))줄). 원본: $f" >&2
+  fi
+  return 1
 }
 # claude stream-json JSONL 의 마지막 assistant 메시지 usage → 그 호출 시점의 실제 컨텍스트(input + cache_read + cache_creation). 없으면 null.
 claude_stream_context_last_turn() { # stream_jsonl
@@ -1361,11 +1490,30 @@ codex_rollout_context_last_turn() { # events_jsonl
 
 # claude --output-format json 결과 파일 → 행 1개.  usage 핵심 필드(usage.input_tokens)가 없으면 경고 후 생략(pipeline 실패 아님).
 # 옆에 <result_file>.stream.jsonl 이 있으면 context_last_turn(마지막 assistant 메시지의 입력 합)을 채운다. context_window 는 result.modelUsage 에서.
+# [Added: GOAL-6] 결과를 판정할 수 없는 claude invocation(result 0개/복수/파싱 실패) 의 행 — 비용·토큰은 null(0 아님), cost_kind=unknown.
+#   stream 에서 안전하게 관측되는 것(마지막 assistant usage 의 입력 합 = context_last_turn)만 채우고 중복 합산은 하지 않는다.
+#   usage_observation_status: partial(일부 관측) | unavailable(관측 없음), usage_error: 진단 코드, raw_log: 원본 경로. 완료 판정과는 별개의 telemetry 다.
+log_claude_usage_unavailable() { # label role model stream_file exit_code invocation_id diag
+  local label="$1" role="$2" model="$3" stream="$4" rc="${5:-0}" inv="$6" diag="${7:-CLAUDE_RESULT_MISSING}" ctx='null' status=unavailable
+  [ -n "$inv" ] || inv="$(new_invocation_id)"
+  if [ -f "$stream" ]; then ctx="$(claude_stream_context_last_turn "$stream")"; [ -n "$ctx" ] || ctx='null'; fi
+  [ "$ctx" = null ] || status=partial
+  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson ctx "$ctx" --arg status "$status" --arg err "$diag" \
+    --arg raw "$stream" --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
+    { schema_version: $v, invocation_id: $inv, label: $label, role: $role, cli: "claude", model: $model, session: null,
+      cost_usd: null, cost_kind: "unknown", estimated_cost_usd: null, pricing_basis: null, pricing_assumptions: null, long_context_turns: null,
+      input_uncached: null, cache_read: null, cache_write: null, output: null, reasoning_output: null, input_effective: null, input_per_turn: null,
+      context_last_turn: $ctx, context_window: null, tokens_total: null, num_turns: null, duration_ms: null, duration_api_ms: null,
+      exit_code: $rc, success: false, usage_observation_status: $status, usage_error: $err, raw_log: $raw,
+      source: "claude-stream", recorded_at: $now }' >> "$WORK_DIR/usage.jsonl"
+}
+# [Modified: GOAL-6] usage 핵심 필드(usage.input_tokens)가 없어도 행을 생략하지 않고 unknown 행으로 남긴다(실제로 시작한 invocation 1개 = 행 1개).
 log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
   local label="$1" role="$2" model="$3" result_file="$4" rc="${5:-0}" inv="${6:-}" ctx='null'
   [ -n "$inv" ] || inv="$(new_invocation_id)"
   if ! jq -e '.usage.input_tokens != null' "$result_file" >/dev/null 2>&1; then
-    echo "[WARN] usage 필드 없음 — 기록 생략: $result_file" >&2
+    echo "[WARN] usage 필드 없음 — unknown 행으로 기록(비용·토큰 null): $result_file" >&2
+    log_claude_usage_unavailable "$label" "$role" "$model" "$result_file.stream.jsonl" "$rc" "$inv" USAGE_FIELDS_MISSING
     return 0
   fi
   if [ -f "$result_file.stream.jsonl" ]; then ctx="$(claude_stream_context_last_turn "$result_file.stream.jsonl")"; [ -n "$ctx" ] || ctx='null'; fi
@@ -1379,6 +1527,7 @@ log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
       cost_usd: (.total_cost_usd // null),
       cost_kind: (if .total_cost_usd != null then "reported" else "unknown" end),
       estimated_cost_usd: null, pricing_basis: null,
+      pricing_assumptions: null, long_context_turns: null,
       input_uncached: (.usage.input_tokens // null),
       cache_read: (.usage.cache_read_input_tokens // 0),
       cache_write: (.usage.cache_creation_input_tokens // 0),
@@ -1395,51 +1544,92 @@ log_claude_usage() { # label role model result_file [exit_code] [invocation_id]
       duration_ms: (.duration_ms // null),
       duration_api_ms: (.duration_api_ms // null),
       exit_code: $rc, success: ($rc == 0),
+      usage_observation_status: "complete", usage_error: null, raw_log: null,
       source: "claude-result",
       recorded_at: $now
     }' "$result_file" >> "$WORK_DIR/usage.jsonl"
 }
 
-# codex exec --json 이벤트 JSONL → 행 1개. invocation 의 모든 turn.completed.usage 를 합산한다(위 v3 매핑). 깨진 줄은 건너뛰고,
-# turn.completed 가 하나도 없으면 WARN 후 생략(작업 실패 아님·재실행 없음). plain "tokens used" 텍스트는 더 이상 읽지 않는다.
+# [Added: 리뷰 1] codex invocation 의 usage 를 판정할 수 없을 때의 행 — 비용·토큰 null(0 아님), cost_kind unknown. 모델 재호출 없음, 원본 경로 보존.
+#   status: partial(유효한 turn 이 일부 있음) | unavailable(없음). err: USAGE_EVENTS_MISSING | USAGE_EVENTS_CORRUPT | USAGE_FIELDS_INCOMPLETE
+codex_usage_unknown_row() { # label role model events rc inv err status
+  jq -nc --arg label "$1" --arg role "$2" --arg model "$3" --arg raw "$4" --argjson rc "$5" --arg inv "$6" --arg err "$7" --arg status "$8" \
+    --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
+    { schema_version: $v, invocation_id: $inv, label: $label, role: $role, cli: "codex", model: $model, session: null,
+      cost_usd: null, cost_kind: "unknown", estimated_cost_usd: null, pricing_basis: null, pricing_assumptions: null, long_context_turns: null,
+      input_uncached: null, cache_read: null, cache_write: null, output: null, reasoning_output: null, input_effective: null, input_per_turn: null,
+      context_last_turn: null, context_window: null, tokens_total: null, num_turns: null, duration_ms: null, duration_api_ms: null,
+      exit_code: $rc, success: ($rc == 0), usage_observation_status: $status, usage_error: $err, raw_log: $raw,
+      source: "codex-events", recorded_at: $now }' >> "$WORK_DIR/usage.jsonl"
+}
+# codex exec --json 이벤트 JSONL → 행 1개. invocation 의 모든 turn.completed.usage 를 합산한다(위 v3 매핑).
+# [Modified: 리뷰 1] 관측하지 못한 비용을 0 달러로 적지 않는다 — 다음 중 하나면 합산하지 않고 unknown 행 1개를 남긴다(작업 실패 아님·재실행 없음):
+#   · JSON 으로 읽을 수 없는 줄이 하나라도 있음(USAGE_EVENTS_CORRUPT — 정상 이벤트만 합산해 complete 로 적으면 과소 집계다)
+#   · turn.completed 중 usage 가 객체가 아니거나 필수 필드(input_tokens·output_tokens)가 숫자가 아닌 것이 있음(USAGE_FIELDS_INCOMPLETE — `usage:{}` 를 0 으로 읽지 않는다)
+#   · turn.completed 가 없음(USAGE_EVENTS_MISSING). plain "tokens used" 텍스트는 읽지 않는다.
+#   선택 필드(cached/cache_write/cache_write_12h/reasoning)는 없으면 0, 있는데 숫자가 아니면 INCOMPLETE. 음수는 0 으로 본다.
 log_codex_usage() { # label role model events_jsonl [exit_code] [invocation_id]
-  local label="$1" role="$2" model="$3" events="$4" rc="${5:-0}" inv="${6:-}" agg rates='null' basis='null'
+  local label="$1" role="$2" model="$3" events="$4" rc="${5:-0}" inv="${6:-}" agg rates basis='null'
   [ -n "$inv" ] || inv="$(new_invocation_id)"
-  agg="$(jq -R -c 'fromjson? | select(type=="object" and .type=="turn.completed" and (.usage|type)=="object") | .usage' "$events" 2>/dev/null \
-    | jq -s -c 'map({i:(.input_tokens // 0), c:(.cached_input_tokens // 0), w:(.cache_write_input_tokens // 0), o:(.output_tokens // 0), r:(.reasoning_output_tokens // 0)})
-        | {turns:length, input_total:(map(.i)|add // 0), cache_read:(map(.c)|add // 0), cache_write:(map(.w)|add // 0), output:(map(.o)|add // 0), reasoning:(map(.r)|add // 0)}' 2>/dev/null)"
-  if [ -z "$agg" ] || [ "$(printf '%s' "$agg" | jq -r '.turns')" = 0 ]; then
-    echo "[WARN] codex 이벤트 JSONL 에 turn.completed usage 없음 — 기록 생략: $events" >&2
-    return 0
+  # 줄 분류: B=JSON 아님, T=turn.completed(유효 usage), X=turn.completed(usage 불완전), O=그 외 이벤트
+  local scan n_b=0 n_t=0 n_x=0 n kind
+  scan="$(jq -R -r 'if length==0 then empty else ((fromjson? // {"__bad__":true})
+      | if (type=="object" and .__bad__==true) then "B"
+        elif (type=="object" and .type=="turn.completed") then
+          (if ((.usage|type)=="object" and (.usage.input_tokens|type)=="number" and (.usage.output_tokens|type)=="number"
+               and ([.usage.cached_input_tokens, .usage.cache_write_input_tokens, .usage.cache_write_12h_input_tokens, .usage.reasoning_output_tokens]
+                    | all(. == null or type=="number"))) then "T" else "X" end)
+        else "O" end) end' "$events" 2>/dev/null | sort | uniq -c | awk '{print $1, $2}')"
+  while read -r n kind; do case "$kind" in B) n_b=$n;; T) n_t=$n;; X) n_x=$n;; esac; done <<< "$scan"
+  local status=unavailable; [ "$n_t" -eq 0 ] || status=partial
+  if [ "$n_b" -gt 0 ]; then
+    echo "[WARN] codex 이벤트 JSONL 에 JSON 으로 읽을 수 없는 줄 $n_b 개 — 과소 집계를 막기 위해 unknown 행으로 기록(비용·토큰 null, 유효 turn $n_t 개는 합산하지 않음): $events" >&2
+    codex_usage_unknown_row "$label" "$role" "$model" "$events" "$rc" "$inv" USAGE_EVENTS_CORRUPT "$status"; return 0
   fi
+  if [ "$n_x" -gt 0 ]; then
+    echo "[WARN] codex turn.completed usage 에 필수 필드(input_tokens/output_tokens 숫자)가 없는 이벤트 $n_x 개 — unknown 행으로 기록(비용·토큰 null, 0 아님): $events" >&2
+    codex_usage_unknown_row "$label" "$role" "$model" "$events" "$rc" "$inv" USAGE_FIELDS_INCOMPLETE "$status"; return 0
+  fi
+  if [ "$n_t" -eq 0 ]; then
+    echo "[WARN] codex 이벤트 JSONL 에 turn.completed usage 없음 — unknown 행으로 기록(비용·토큰 null): $events" >&2
+    codex_usage_unknown_row "$label" "$role" "$model" "$events" "$rc" "$inv" USAGE_EVENTS_MISSING unavailable; return 0
+  fi
+  # turn 목록을 그대로 보존해(turns) 구간별 가격을 turn 단위로 고른다. w12 = cache_write_12h_input_tokens(분리 관측 시만; 없으면 0 → 전부 30분 가정).
+  local turns
+  turns="$(jq -R -c 'fromjson? | select(type=="object" and .type=="turn.completed") | .usage' "$events" 2>/dev/null \
+    | jq -s -c 'def nz: if . == null or . < 0 then 0 else . end;
+        map({i:(.input_tokens|nz), c:(.cached_input_tokens|nz), w:(.cache_write_input_tokens|nz), w12:(.cache_write_12h_input_tokens|nz), o:(.output_tokens|nz), r:(.reasoning_output_tokens|nz)})' 2>/dev/null)"
+  [ -n "$turns" ] && [ "$(printf '%s' "$turns" | jq 'length')" = "$n_t" ] || { codex_usage_unknown_row "$label" "$role" "$model" "$events" "$rc" "$inv" USAGE_EVENTS_CORRUPT unavailable; return 0; }
+  agg="$(printf '%s' "$turns" | jq -c '{turns:length, input_total:(map(.i)|add // 0), cache_read:(map(.c)|add // 0), cache_write:(map(.w + .w12)|add // 0), output:(map(.o)|add // 0), reasoning:(map(.r)|add // 0)}')"
+  # 가격표에 있는 모델만 추정한다. 없는 모델은 est=null → cost_kind=unknown (0 달러로 적지 않는다).
+  local est='{"estimated_cost_usd":null,"long_context_turns":null,"assumptions":null}'
   if rates="$(codex_model_pricing "$model")"; then
-    rates="$(printf '%s' "$rates" | awk '{printf "{\"input\":%s,\"cached\":%s,\"output\":%s}", $1, $2, $3}')"; basis="\"$CODEX_PRICING_BASIS\""
-  else
-    rates='null'
+    est="$(codex_estimate_cost "$turns" "$rates")" || est='{"estimated_cost_usd":null,"long_context_turns":null,"assumptions":null}'
+    basis="\"$CODEX_PRICING_BASIS\""
   fi
   local ctx; ctx="$(codex_rollout_context_last_turn "$events")"; [ -n "$ctx" ] || ctx='{"context_last_turn":null,"context_window":null}'
-  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson a "$agg" --argjson rates "$rates" --argjson basis "$basis" \
+  jq -nc --arg label "$label" --arg role "$role" --arg model "$model" --arg inv "$inv" --argjson a "$agg" --argjson est "$est" --argjson basis "$basis" \
     --argjson ctx "$ctx" \
     --argjson rc "$rc" --argjson v "$USAGE_SCHEMA_VERSION" --arg now "$(date '+%FT%T%z')" '
-    ($a.input_total - $a.cache_read - $a.cache_write) as $uncached
-    | (if $rates == null then null
-       else ((($a.input_total - $a.cache_read) * $rates.input + $a.cache_read * $rates.cached + $a.output * $rates.output) / 1000000) end) as $est
+    ([$a.input_total - $a.cache_read - $a.cache_write, 0] | max) as $uncached
     | {
       schema_version: $v,
       invocation_id: $inv,
       label: $label, role: $role, cli: "codex", model: $model,
       session: null,
       cost_usd: null,
-      cost_kind: (if $est == null then "unknown" else "estimated" end),
-      estimated_cost_usd: $est, pricing_basis: $basis,
+      cost_kind: (if $est.estimated_cost_usd == null then "unknown" else "estimated" end),
+      estimated_cost_usd: $est.estimated_cost_usd, pricing_basis: (if $est.estimated_cost_usd == null then null else $basis end),
+      pricing_assumptions: $est.assumptions, long_context_turns: $est.long_context_turns,
       input_uncached: $uncached, cache_read: $a.cache_read, cache_write: $a.cache_write, output: $a.output,
       reasoning_output: $a.reasoning,
       input_effective: ($uncached + $a.cache_read + $a.cache_write),
       input_per_turn: (if $a.turns > 0 then (($uncached + $a.cache_read + $a.cache_write) / $a.turns | floor) else null end),
       context_last_turn: $ctx.context_last_turn, context_window: $ctx.context_window,
-      tokens_total: ($a.input_total + $a.output),
+      tokens_total: ($uncached + $a.cache_read + $a.cache_write + $a.output),
       num_turns: $a.turns, duration_ms: null, duration_api_ms: null,
       exit_code: $rc, success: ($rc == 0),
+      usage_observation_status: "complete", usage_error: null, raw_log: null,
       source: "codex-events",
       recorded_at: $now
     }' >> "$WORK_DIR/usage.jsonl"
@@ -1475,6 +1665,8 @@ usage_summary() {
       estimated_cost_usd: (map(.estimated_cost_usd // 0) | add),
       combined_cost_usd_estimate: (map((.cost_usd // 0) + (.estimated_cost_usd // 0)) | add),
       cost_unknown_invocations: (map(select(.cost_usd == null and .estimated_cost_usd == null)) | length),
+      usage_unobserved_invocations: (map(select((.usage_observation_status // "complete") != "complete")) | length),
+      pricing_bases: (map(.pricing_basis // empty) | unique),
       cache_read: (map(.cache_read // 0) | add),
       num_turns: (map(.num_turns // 0) | add),
       output: (map(.output // .out // 0) | add),
@@ -1490,10 +1682,22 @@ usage_summary() {
       input_uncached: (map(.input_uncached // .in // 0) | add),
       cache_write: (map(.cache_write // 0) | add),
       tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),
+      cost_note: "reported_cost_usd = provider 보고(claude) / estimated_cost_usd = codex 토큰 × API 표준 요금 환산 추정치 / combined 는 두 값의 합(실제 청구액 아님) / cost_unknown_invocations 는 둘 다 null 인 호출 수",
       by_role: grouped(.role // "legacy"),
       by_label: grouped(.label // "legacy"),
-      by_session: grouped(.session // "none")
+      by_session: grouped(.session // "none"),
+      by_cli: grouped(.cli // "legacy"),
+      by_model: grouped(.model // "legacy")
     }' "$f"
+}
+# [Added] 러너 완료 보고용 한 줄 요약 — usage_summary 와 같은 숫자를 쓴다(별도 계산 없음). usage.jsonl 이 없으면 빈 출력.
+usage_cost_report_line() { # [usage.jsonl]
+  local s; s="$(usage_summary "${1:-$WORK_DIR/usage.jsonl}")"
+  [ "$s" != '{}' ] || return 0
+  printf '%s' "$s" | jq -r '
+    def money: if . == null then "n/a" else ("$" + (. * 10000 | round / 10000 | tostring)) end;
+    "비용(usage_summary, child invocation \(.invocations)건): Claude 보고 비용 \(.reported_cost_usd|money) (reported) / Codex 추정 비용 \(.estimated_cost_usd|money) (API 표준 요금 기준 환산, estimated) / 합계 추정 \(.combined_cost_usd_estimate|money) (실제 청구액 아님) / 추정 불가 \(.cost_unknown_invocations)건(사용량 미관측 \(.usage_unobserved_invocations)건 — 0달러 아님)"
+    + " — by_cli: " + ([ .by_cli | to_entries[] | "\(.key)=\(.value.invocations)건(reported \(.value.reported_cost_usd|money), estimated \(.value.estimated_cost_usd|money), unknown \(.value.cost_unknown_invocations))" ] | join(", "))'
 }
 
 # =============================================================

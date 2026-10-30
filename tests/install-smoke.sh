@@ -371,7 +371,7 @@ printf '%s\n' \
   'printf "WORKER_STREAM_MARKER\\n" >&2; echo called >> "$FAKE_WORKER_COUNT"' \
   'if [ "${FAKE_TAMPER_BASELINE:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/existing-under-root.txt; fi' \
   'if [ "${FAKE_TAMPER_BOTH:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; for m in .agent-work/feature-scope.json .agent-work/feature-scope.lock.json; do jq -c ".files += [\"src/z.txt\"]" "$m" > "$m.tmp" && mv "$m.tmp" "$m"; done; echo tampered-both >> src/existing-under-root.txt; fi' \
-  'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[]}'\'' > "$output_file"' \
+  'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'\'' > "$output_file"' \
   > "$FAKE_CODEX"
 chmod +x "$FAKE_CODEX"
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
@@ -868,10 +868,13 @@ EOF
 cat > "$USAGE_DIR/claude-g.json" <<'EOF'
 {"session_id":"session-g","total_cost_usd":1.2914188,"num_turns":12,"usage":{"input_tokens":38,"output_tokens":14701,"cache_read_input_tokens":2509959,"cache_creation_input_tokens":158503}}
 EOF
-# codex --json 이벤트 JSONL: 깨진 줄·다른 이벤트 사이에 turn.completed 두 개(합산) / usage 없는 스트림 / 옛 plain "tokens used" 텍스트(더 이상 읽지 않음)
-printf '%s\n' '{"type":"thread.started","thread_id":"t"}' 'not json at all' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}' \
+# codex --json 이벤트 JSONL: 다른 이벤트 사이에 turn.completed 두 개(합산, 선택 필드 생략은 0) / usage 없는 스트림 / 옛 plain "tokens used" 텍스트(더 이상 읽지 않음)
+# / 깨진 줄 혼재(리뷰 1: 정상 turn 만 합산해 complete 로 적지 않는다 → unknown) / usage:{} (필수 필드 없음 → 0 이 아니라 unknown)
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}' \
   '{"type":"item.completed","item":{"type":"agent_message"}}' '{"type":"turn.completed","usage":{"input_tokens":2000,"cached_input_tokens":345,"output_tokens":100}}' > "$USAGE_DIR/codex-f.jsonl"
 printf '%s\n' '{"type":"thread.started"}' 'tokens used' '12,345' > "$USAGE_DIR/codex-none.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}' 'not json at all' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500}}' > "$USAGE_DIR/codex-corrupt.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"t"}' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500}}' '{"type":"turn.completed","usage":{}}' > "$USAGE_DIR/codex-emptyusage.jsonl"
 usage_run() { (cd "$USAGE_DIR" && source "$USAGE_CFG" && "$@"); }
 usage_last() { tail -1 "$USAGE_DIR/.agent-work/usage.jsonl" | jq -r "$1"; }
 usage_rows() { wc -l < "$USAGE_DIR/.agent-work/usage.jsonl" | tr -d ' '; }
@@ -888,10 +891,11 @@ usage_run log_claude_usage lbl-b VALIDATOR claude-sonnet-5 "$USAGE_DIR/claude-b.
 [ "$(usage_rows)" = 2 ] || fail "usage B: 행이 추가되지 않음"
 [ "$(usage_last '[.num_turns,.duration_ms,.duration_api_ms]|map(.==null)|all')" = true ] || fail "usage B: optional 필드가 null 이 아님"
 [ "$(usage_last '.input_effective')" = 80 ] || fail "usage B: input_effective 오류"
-# C. usage 핵심 필드 없음 → WARN, 행 추가 안 함, 함수는 0 반환
+# C. usage 핵심 필드 없음 → WARN + unknown 행 1개(비용·토큰 null — 숨은 0건 금지, GOAL-6), 함수는 0 반환
 usage_run log_claude_usage lbl-c VALIDATOR claude-sonnet-5 "$USAGE_DIR/claude-c.json" 2>"$USAGE_DIR/warn-c.log" || fail "usage C: 함수가 실패를 돌려줌"
 grep -q '\[WARN\]' "$USAGE_DIR/warn-c.log" || fail "usage C: WARN 없음"
-[ "$(usage_rows)" = 2 ] || fail "usage C: 행이 추가됨"
+[ "$(usage_rows)" = 3 ] && [ "$(usage_last '[.cost_kind,.cost_usd,.input_uncached,.usage_observation_status,.usage_error]|@csv')" = '"unknown",,,"unavailable","USAGE_FIELDS_MISSING"' ] \
+  || fail "usage C: usage 필드 없는 invocation 이 unknown 행 1개로 기록되지 않음: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 # D. 동일 session 두 invocation → 행 2개, 각각 fixture 값 그대로 (두 번째가 작아도 정상, delta 없음)
 usage_run log_claude_usage lbl-d REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a2.json" 2>>"$USAGE_DIR/warn.log"
 [ "$(jq -r 'select(.session=="session-a") | .cache_read' "$USAGE_DIR/.agent-work/usage.jsonl" | paste -sd, -)" = "1000,7" ] || fail "usage D: 같은 session 두 행이 invocation 값 그대로가 아님"
@@ -900,29 +904,39 @@ usage_run log_claude_usage lbl-a REVIEWER claude-sonnet-5 "$USAGE_DIR/claude-a.j
 [ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | wc -l | tr -d ' ')" = 2 ] || fail "usage E: label 재시도 행이 2개가 아님"
 [ "$(jq -r 'select(.label=="lbl-a") | .invocation_id' "$USAGE_DIR/.agent-work/usage.jsonl" | sort -u | wc -l | tr -d ' ')" = 2 ] || fail "usage E: invocation_id 가 같음"
 # F. codex --json 이벤트 → turn.completed 합산(input_total 12000 = uncached 4655 + cache_read 6345 + cache_write 1000), reasoning 은 output 의 부분집합, 가격표 추정 비용
-#    gpt-5.6-sol: billing uncached = 12000-6345 = 5655 → 5655*4.00 + 6345*0.40 + 600*20.00 (per 1M) = 0.037158
+#    gpt-5.6-sol(v4 수식): uncached 4655*4.00 + cache_read 6345*0.40 + cache_write 1000*5.00(30분 캐시 쓰기 별도율) + output 600*20.00 (per 1M) = 0.038158
 usage_run log_role_usage codex VALIDATOR gpt-5.6-sol lbl-f "$USAGE_DIR/codex-f.jsonl" 2>>"$USAGE_DIR/warn.log" || fail "usage F: recorder 실패"
 [ "$(usage_last '[.cli,.tokens_total,.source,.role,.model,.num_turns]|@csv')" = '"codex",12600,"codex-events","VALIDATOR","gpt-5.6-sol",2' ] || fail "usage F: codex 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 [ "$(usage_last '[.input_uncached,.cache_read,.cache_write,.input_effective,.output,.reasoning_output]|@csv')" = '4655,6345,1000,12000,600,300' ] || fail "usage F: codex 토큰 매핑 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
-[ "$(usage_last '[.cost_usd,.cost_kind,((.estimated_cost_usd*1000000)|round),.pricing_basis]|@csv')" = ',"estimated",37158,"openai-standard-token-rate-2026-09-23"' ] || fail "usage F: codex 비용 필드 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+[ "$(usage_last '[.cost_usd,.cost_kind,((.estimated_cost_usd*1000000)|round),.pricing_basis]|@csv')" = ',"estimated",38158,"openai-api-standard-2026-10-30"' ] || fail "usage F: codex 비용 필드 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 [ "$(usage_last '[.duration_ms,.duration_api_ms,.session]|map(.==null)|all')" = true ] || fail "usage F: 관측 불가 값이 null 이 아님"
 usage_run log_codex_usage lbl-f2 VALIDATOR gpt-5.6-sol "$USAGE_DIR/codex-none.jsonl" 2>"$USAGE_DIR/warn-f.log" || fail "usage F: usage 이벤트 없는 스트림에서 함수 실패"
 grep -q '\[WARN\]' "$USAGE_DIR/warn-f.log" || fail "usage F: usage 이벤트 없음 WARN 누락"
-[ "$(usage_rows)" = 5 ] || fail "usage F: usage 이벤트 없는 스트림(옛 plain tokens used 포함)이 행으로 기록됨"
+# 옛 plain "tokens used" 텍스트는 JSON 이 아니므로 CORRUPT 로 분류된다(읽지 않는다) — 어느 쪽이든 unknown 행 1개
+[ "$(usage_rows)" = 7 ] && [ "$(usage_last '[.cost_kind,.tokens_total,.usage_observation_status,.usage_error]|@csv')" = '"unknown",,"unavailable","USAGE_EVENTS_CORRUPT"' ] \
+  || fail "usage F: usage 이벤트 없는 스트림(옛 plain tokens used 포함)은 unknown 행 1개(비용·토큰 null)여야 함: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 # F2. 가격표에 없는 codex 모델 → estimated null / cost_kind unknown (추측 가격 없음)
 usage_run log_codex_usage lbl-f3 WORKER gpt-unknown-x "$USAGE_DIR/codex-f.jsonl" 2>>"$USAGE_DIR/warn.log" || fail "usage F2: recorder 실패"
 [ "$(usage_last '[.estimated_cost_usd,.cost_kind,.pricing_basis,.tokens_total]|@csv')" = ',"unknown",,12600' ] || fail "usage F2: unknown 모델 행 불일치: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+# F3 (리뷰 1). 깨진 줄 혼재 → 정상 turn 1개가 있어도 합산하지 않고 unknown(partial) / usage:{} → 필수 필드 없음이라 0 이 아니라 unknown(partial, 다른 turn 은 유효)
+usage_run log_codex_usage lbl-f4 WORKER gpt-5.6-sol "$USAGE_DIR/codex-corrupt.jsonl" 2>"$USAGE_DIR/warn-f4.log" || fail "usage F3: corrupt 스트림에서 함수 실패"
+grep -q 'JSON 으로 읽을 수 없는 줄 1 개' "$USAGE_DIR/warn-f4.log" || fail "usage F3: corrupt WARN 없음"
+[ "$(usage_last '[.cost_kind,.estimated_cost_usd,.tokens_total,.num_turns,.usage_observation_status,.usage_error,.success]|@csv')" = '"unknown",,,,"partial","USAGE_EVENTS_CORRUPT",true' ] \
+  || fail "usage F3: 깨진 줄 혼재 스트림이 과소 집계(complete)되거나 unknown 행이 아님: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
+usage_run log_codex_usage lbl-f5 WORKER gpt-5.6-sol "$USAGE_DIR/codex-emptyusage.jsonl" 2>"$USAGE_DIR/warn-f5.log" || fail "usage F3: usage:{} 스트림에서 함수 실패"
+[ "$(usage_last '[.cost_kind,.estimated_cost_usd,.tokens_total,.usage_observation_status,.usage_error]|@csv')" = '"unknown",,,"partial","USAGE_FIELDS_INCOMPLETE"' ] \
+  || fail "usage F3: usage:{} 가 0 달러/estimated 로 기록됨: $(tail -1 "$USAGE_DIR/.agent-work/usage.jsonl")"
 # G. effective input 회귀 + 실패 invocation 도 기록(exit_code/success)
 usage_run log_role_usage claude REVIEWER claude-sonnet-5 impl-review-a01-round-01 "$USAGE_DIR/claude-g.json" 1 2>>"$USAGE_DIR/warn.log"
 [ "$(usage_last '[.input_effective,.exit_code,.success]|@csv')" = '2668500,1,false' ] || fail "usage G: input_effective/exit_code 불일치"
 # 파생 집계는 writer 밖 — legacy 행(in/out, v2 codex tokens_total 만 있는 행)도 함께 읽는다
 printf '{"label":"legacy","session":"s","cost_usd":0.2,"in":3,"out":4,"cache_read":5,"cache_write":6}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
 printf '{"schema_version":2,"label":"legacy-codex","role":"WORKER","cli":"codex","model":"gpt-5.6-luna","session":null,"cost_usd":null,"input_uncached":null,"cache_read":null,"cache_write":null,"output":null,"input_effective":null,"tokens_total":777,"num_turns":null,"exit_code":0,"success":true,"source":"codex-log"}\n' >> "$USAGE_DIR/.agent-work/usage.jsonl"
-# 행: A B D E(claude, cost 1.25+0.5+0.1+1.25) F(codex sol, est 0.037158) F2(codex unknown) G(claude 1.2914188) legacy(0.2) legacy-codex(unknown)
-[ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations]|@csv')" = "9,9446,16931,2" ] || fail "usage summary: 합계 불일치: $(usage_run usage_summary)"
+# 행: A B C(unknown) D E(claude, cost 1.25+0.5+0.1+1.25) F(codex sol, est 0.038158) F-none(unknown) F2(codex unknown) F3×2(unknown) G(claude 1.2914188) legacy(0.2) legacy-codex(unknown)
+[ "$(usage_run usage_summary | jq -r '[.invocations,.input_uncached,.output,.cost_unknown_invocations,.usage_unobserved_invocations]|@csv')" = "13,9446,16931,6,4" ] || fail "usage summary: 합계 불일치(unknown 행 C·F-none·F3 포함): $(usage_run usage_summary)"
 # 비용은 provenance 별로 분리 — reported(claude 보고값 합) / estimated(codex 가격표 추정 합) / combined 는 둘의 합(추정치), cost_usd 는 reported 와 같은 옛 이름
 usage_summary_json="$(usage_run usage_summary)"
-[ "$(printf '%s' "$usage_summary_json" | jq -r '[((.reported_cost_usd*10000000)|round), ((.estimated_cost_usd*10000000)|round), ((.combined_cost_usd_estimate*10000000)|round), ((.cost_usd*10000000)|round), .reasoning_output]|@csv')" = "45914188,371580,46285768,45914188,600" ] \
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[((.reported_cost_usd*10000000)|round), ((.estimated_cost_usd*10000000)|round), ((.combined_cost_usd_estimate*10000000)|round), ((.cost_usd*10000000)|round), .reasoning_output]|@csv')" = "45914188,381580,46295768,45914188,600" ] \
   || fail "usage summary: reported/estimated/combined 비용 분리 불일치: $usage_summary_json"
 # 집계 보강: num_turns/output/cache_read_per_turn(전체·그룹), by_label·by_session 으로 어느 호출·세션이 cache read 를 만드는지 본다.
 # cache_read_per_turn 은 num_turns 를 보고한 행만으로 계산(A 1000/7, D 7/1, E 1000/7, G 2509959/12, F 6345/2, F2 6345/2 → 2524656/31). legacy 행은 num_turns 없음.
@@ -932,7 +946,7 @@ usage_summary_json="$(usage_run usage_summary)"
   || fail "usage summary: by_label(lbl-a) 불일치: $usage_summary_json"
 [ "$(printf '%s' "$usage_summary_json" | jq -r '.by_session["session-a"] | [.invocations,.cache_read,.num_turns,.output]|@csv')" = "3,2007,15,1006" ] \
   || fail "usage summary: by_session(session-a) 불일치: $usage_summary_json"
-[ "$(printf '%s' "$usage_summary_json" | jq -r '[.by_session["none"].invocations, .by_label["legacy-codex"].cache_read_per_turn, .by_label["legacy-codex"].cost_unknown_invocations]|@csv')" = "3,,1" ] \
+[ "$(printf '%s' "$usage_summary_json" | jq -r '[.by_session["none"].invocations, .by_label["legacy-codex"].cache_read_per_turn, .by_label["legacy-codex"].cost_unknown_invocations]|@csv')" = "7,,1" ] \
   || fail "usage summary: num_turns 없는 그룹(legacy codex/session null)의 cache_read_per_turn 이 null 이 아님: $usage_summary_json"
 [ "$(printf '%s' "$usage_summary_json" | jq -r '.by_role.REVIEWER | [.invocations,((.cost_usd*10000)|round),.cache_read,.num_turns]|@csv')" = "4,38914,2511966,27" ] \
   || fail "usage summary: by_role(REVIEWER) 불일치: $usage_summary_json"
