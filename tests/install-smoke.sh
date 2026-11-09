@@ -124,12 +124,24 @@ run_conventions_hook '{}' | grep -q '프로젝트 컨벤션' || fail "오케스�
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit.md" || fail "규칙 전달: unit 워커 프롬프트 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit-fix.md" || fail "규칙 전달: unit 수정 프롬프트 누락"
 grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
+grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-impl.md" || fail "규칙 전달: impl 검증자 conventions 누락"
 # 검증자 프로필 오버레이: 세 프로필 파일이 설치되고, 모델별 기본 매핑·명시 프로필·none·오타 실패가 동작하는지
 for ov in compact guided conservative; do
   [ -f "$TARGET_SKILL/prompts/validator-overlays/$ov.md" ] || fail "검증자 오버레이 미설치: $ov.md"
 done
 overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=""; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
 echo "$overlay_sol" | grep -q '^\[VALIDATOR PROFILE: compact\]$' || fail "검증자 프로필: sol 기본값이 compact 가 아님"
+# 모델별 기본 매핑: gpt-6-astra 는 guided 여야 한다(매핑 누락으로 conservative 로 떨어지던 문제), 매핑에 없는 모델만 conservative
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-5.6-astra 기본값이 guided 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=some-unknown-model VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = conservative ] || fail "검증자 프로필: 매핑에 없는 모델의 기본값이 conservative 가 아님"
+# 배포 기본값: 명시 프로필 guided · effort medium, 그리고 명시 프로필과 그 모델의 매핑 기본값이 서로 모순되지 않는다
+src_validator_profile="$(sed -n 's/^VALIDATOR_PROFILE="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
+[ "$src_validator_effort" = medium ] || fail "검증자 설정: 배포 VALIDATOR_EFFORT 가 medium 이 아님 ($src_validator_effort)"
+[ "$src_validator_profile" = guided ] || fail "검증자 설정: 배포 VALIDATOR_PROFILE 이 guided 가 아님 ($src_validator_profile)"
+src_validator_model="$(sed -n 's/^VALIDATOR_MODEL="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL="$2" VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh" "$src_validator_model")" = "$src_validator_profile" ] \
+  || fail "검증자 설정: 배포 VALIDATOR_MODEL($src_validator_model)의 매핑 기본값이 명시 VALIDATOR_PROFILE($src_validator_profile)과 다름"
 overlay_explicit="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=guided; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
 echo "$overlay_explicit" | grep -q '^\[VALIDATOR PROFILE: guided\]$' || fail "검증자 프로필: 명시 VALIDATOR_PROFILE 이 모델 기본값을 덮지 않음"
 overlay_none="$(bash -c 'source "$1"; VALIDATOR_PROFILE=none; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"

@@ -12,12 +12,17 @@
 #     --new     : 이전 피처 산출물을 archive/ 로 mv 하고 처음부터 시작
 #     --branch  : 워커 진입 전 해당 브랜치가 없으면 생성·체크아웃
 #   인자 없이 다시 실행하면 run-state.json 의 stage 에서 재개한다. 합의·리뷰 루프는 자체 체크포인트
-#   (consensus-<target>.json, review-impl.json)로 round/substep 까지 이어가며, stage 결정은 consensus_pass_current 로 교차 확인한다.
+#   (consensus-<target>.json, review-impl.json)로 round/substep 까지 이어가며, stage 결정은 consensus_stage_accepted(검증자 PASS 또는
+#   합의 에스컬레이션의 유효한 사용자 수리 USER_RESOLVED)로 교차 확인한다.
 #
 # 상태 전이 (결정론적 제어만 담당):
 #   preflight → design → impl → worker → review → verify → done
 #   design : consensus-loop.sh design
 #   impl   : consensus-loop.sh impl        (implementation.md + approach.md + implementation-units.json 필요)
+#            design/impl 의 사용자 에스컬레이션(ASK_USER | DEADLOCK | MAX_ROUNDS)은 user-escalation-resume-<target>.json(WAITING_USER)을 남긴다.
+#            사용자가 모든 blocker 에 [USER-QUESTION][scope=<target>][escalation=<id>] 답을 추가하면 그 단계 검증자·디자이너 0회로
+#            USER_RESOLVED → 다음 단계(design → impl 은 impl 합의를 정상 수행, impl → worker). 답 전·일부 답은 모델 0회 NEED_USER.
+#            USER_RESOLVED 는 검증자 PASS 가 아니며 review/verify/DONE 게이트는 그대로다.
 #   worker : implementation-units.json 을 lock 으로 확정하고 units 배열 순서대로 **직렬** 실행 — Feature 전체를 **하나의 Worker
 #            세션**(worker-invoke.sh 의 FEATURE_WORKER_SESSION, 저널 worker-session.json)이 턴 단위로 이어 간다: unit 마다
 #            같은 세션의 워커 턴(worker-unit.md, 결과 JSON DONE|UNDECIDED) → targeted_test(실패 시 같은 세션에 unit 범위 수정 → 재테스트)
@@ -363,7 +368,9 @@ require_worker_outcome_guard_resolved \
 [ -f "$WORK_DIR/design.md" ] || { STAGE=design; stop_need_docs DESIGN_MISSING "$ROOT/$WORK_DIR/design.md 초안을 작성한 뒤 다시 실행"; }
 case "$STAGE" in
   impl|worker|review|verify|done)
-    consensus_pass_current design || { log "design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터"; STAGE=design; };;
+    # design 진입 권한은 검증자 PASS 또는 design 에스컬레이션의 유효한 사용자 수리(USER_RESOLVED — PASS 아님, user-escalation-resume-design.json)다.
+    # 사용자 수리 뒤 impl 로 넘어갔다가 재실행해도 design 검증자를 다시 부르지 않는다. 수리 뒤 입력이 또 바뀌었으면 둘 다 무효 → design 부터.
+    consensus_stage_accepted design || { log "design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터"; STAGE=design; };;
 esac
 # 구현 후 DOC_GAP 체크포인트가 pending 이면 impl 지문 추론보다 먼저 doc-gap 경로로 간다 — 사용자가 답을 decisions.md/approach.md 에 적으면
 # impl PASS 지문은 당연히 stale 이 되지만 그것은 새 구현 제안이 아니라 pending gap 의 해결이다(검증자 재승인 없음). design PASS 는 위에서 이미 확인.
@@ -372,7 +379,8 @@ if [ "$STAGE" != design ] && doc_gap_pending; then
 fi
 case "$STAGE" in
   worker|review|verify|done)
-    # impl PASS 가 stale 이어도 사용자가 해결한 gap 의 지문(doc-gap-resume.json)이 현재 입력과 같으면 impl 로 되돌리지 않는다(impl_docs_accepted)
+    # impl PASS 가 stale 이어도 사용자가 해결한 gap 의 지문(doc-gap-resume.json)이 현재 입력과 같으면 impl 로 되돌리지 않는다(impl_docs_accepted).
+    # impl 합의 에스컬레이션의 유효한 사용자 수리(user-escalation-resume-impl.json, USER_RESOLVED)도 워커 진입 권한이다 — impl 검증자를 다시 부르지 않는다.
     impl_docs_accepted || { log "impl 합의 PASS 가 현재 입력에 대해 유효하지 않음 — impl 부터"; STAGE=impl; };;
 esac
 case "$STAGE" in
@@ -512,6 +520,19 @@ run_unit() { # unit-id
   log "=== unit $id 완료 (done.json, context facts $(jq '.facts|length' "$IMPL_CONTEXT_FILE")건) ==="
 }
 
+# ---------- 합의 단계 사용자 에스컬레이션 안내 ----------
+# 합의 루프가 exit 2 로 돌아왔을 때의 NEED_USER detail. 사용자 에스컬레이션(WAITING_USER)이면 blocker 마다 써야 할 답 줄을 그대로 준다.
+# 그 외 exit 2(DESIGNER_SCOPE_VIOLATION 등)는 에스컬레이션 체크포인트가 없으므로 state.json 을 보라는 안내만 한다.
+escalation_detail() { # target docs
+  if [ "$(user_escalation_step "$1")" != WAITING_USER ]; then printf '%s' "$WORK_DIR/state.json 의 status 와 사유를 확인"; return 0; fi
+  local unanswered; unanswered="$(user_escalation_unanswered "$1" | paste -sd, -)"
+  printf '%s' "사용자 결정이 최종이다 — 아래 blocker **전부**에 답을 decisions.md 에 추가하고(blocker 마다 한 줄: '- [USER-QUESTION][scope=$1][escalation=<id>] <질문·쟁점> → <답>', <질문·쟁점> 은 아래 항목의 문구 그대로, <답> 은 실제 결정으로 바꾼다 — 빈 답·'<답>' 같은 플레이스홀더·다른 scope·다른 id·질문 문구 불일치는 인정되지 않는다. 검증자 요구를 기각하는 것도 같은 형식의 답이다) 결정 내용을 $2 에 반영한 뒤(ASK_USER 는 문서가 발생 시점과 같으면 수리되지 않는다) 재실행하면 $1 검증자·디자이너를 다시 부르지 않고 다음 단계로 간다(USER_RESOLVED — 검증자 PASS 아님). 답이 일부만 있으면 모델 호출 0회로 다시 멈춘다. request.md·상위 문서·범위(feature-scope/implementation-units)·conventions 를 함께 바꾸면 이 우회 대상이 아니라 Round 1 부터 재합의한다. 체크포인트·리뷰 JSON 을 손으로 고치지 않는다. 답 없는 blocker: ${unanswered:-없음}.$(user_escalation_docs_synced "$1" || printf ' 문서 미반영: %s 가 발생 시점과 같다 — ASK_USER 의 선택을 반영해야 한다.' "$2") 항목: $(user_escalation_field "$1" '[.issues[] | "[\(.id)] (\(.action)) \(.question)" + (if (.options|length)>0 then " (options: \(.options|join(" | ")))" else "" end)] | join(" ; ")')"
+}
+consensus_exit0_note() { # target — exit 0 이 검증자 PASS 인지 사용자 수리인지 로그에 남긴다(둘은 다른 provenance)
+  [ "$(jq -r '.status // ""' "$WORK_DIR/state.json" 2>/dev/null)" != USER_RESOLVED ] \
+    || log "$1 단계: 사용자 수리(USER_RESOLVED, $(user_escalation_field "$1" '.reason'), blocker $(user_escalation_field "$1" '[.issues[].id] | join(",")')) — 검증자 PASS 아님, $(user_escalation_file "$1")"
+}
+
 # ---------- 상태 기계 ----------
 while :; do
   write_state "$STAGE" RUNNING "" ""
@@ -520,8 +541,8 @@ while :; do
     design)
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" design; rc=$?; set -e
       case $rc in
-        0) STAGE=impl;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-design-*.json 의 쟁점을 사용자에게 보고. 답은 decisions.md 에 '- [USER-QUESTION][scope=design] <질문> → <답>' 으로 기록(필요하면 design.md 반영) 후 재실행";;
+        0) consensus_exit0_note design; STAGE=impl;;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 state.json.review 의 쟁점을 사용자에게 보고. $(escalation_detail design 'design.md')";;
         *) env_error "consensus-loop design 실패 (exit $rc)";;
       esac;;
 
@@ -533,8 +554,8 @@ while :; do
         || stop_need_docs IMPL_DOCS_MISSING "$ROOT/$UNITS_MANIFEST_FILE 형식 오류 — schemas/implementation-units.schema.json: version 1, units ≥1, unit 마다 id(순번-kebab, 유일, 배열 순서대로 증가)·title·goal·requirements≥1·scope(files/new_file_roots, canonical, 하나 이상)·references≥1·targeted_test(비어 있지 않음) 필수, 그 외 필드(depends_on/priority/parallel 등) 금지"
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
       case $rc in
-        0) STAGE=worker;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 마지막 reviews/validator-impl-*.json 의 쟁점을 사용자에게 보고. 답은 decisions.md 에 '- [USER-QUESTION][scope=impl] <질문> → <답>' 으로 기록(필요하면 implementation.md/approach.md 반영) 후 재실행 — design PASS 는 그대로 재사용되고 impl 만 Round 1 부터 재검증된다. 체크포인트·리뷰 JSON 을 손으로 고치지 않는다";;
+        0) consensus_exit0_note impl; STAGE=worker;;
+        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 state.json.review 의 쟁점을 사용자에게 보고. $(escalation_detail impl 'implementation.md/approach.md')";;
         *) env_error "consensus-loop impl 실패 (exit $rc)";;
       esac;;
 
@@ -595,7 +616,7 @@ while :; do
       gap_reason=UNDECIDED; [ "$(doc_gap_field '.origin')" != review ] || gap_reason=REVIEW_DOC_GAP
       # 수리된 단계(WORKER_PENDING/REVIEW_PENDING)라도 provenance 다섯 조건이 지금 깨져 있으면(답 삭제·frozen 문서 변경·밑바탕 PASS 무효) 모델 0회로 멈춘다
       if [ "$gap_step" != WAITING_USER ] && ! doc_gap_resolved_current; then
-        stop_need_user DOC_GAP_SCOPE_EXCEEDED "사용자 해결 체크포인트($gap_step)의 provenance 가 현재 상태와 맞지 않는다 — 답 줄 삭제, implementation.md/units/scope 변경, decisions.md 기존 줄 수정, 또는 impl consensus PASS 무효. 해당 변경을 되돌리고 재실행하거나, 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의). 자동 복구 없음"
+        stop_need_user DOC_GAP_SCOPE_EXCEEDED "사용자 해결 체크포인트($gap_step)의 provenance 가 현재 상태와 맞지 않는다 — 답 줄 삭제, implementation.md/units/scope 변경, decisions.md 기존 줄 수정, 또는 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED) 무효. 해당 변경을 되돌리고 재실행하거나, 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의). 자동 복구 없음"
       fi
       case "$gap_step" in
         WAITING_USER)
@@ -612,7 +633,7 @@ while :; do
           if doc_gap_accept; then :; else
             case $? in
               2) stop_need_user DOC_GAP_SCOPE_EXCEEDED "gap 해결 범위(approach.md 반영 + decisions.md 추가) 밖의 impl 입력이 바뀌었다(implementation.md/implementation-units.json/feature-scope.json 변경 또는 decisions.md 기존 줄 삭제·수정). 사용자 해결 경로로는 impl 재합의를 우회할 수 없다 — 의도한 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의), 아니면 그 문서를 gap 발생 시점으로 되돌리고 재실행";;
-              *) env_error "doc-gap-resume.json 의 밑바탕 impl consensus PASS 가 유효하지 않거나 수리 기록 실패 — 체크포인트·consensus-impl.json 을 손으로 고치지 않는다";;
+              *) env_error "doc-gap-resume.json 의 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED)이 유효하지 않거나 수리 기록 실패 — 체크포인트·consensus-impl.json·user-escalation-resume-impl.json 을 손으로 고치지 않는다";;
             esac
           fi
           log "DOC_GAP 사용자 결정 확인 ($(doc_gap_field '[.gaps[].key] | join(",")')) — approach 동기화·source tree 불변 — 검증자·디자이너 없이 워커로"

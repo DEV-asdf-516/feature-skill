@@ -15,8 +15,8 @@
 DESIGN_REVISION_MODEL="claude-fable-5-1"
 DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-6-astra"     # 명세 검증자
-VALIDATOR_EFFORT="low" # 게이트 모드(구현을 막을 최소 사유만 판정). 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
-VALIDATOR_PROFILE=""      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 빈 값 = 모델별 기본값(validator_profile 헬퍼). compact | guided | conservative | none
+VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정)지만 문서 주장을 직접 호출 경로·conventions 와 교차 확인하므로 low 로 내리지 않는다. 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
+VALIDATOR_PROFILE="guided"      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 명시 값이 모델별 기본값(validator_profile 헬퍼)보다 우선한다. 빈 값 = 모델별 기본값. compact | guided | conservative | none
 WORKER_MODEL="claude-opus-5-5"       # 구현 담당
 WORKER_EFFORT="medium"
 REVIEWER_MODEL="gpt-5.6-sol"  # 구현 리뷰 담당
@@ -48,7 +48,8 @@ FIXER_CLI=""
 # 16: 판정 격리 — 검증자는 호출마다 fresh 세션, 종결 검토 입력은 직전 blocker 의 구조화된 주장·증거(prev-blockers-*.json — why_blocks_now 제외)와 decisions.md 를 뺀 문서 diff 뿐. [round N] ACCEPT/REJECT 이력은 판정 입력이 아니며 "REJECT 된 이슈 재제기 금지" 는 폐기(검증자가 독립 재판정, 불일치는 DEADLOCK 으로 사용자에게).
 # 17: 검증자 입력에서 decisions.md 원본을 뺐다 — 러너가 추린 확정 사용자 결정 파일(reviews/user-decisions-<target>.md, [USER-QUESTION][scope=…] 줄만)을 준다. v16 실모델에서 검증자가 decisions.md 의 REJECT 사유를 읽고 추론에 쓴 것이 관측됨.
 # 18: validator-review-impl.md 1행에 ${PROJECT_CONVENTIONS} 추가 — design 검증자만 conventions.md 본문을 받고 impl 검증자는 받지 못하던 누락 수정(consensus-loop 는 두 검증자 모두에 인자 "" 를 넘기고 프롬프트 본문 렌더링에만 의존한다). 루프 start-up 에서 플레이스홀더 부재를 fail-closed 로 검사.
-VALIDATOR_CONTRACT_VERSION=18
+# 19: 문서 주장의 독립 교차 검증 — ① 명시적 conventions 규칙과 직접 충돌하는 문서 결정은 동작이 같아도 DIRECT_MISMATCH ② request·확정 사용자 결정·기존 필수 계약에 근거 없는 신규 제품 동작 ③ 문서가 변경 대상으로 지정한 함수·쿼리·서비스의 직접 호출부·피호출부 확인(누락으로 명시 계약 위반·구현 불가일 때만) ④ NEW 탐색 근거가 직접 범위 코드와 사실로 어긋나면 REUSE_DISCOVERY_GAP. category·스키마 필드는 그대로(schema_version 만 19). 탐색 범위는 여전히 변경 대상 + 직접 의존.
+VALIDATOR_CONTRACT_VERSION=19
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -63,7 +64,8 @@ REVIEWER_CONTRACT_VERSION=15
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
 # 로더는 버전이 다르면 저장된 지문을 해석하지 않고 안전하게 처음(Round 1 / 새 attempt)으로 돌아간다 —
 # 다른 의미의 지문을 비교해 "부분 실행"으로 오판하고 단계를 건너뛰는 것을 막는다.
-CONSENSUS_CHECKPOINT_VERSION=3
+# consensus 4: upstream·PASS 지문에 worktree conventions.md 내용 포함(없으면 고정 부재 표지) — conventions 가 바뀌면 이전 design·impl PASS 를 재사용하지 않는다.
+CONSENSUS_CHECKPOINT_VERSION=4
 REVIEW_CHECKPOINT_VERSION=2
 
 # --- 수렴/안전 한도 ---
@@ -127,12 +129,15 @@ render_prompt() {
 
 # 검증자 판정 전략 프로필. VALIDATOR_PROFILE 이 비어 있으면 VALIDATOR_MODEL 로 기본값을 고른다.
 # 프로필은 모델 ID 가 아니라 전략 이름(compact/guided/conservative)이라, 모델이 바뀌어도 여기 매핑 한 줄만 고친다.
+# 매핑은 정확한 모델 ID 만 본다 — 여기 없는 모델은 conservative 다. 위 VALIDATOR_MODEL 기본값은 반드시 이 매핑에 있어야 하고(없으면 의도치 않게 conservative),
+# 그 매핑 값은 명시 VALIDATOR_PROFILE 과 같아야 한다(tests/install-smoke.sh 가 둘의 일치를 검사한다).
 # 공통 계약(관할·탐색 범위·BLOCK/ASK_USER 입장 조건·스키마)은 validator-review-*.md 한 곳에만 있고 오버레이는 "그 계약을 어떤 순서로 판정할지"만 담는다.
 validator_profile() {
   if [ -n "${VALIDATOR_PROFILE:-}" ]; then printf '%s' "$VALIDATOR_PROFILE"; return 0; fi
   case "${VALIDATOR_MODEL:-}" in
     gpt-6-sol)   printf 'compact' ;;
     gpt-5.6-sol)   printf 'compact' ;;
+    gpt-6-astra)   printf 'guided' ;;
     gpt-5.6-astra) printf 'guided' ;;
     *)             printf 'conservative' ;;
   esac
@@ -1089,9 +1094,10 @@ consensus_docs_for() { # design | impl
 # (impl 은 구현 단위 manifest 도 디자이너가 고치는 합의 대상이다 — 러너는 impl 단계 진입 전에 존재를 요구하고, 루프 단독 실행·회귀 픽스처에서는 없어도 된다)
 # 지문 세 종류 — 재개 지점은 "누가 무엇을 바꿨는가"에 따라 달라지므로 하나로 합치지 않는다.
 #   editable : 디자이너가 고치는 것(consensus_docs_for = 대상 문서 + decisions.md). DESIGNER_PENDING 에서 달라졌으면 디자이너 부분 실행.
-#   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + target 범위의 [USER-QUESTION]).
-#              달라졌으면 저장된 리뷰 자체가 무효 → Round 1 부터.
-#   pass     : 합의된 입력 전체(upstream + 대상 문서 + target 범위의 [USER-QUESTION]). PASS 가 현재 입력에 대한 것인지.
+#   upstream : 디자이너 입력이지만 이 루프가 고치지 않는 것(design: request.md / impl: request.md + design.md, + target 범위의 [USER-QUESTION]
+#              + worktree conventions.md). 달라졌으면 저장된 리뷰 자체가 무효 → Round 1 부터.
+#   pass     : 합의된 입력 전체(upstream + 대상 문서 + target 범위의 [USER-QUESTION] + worktree conventions.md). PASS 가 현재 입력에 대한 것인지.
+# conventions.md 는 검증자 프롬프트에 본문이 그대로 들어가는 판정 입력이다 — 내용이 바뀌면 옛 규칙으로 받은 design·impl PASS 는 현재 입력에 대한 PASS 가 아니다.
 # [USER-QUESTION] 의 의존성 범위(scope) — downstream 은 upstream 결정을 상속하지만 upstream 은 downstream 결정을 보지 않는다:
 #   design ← [USER-QUESTION][scope=design]
 #   impl   ← [USER-QUESTION][scope=design] + [USER-QUESTION][scope=impl]
@@ -1121,6 +1127,12 @@ consensus_user_decisions_for() { # design | impl
   if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "$pattern" "$WORK_DIR/decisions.md" || true; fi
   printf '\0'
 }
+# 프로젝트 conventions(해당 worktree 의 CONVENTIONS_FILE) → NUL 구분 스트림 (지문 입력). 경로가 아니라 고정 라벨을 쓴다(내용만 지문에 들어간다).
+# 파일이 없으면 고정 부재 표지만 낸다 — conventions 없는 프로젝트의 지문은 실행마다 같고, 파일이 생기거나(빈 파일 포함) 사라지면 달라진다.
+consensus_conventions_stream() {
+  if [ -f "${CONVENTIONS_FILE:-}" ]; then printf 'conventions:present\0'; cat "$CONVENTIONS_FILE"; printf '\0'
+  else printf 'conventions:absent\0'; fi
+}
 consensus_editable_fingerprint() { # design | impl
   { consensus_docs_for "$1" | while IFS= read -r file; do _fingerprint_files "$file"; done; } | sha256_stdin
 }
@@ -1131,9 +1143,10 @@ consensus_upstream_fingerprint() { # design | impl
       impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md";;
     esac
     consensus_user_decisions_for "$1"
+    consensus_conventions_stream
   } | sha256_stdin
 }
-# PASS 지문: 합의된 '입력'이 여전히 같은지 확인하는 용도. request/design(/implementation/approach) 전체와
+# PASS 지문: 합의된 '입력'이 여전히 같은지 확인하는 용도. request/design(/implementation/approach) 전체, worktree conventions.md 내용,
 # decisions.md 중 이 target 범위의 사용자 정책 결정([USER-QUESTION][scope=…]) 줄만 — 이후 수정자·디자이너의 판정 기록이
 # 쌓이거나 downstream 단계의 사용자 결정이 추가돼도 이전 PASS 가 불필요하게 무효화되지 않게 한다.
 # decisions.md 전체를 넣지 않는다(합의 이력이 PASS 를 깨면 안 됨). 반대로 사용자 결정을 아예 빼지도 않는다 — 문서 변경 없이
@@ -1145,6 +1158,7 @@ consensus_pass_fingerprint() { # design | impl
       impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json";;
     esac
     consensus_user_decisions_for "$1"
+    consensus_conventions_stream
   } | sha256_stdin
 }
 # (impl PASS 지문에 feature-scope.json · implementation-units.json 원본을 넣는다 — 사용자가 범위나 구현 단위를 바꾸면 워커 재진입 전에 impl 재합의를 거치게 한다)
@@ -1188,6 +1202,150 @@ impl_approval_current() {
 }
 
 # =============================================================
+# 합의 단계 사용자 에스컬레이션 수리 체크포인트 — $WORK_DIR/user-escalation-resume-<target>.json  (target = design | impl)
+#   합의 루프가 ASK_USER / DEADLOCK / MAX_ROUNDS_EXCEEDED 로 멈추면 그 단계의 미해결 blocker 는 사용자에게 간다. 사용자의 명시적 결정이 그 blocker 의
+#   최종 결정이며, 모든 blocker 가 결정되면 같은 단계의 검증자·디자이너를 다시 부르지 않고 다음 단계(design → impl, impl → worker)로 간다.
+#   USER_RESOLVED 는 검증자 PASS 가 아니다 — consensus-<target>.json 을 PASS 로 만들지 않고 리뷰 JSON 의 BLOCK 도 그대로 둔다. 대신 이 파일이
+#   "실제 마지막 리뷰(경로 + 내용 해시 + blocker 사본) + 발생 시점 입력 지문 + 사용자가 답한 줄 + 수리 시점 입력 지문" 을 별도 provenance 로 든다.
+#   next_step: WAITING_USER(답 전 — 모델 호출 0회) → USER_RESOLVED(모든 blocker 에 답, 수리 지문 고정) / SUPERSEDED(전제가 깨져 정상 재합의로 넘어감 — 근거 보존용)
+#   답 줄(blocker 마다 하나, 발생 뒤에 **추가된** 줄만 인정):  `- [USER-QUESTION][scope=<target>][escalation=<blocker id>] <질문·쟁점> → <답>`
+#     scope 는 발생 단계와 같아야 하고 답은 비어 있으면 안 된다. ASK_USER 의 선택이든 REVISE_DOC 요구의 수용/기각이든 같은 형식이다.
+#     [escalation=…] 은 구현 후 gap 의 [review-issue=…] / [worker-gap=…] 과 다른 태그이고 서로의 답으로 인정되지 않는다.
+#   우회가 성립하는 범위(그 밖은 전부 종전 규칙 — 정상 재합의):
+#     - 대기 중 바뀌어도 되는 것: 그 단계 문서(design: design.md / impl: implementation.md·approach.md)와 decisions.md 의 **추가**.
+#     - 대기 중 바뀌면 안 되는 것(frozen): request.md, conventions.md, (impl) design.md·feature-scope.json·implementation-units.json·scope=design 결정,
+#       decisions.md 의 기존 줄, 검증 계약·체크포인트 버전, 리뷰 JSON 내용. 하나라도 달라지면 에스컬레이션은 SUPERSEDED 가 되고 Round 1 부터 재합의한다.
+#     - 수리 뒤: 수리 시점의 PASS 지문(consensus_pass_fingerprint) 과 현재가 같을 때만 재사용한다. 문서·결정·범위·conventions 를 또 바꾸면 무효다.
+# =============================================================
+USER_ESCALATION_VERSION=1
+user_escalation_file() { printf '%s/user-escalation-resume-%s.json' "$WORK_DIR" "$1"; }
+user_escalation_field() { jq -r "$2" "$(user_escalation_file "$1")"; } # target jq-filter
+user_escalation_step() { # target → next_step (파일 없음·포맷 버전/target 불일치면 빈 값)
+  local f; f="$(user_escalation_file "$1")"
+  [ -f "$f" ] && jq -r --argjson v "$USER_ESCALATION_VERSION" --arg t "$1" 'if .version==$v and .target==$t then .next_step else "" end' "$f" 2>/dev/null || printf ''
+}
+_user_escalation_frozen_hash() { # target → 대기 중 바뀌면 안 되는 입력의 해시
+  {
+    case "$1" in
+      design) _fingerprint_files "$WORK_DIR/request.md";;
+      impl) _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json"
+            consensus_user_decisions_for design;;
+    esac
+    consensus_conventions_stream
+  } | sha256_stdin
+}
+# 그 단계 문서만의 해시(decisions.md 제외) — ASK_USER 결정이 문서에 반영됐는지(발생 시점과 달라졌는지) 확인하는 용도.
+_user_escalation_stage_docs_hash() { # target
+  case "$1" in
+    design) _fingerprint_files "$WORK_DIR/design.md";;
+    impl) _fingerprint_files "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md";;
+  esac | sha256_stdin
+}
+# 에스컬레이션 기록(WAITING_USER). 합의 루프가 consensus-<target>.json 을 초기화하기 **전에** 부른다 — DEADLOCK/MAX_ROUNDS 의 마지막 실제 리뷰가 사라지지 않게.
+user_escalation_record() { # target reason review round
+  local f n; f="$(user_escalation_file "$1")"; n="$(_doc_gap_decisions_lines)"
+  [ -f "$3" ] && jq -e '(.blocking_issues|length)>0' "$3" >/dev/null 2>&1 || return 1
+  jq -n --argjson v "$USER_ESCALATION_VERSION" --arg target "$1" --arg reason "$2" --arg review "$3" --arg round "$4" --slurpfile r "$3" \
+    --arg sha "$(sha256_stdin < "$3")" --argjson cv "$VALIDATOR_CONTRACT_VERSION" --argjson ckv "$CONSENSUS_CHECKPOINT_VERSION" \
+    --arg editable "$(consensus_editable_fingerprint "$1")" --arg upstream "$(consensus_upstream_fingerprint "$1")" --arg input "$(consensus_pass_fingerprint "$1")" \
+    --arg frozen "$(_user_escalation_frozen_hash "$1")" --arg stage "$(_user_escalation_stage_docs_hash "$1")" --arg dl "$n" --arg dh "$(_doc_gap_decisions_prefix_hash "$n")" --arg now "$(date '+%FT%T%z')" \
+    '{version:$v, target:$target, reason:$reason, next_step:"WAITING_USER", review:$review, review_sha256:$sha, round:($round|tonumber),
+      contract_version:$cv, checkpoint_version:$ckv,
+      issues:[$r[0].blocking_issues[] | {id, tag:("escalation=" + .id), action, category, evidence_type,
+        question:(if .user_question != "" then .user_question else .minimum_contract_needed end), options, basis_refs, conflict_refs, code_refs,
+        reachable_scenario, impact, minimum_contract_needed, user_question}],
+      escalated:{editable_fingerprint:$editable, upstream_fingerprint:$upstream, input_fingerprint:$input},
+      frozen_inputs_hash:$frozen, stage_docs_hash:$stage, decisions_lines:($dl|tonumber), decisions_prefix_hash:$dh,
+      answers:[], resolved_input_fingerprint:"", resolved_editable_fingerprint:"", recorded_at:$now, updated_at:$now}' > "$f.tmp" && mv "$f.tmp" "$f"
+}
+# 근거 자체가 온전한가(WAITING_USER·USER_RESOLVED 공통): 계약·체크포인트 버전이 현재와 같고, blocker 가 있고, 가리키는 리뷰 JSON 내용이 기록 당시 그대로다.
+_user_escalation_evidence_violation() { # target → 깨진 전제 한 줄(없으면 빈 출력)
+  local f review; f="$(user_escalation_file "$1")"
+  jq -e --argjson cv "$VALIDATOR_CONTRACT_VERSION" '.contract_version==$cv' "$f" >/dev/null 2>&1 || { echo "검증 계약 버전이 발생 당시와 다름(현재 $VALIDATOR_CONTRACT_VERSION)"; return 0; }
+  jq -e --argjson ckv "$CONSENSUS_CHECKPOINT_VERSION" '.checkpoint_version==$ckv' "$f" >/dev/null 2>&1 || { echo "합의 체크포인트 포맷 버전이 발생 당시와 다름(현재 $CONSENSUS_CHECKPOINT_VERSION)"; return 0; }
+  jq -e '(.issues|length)>0 and (.reason=="ASK_USER" or .reason=="DEADLOCK" or .reason=="MAX_ROUNDS_EXCEEDED")' "$f" >/dev/null 2>&1 || { echo "blocker 목록 또는 발생 사유가 유효하지 않음"; return 0; }
+  review="$(user_escalation_field "$1" '.review')"
+  { [ -f "$review" ] && [ "$(sha256_stdin < "$review")" = "$(user_escalation_field "$1" '.review_sha256')" ]; } || { echo "원본 리뷰 JSON($review)이 없거나 내용이 발생 당시와 다름"; return 0; }
+}
+# 대기 중 전제: 근거 온전 + frozen 입력 불변 + decisions.md 는 발생 시점 내용을 prefix 로 유지(append-only).
+user_escalation_premise_violation() { # target → 깨진 전제 한 줄(없으면 빈 출력)
+  local v n; v="$(_user_escalation_evidence_violation "$1")"
+  [ -z "$v" ] || { echo "$v"; return 0; }
+  [ "$(_user_escalation_frozen_hash "$1")" = "$(user_escalation_field "$1" '.frozen_inputs_hash')" ] \
+    || { case "$1" in design) echo "request.md 또는 conventions.md 가 발생 시점과 다름";; *) echo "request.md·design.md·feature-scope.json·implementation-units.json·conventions.md·scope=design 결정 중 하나가 발생 시점과 다름";; esac; return 0; }
+  n="$(user_escalation_field "$1" '.decisions_lines')"
+  { [ "$(_doc_gap_decisions_lines)" -ge "$n" ] && [ "$(_doc_gap_decisions_prefix_hash "$n")" = "$(user_escalation_field "$1" '.decisions_prefix_hash')" ]; } \
+    || { echo "decisions.md 의 기존 줄이 삭제·수정됨(추가만 허용)"; return 0; }
+}
+# blocker id 의 답 줄: 발생 뒤에 추가된 줄 중 scope=<target> + [escalation=<id>] + 그 blocker 의 질문·쟁점 문구 + 실제 답. 아래는 답이 아니다:
+#   빈 답 / 다른 scope / 다른 id / 질문 문구가 그 blocker 의 것과 다름(공백 차이는 무시 — 보고문의 "답 형식" 줄을 그대로 복사하면 맞는다) /
+#   답이 꺾쇠 플레이스홀더 그대로(`→ <답>`, `→ <선택한 option>` 처럼 `<…>` 하나뿐인 답 — 안내 형식을 채우지 않은 것이지 사용자 결정이 아니다).
+user_escalation_answer_line() { # target id
+  local n id_re q line ans found=""; n="$(user_escalation_field "$1" '.decisions_lines')"
+  id_re="$(printf '%s' "$2" | sed 's/[][\.*^$+?(){}|/]/\\&/g')"
+  [ -f "$WORK_DIR/decisions.md" ] || return 0
+  q="$(jq -r --arg id "$2" '.issues[] | select(.id==$id) | .question' "$(user_escalation_file "$1")" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+  [ -n "$q" ] || return 0
+  while IFS= read -r line; do
+    ans="$(printf '%s' "${line##*→}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ "$ans" =~ ^\<[^\<\>]*\>$ ]] && continue
+    [[ "$(printf '%s' "${line%→*}" | tr -s '[:space:]' ' ')" == *"$q"* ]] || continue
+    found="$line"
+  done < <(tail -n +"$((n + 1))" "$WORK_DIR/decisions.md" | { grep -E "^[[:space:]]*- \[USER-QUESTION\]\[scope=$1\]\[escalation=$id_re\] .*→[[:space:]]*[^[:space:]]" || true; })
+  printf '%s' "$found"
+}
+user_escalation_unanswered() { # target → 답 없는 blocker id, 한 줄 하나
+  local id
+  while IFS= read -r id; do [ -n "$(user_escalation_answer_line "$1" "$id")" ] || printf '%s\n' "$id"; done < <(user_escalation_field "$1" '.issues[].id')
+}
+# ASK_USER 는 정책 선택이므로 그 선택이 단계 문서(design: design.md / impl: implementation.md·approach.md)에 반영돼야 한다 — 발생 시점과 문서가 같으면 수리하지 않는다.
+# (사용자가 A 를 골랐는데 문서에는 B 가 남은 채 다음 단계로 가는 것을 막는 최소 검사다. 변경 '여부'만 본다 — 내용 일치까지 증명하지는 않으며 검증자를 다시 부르지도 않는다.)
+# DEADLOCK/MAX_ROUNDS 는 검증자 요구의 기각이 문서 변경 없이 성립하므로 요구하지 않는다. stage_docs_hash 가 없는 옛 체크포인트도 요구하지 않는다.
+user_escalation_docs_synced() { # target
+  [ "$(user_escalation_field "$1" '.reason')" = ASK_USER ] || return 0
+  local h; h="$(user_escalation_field "$1" '.stage_docs_hash // ""')"
+  [ -z "$h" ] || [ "$(_user_escalation_stage_docs_hash "$1")" != "$h" ]
+}
+# 사용자 답 수리: 전제(위)와 모든 blocker 의 답을 다시 확인한 뒤, 답 줄과 지금의 입력 지문을 고정하고 USER_RESOLVED 로. 반환: 0 수리, 2 답 없는 blocker 있음, 1 전제 무효/기록 실패.
+# 수리 지문은 여기서만 쓴다 — 문서가 바뀌었다는 사실이나 [USER-QUESTION] 줄이 하나 늘었다는 사실만으로는 수리되지 않는다.
+user_escalation_accept() { # target
+  local f id answers='[]'; f="$(user_escalation_file "$1")"
+  [ "$(user_escalation_step "$1")" = WAITING_USER ] || return 1
+  [ -z "$(user_escalation_premise_violation "$1")" ] || return 1
+  [ -z "$(user_escalation_unanswered "$1")" ] || return 2
+  user_escalation_docs_synced "$1" || return 2
+  while IFS= read -r id; do
+    answers="$(jq -c --arg id "$id" --arg line "$(user_escalation_answer_line "$1" "$id")" '. + [{id:$id, line:$line}]' <<< "$answers")" || return 1
+  done < <(user_escalation_field "$1" '.issues[].id')
+  jq --argjson answers "$answers" --arg fp "$(consensus_pass_fingerprint "$1")" --arg editable "$(consensus_editable_fingerprint "$1")" --arg now "$(date '+%FT%T%z')" \
+    '.next_step="USER_RESOLVED" | .answers=$answers | .resolved_input_fingerprint=$fp | .resolved_editable_fingerprint=$editable | .resolved_at=$now | .updated_at=$now' \
+    "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+# 수리된 근거가 변조 없이 남아 있는가(현재 입력과 같은지는 보지 않는다 — 구현 후 DOC_GAP 체인의 밑바탕 검사용. doc_gap_base_consensus_valid 의 PASS 검사와 같은 수준).
+user_escalation_intact() { # target
+  [ "$(user_escalation_step "$1")" = USER_RESOLVED ] || return 1
+  [ -z "$(_user_escalation_evidence_violation "$1")" ] || return 1
+  jq -e '.resolved_input_fingerprint != "" and (.answers|length)==(.issues|length)' "$(user_escalation_file "$1")" >/dev/null 2>&1
+}
+# 현재 입력에 대해 유효한 사용자 수리가 있는가: USER_RESOLVED + 근거 온전 + 수리 시점에 고정한 입력 지문 == 현재 PASS 지문(문서·target 범위 사용자 결정·범위·conventions 전부).
+user_escalation_resolved_current() { # design | impl
+  user_escalation_intact "$1" || return 1
+  [ "$(user_escalation_field "$1" '.resolved_input_fingerprint')" = "$(consensus_pass_fingerprint "$1")" ]
+}
+# 전제가 깨진 에스컬레이션은 지우지 않고 SUPERSEDED 로 남긴다(근거 보존). 그 뒤는 정상 재합의다.
+user_escalation_supersede() { # target why
+  local f; f="$(user_escalation_file "$1")"
+  jq --arg why "$2" --arg now "$(date '+%FT%T%z')" '.superseded_from=.next_step | .next_step="SUPERSEDED" | .superseded_reason=$why | .updated_at=$now' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+}
+# 사용자 보고문: blocker 마다 id·쟁점·선택지·근거 + 답을 적을 decisions.md 형식.
+user_escalation_report() { # target
+  jq -r --arg t "$1" '.issues[] | "  [\(.id)] (\(.action)) \(.question)" + (if (.options|length)>0 then "\n      선택지: \(.options | join(" | "))" else "" end)
+    + "\n      근거: \((.basis_refs + .conflict_refs + .code_refs) | join(", "))\n      답 형식(질문 문구는 그대로 두고 <답> 자리를 실제 결정으로 바꾼다): - [USER-QUESTION][scope=\($t)][\(.tag)] \(.question | gsub("\\s+"; " ")) → <답>"' "$(user_escalation_file "$1")"
+}
+# 다음 단계로 가도 되는 합의 단계 상태: 검증자 PASS 가 현재 입력에 유효하거나, 사용자가 에스컬레이션의 모든 blocker 를 결정한 수리 지문이 현재 입력과 같다.
+consensus_stage_accepted() { consensus_pass_current "$1" || user_escalation_resolved_current "$1"; } # design | impl
+
+# =============================================================
 # 구현 후 DOC_GAP 재개 체크포인트 — $WORK_DIR/doc-gap-resume.json
 #   impl consensus 는 최초 워커 진입 전의 사전 게이트다. 그 뒤 워커(unit)·리뷰어·review-gap 워커가 발견한 DOC_GAP/USER_DECISION 은
 #   impl 재합의로 돌아가지 않고 사용자에게 직접 간다: NEED_USER → 사용자가 decisions.md + approach.md 에 결정 기록 → 검증자·디자이너 없이 워커 → 리뷰.
@@ -1220,19 +1378,25 @@ _doc_gap_write() { # gaps-json origin review attempt round unit_id result source
   # 전제: 지금 impl 문서가 승인된 상태(최초 validator PASS 유효 또는 직전 gap 의 사용자 해결 지문 유효)여야 gap 을 기록할 수 있다 —
   # 승인되지 않은 문서 위의 gap 은 존재할 수 없고, 이 전제가 provenance 체인(PASS → 해결 → 해결 …)의 귀납 조건이다.
   impl_docs_accepted || { echo "[FAIL] doc-gap 기록 거부 — impl 문서가 승인된 상태가 아님(consensus-impl.json PASS 도 사용자 해결 지문도 현재 입력에 유효하지 않음)" >&2; return 1; }
-  local base_review="" base_round=0 base_fp=""
-  if [ -f "$WORK_DIR/consensus-impl.json" ]; then
+  # 밑바탕 종류: 검증자 PASS(consensus-impl.json) 또는 합의 단계 사용자 수리(user-escalation-resume-impl.json, USER_RESOLVED). 둘은 다른 provenance 라 섞지 않는다 —
+  # impl 이 사용자 수리로 워커에 들어왔으면 consensus-impl.json 은 PASS 가 아니므로(위조하지 않는다) 수리 체크포인트의 리뷰·수리 지문을 밑바탕으로 든다.
+  local base_review="" base_round=0 base_fp="" base_kind=PASS
+  if [ "$(user_escalation_step impl)" = USER_RESOLVED ] && ! jq -e '.next_step=="PASS"' "$WORK_DIR/consensus-impl.json" >/dev/null 2>&1; then
+    base_kind=USER_RESOLVED
+    base_review="$(user_escalation_field impl '.review')"; base_round="$(user_escalation_field impl '.round')"
+    base_fp="$(user_escalation_field impl '.resolved_input_fingerprint')"
+  elif [ -f "$WORK_DIR/consensus-impl.json" ]; then
     base_review="$(jq -r '.review // ""' "$WORK_DIR/consensus-impl.json")"; base_round="$(jq -r '.round // 0' "$WORK_DIR/consensus-impl.json")"
     base_fp="$(jq -r '.input_fingerprint // ""' "$WORK_DIR/consensus-impl.json")"
   fi
   local n; n="$(_doc_gap_decisions_lines)"
   jq -n --argjson v "$DOC_GAP_RESUME_VERSION" --argjson gaps "$1" --arg origin "$2" --arg review "$3" --arg attempt "${4:-0}" --arg round "${5:-0}" \
     --arg unit "$6" --arg result "$7" --arg tree "$8" --arg docs "$(_doc_gap_docs_hash)" --arg approach "$(_doc_gap_approach_hash)" \
-    --arg base "$base_review" --arg base_round "$base_round" --arg base_fp "$base_fp" --arg gap_fp "$(consensus_pass_fingerprint impl)" \
+    --arg base "$base_review" --arg base_round "$base_round" --arg base_fp "$base_fp" --arg base_kind "$base_kind" --arg gap_fp "$(consensus_pass_fingerprint impl)" \
     --arg frozen "$(_doc_gap_frozen_hash)" --arg dl "$n" --arg dh "$(_doc_gap_decisions_prefix_hash "$n")" --arg now "$(date '+%FT%T%z')" \
     '{version:$v, origin:$origin, next_step:"WAITING_USER", review:$review, attempt:($attempt|tonumber), round:($round|tonumber), unit_id:$unit, result:$result,
       gaps:$gaps, source_tree:$tree, docs_fingerprint:$docs, approach_hash:$approach,
-      base_consensus_review:$base, base_consensus_round:($base_round|tonumber), base_pass_fingerprint:$base_fp, gap_impl_fingerprint:$gap_fp,
+      base_kind:$base_kind, base_consensus_review:$base, base_consensus_round:($base_round|tonumber), base_pass_fingerprint:$base_fp, gap_impl_fingerprint:$gap_fp,
       frozen_docs_hash:$frozen, decisions_lines:($dl|tonumber), decisions_prefix_hash:$dh,
       resolved_impl_fingerprint:"", recorded_at:$now, updated_at:$now}' > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
 }
@@ -1271,8 +1435,16 @@ doc_gap_approach_synced() { [ "$(_doc_gap_approach_hash)" != "$(doc_gap_field '.
 doc_gap_source_unchanged() { [ "$(snapshot_worktree_tree)" = "$(doc_gap_field '.source_tree')" ]; }
 # 체크포인트의 밑바탕이 실제 impl consensus PASS 인가: base_consensus_review 가 지금 consensus-impl.json(포맷·계약 버전·target·PASS)이 가리키는
 # 그 round 의 리뷰이고, 그 PASS 의 입력 지문(base_pass_fingerprint)이 체크포인트에 그대로이며, 리뷰 파일이 현재 계약의 실제 PASS 다.
+# 밑바탕이 합의 단계 사용자 수리(base_kind=USER_RESOLVED)면 PASS 대신 그 수리 체크포인트가 온전하고(계약 버전·리뷰 내용 해시·답 수), 기록된 리뷰·수리 지문이 그대로여야 한다.
+# base_kind 가 없는 옛 체크포인트는 PASS 밑바탕으로 본다.
 doc_gap_base_consensus_valid() {
   local ck="$WORK_DIR/consensus-impl.json"
+  if [ "$(doc_gap_field '.base_kind // "PASS"')" = USER_RESOLVED ]; then
+    user_escalation_intact impl || return 1
+    [ "$(user_escalation_field impl '.review')" = "$(doc_gap_field '.base_consensus_review')" ] || return 1
+    [ -n "$(doc_gap_field '.base_pass_fingerprint')" ] && [ "$(user_escalation_field impl '.resolved_input_fingerprint')" = "$(doc_gap_field '.base_pass_fingerprint')" ]
+    return
+  fi
   [ -f "$ck" ] || return 1
   jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" --argjson cv "$CONSENSUS_CHECKPOINT_VERSION" \
     '.version==$cv and .target=="impl" and .contract_version==$v and .next_step=="PASS"' "$ck" >/dev/null 2>&1 || return 1
@@ -1306,8 +1478,9 @@ doc_gap_resolved_current() {
   doc_gap_resolution_scope_ok || return 1
   [ "$(doc_gap_field '.resolved_impl_fingerprint')" = "$(consensus_pass_fingerprint impl)" ]
 }
-# 워커 이상으로 가도 되는 impl 문서 상태: 최초 validator PASS 가 현재 입력에 유효하거나, 그 PASS 위에 사용자가 gap 을 해결한 지문이 현재 입력과 같다.
-impl_docs_accepted() { consensus_pass_current impl || doc_gap_resolved_current; }
+# 워커 이상으로 가도 되는 impl 문서 상태: 최초 validator PASS 가 현재 입력에 유효하거나, impl 합의 에스컬레이션의 사용자 수리(USER_RESOLVED)가 현재 입력에 유효하거나,
+# 그 둘 중 하나 위에 사용자가 구현 후 gap 을 해결한 지문이 현재 입력과 같다.
+impl_docs_accepted() { consensus_stage_accepted impl || doc_gap_resolved_current; }
 # 사용자 보고문: gap 마다 id·질문·선택지·근거/코드 위치·영향 + 답을 적을 decisions.md 형식.
 doc_gap_report() {
   jq -r '.gaps[] | "  [\(.key)] \(.question)\n      선택지: \(.options | join(" | "))\n      근거·코드: \(.refs | join(", "))\n      영향: \(.impact)\n      답 형식: - [USER-QUESTION][scope=impl][\(.tag)] \(.question) → <선택한 option>"' "$DOC_GAP_RESUME"
