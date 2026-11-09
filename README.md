@@ -34,8 +34,10 @@ flowchart TD
     P4["최종 검증 (러너)\n승인 지문 → TEST_CMD/LINT_CMD → 지문 재확인"] -->|통과| DONE["DONE → 오케스트레이터 보고\n(커밋은 사용자 지시 시 수정자에게 위임)"]
     P4 -->|실패| P2R["워커 1회 수정 → 재리뷰\n(MAX_TEST_RETRIES 회)"] --> P3
     P2 -.UNDECIDED(DOC_GAP/USER_DECISION) → 사용자 결정 → 같은 unit 워커.-> ESC
-    P1 -.교착/라운드 초과.-> ESC["사용자 에스컬레이션"]
-    P15 -.-> ESC
+    P1 -.ASK_USER/교착/라운드 초과.-> ESC["사용자 에스컬레이션"]
+    P15 -.ASK_USER/교착/라운드 초과.-> ESC
+    ESC -.설계 blocker 전부에 사용자 답 → USER_RESOLVED, 설계 검증자 재호출 없음.-> P15
+    ESC -.구현 문서 blocker 전부에 사용자 답 → USER_RESOLVED, 구현 문서 검증자 재호출 없음.-> P2
     P3 -.-> ESC
     P4 -.재시도 소진.-> ESC
 ```
