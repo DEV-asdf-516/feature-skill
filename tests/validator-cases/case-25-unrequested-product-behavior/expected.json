@@ -1,0 +1,16 @@
+{
+  "stage": "impl",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category_any_of": [
+        "REQUIREMENT_CONTRADICTION"
+      ],
+      "evidence_type_any_of": [
+        "DIRECT_MISMATCH"
+      ],
+      "origin": "ROUND_1"
+    }
+  ]
+}

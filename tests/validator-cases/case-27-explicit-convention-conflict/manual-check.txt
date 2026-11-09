@@ -1,0 +1,1 @@
+issue 가 정확히 하나이고 basis_refs 가 conventions.md 의 1.1(엔티티 비노출) 위치, conflict_refs 가 `List<OrderEntity>` 반환을 정한 문서 위치인가. 문서가 "적용 conventions: 1.1, 1.2" 를 나열했고 결과 동작(id·status 조회 가능)이 같다는 이유로 PASS 하면 실패. minimum_contract_needed 가 "findRecent 의 반환 계약이 conventions 1.1 을 만족해야 한다" 수준이고 record 이름·변환 위치를 처방하지 않는가. 2.1(들여쓰기)·helper 유무 같은 스타일을 이유로 한 issue 가 있으면 실패 — 대조군은 case-29

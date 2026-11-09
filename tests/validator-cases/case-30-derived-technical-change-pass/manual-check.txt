@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. request 가 이름을 적지 않은 migration 컬럼·User.note·UserRepository.updateNote·UserView/UserMapper.toView 변경은 요구(비고 저장 + 상세 조회 노출)를 충족하는 데 필수적인 파생 기술 변경이다 — 이를 요구 외 제품 동작(REQUIREMENT_CONTRADICTION)으로 내거나, toView 의 호출부 확인을 이유로 새 의무를 만들면 v19 과잉 BLOCK 회귀(요구 외 동작 대조군은 case-25)

@@ -82,12 +82,13 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 | 0 | `DONE` | 승인 + 전체 테스트 통과 |
 | 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING`: 오케스트레이터가 문서를 쓸 차례 |
 | 2 | `NEED_USER` | `UNDECIDED`(워커 DOC_GAP/USER_DECISION) / `REVIEW_DOC_GAP`(리뷰어 DOC_GAP) / `DOC_GAP_SOURCE_CHANGED`: 구현 중 드러난 미결정 solution shape — 사용자 결정이 최종. 답을 `decisions.md` 에 `[USER-QUESTION][scope=impl][review-issue=<id>|worker-gap=<key>]` 태그로 기록하고 approach.md 에 동기화하면 검증자·디자이너·impl 재합의 없이 워커 → 리뷰로 이어진다(`doc-gap-resume.json`) |
-| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS` / `UNDECIDED` / `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
+| 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS`(design·impl 합의): 사용자 결정이 최종. 마지막 리뷰의 **모든 blocker** 에 `- [USER-QUESTION][scope=design\|impl][escalation=<blocker id>] <쟁점> → <답>` 을 `decisions.md` 에 추가하고 결정 내용을 그 단계 문서에 반영한 뒤 재실행하면 그 단계 검증자·디자이너 호출 0회로 다음 단계(design → impl, impl → worker)로 간다(`user-escalation-resume-<target>.json`, `USER_RESOLVED` — 검증자 PASS 아님). 답이 없거나 일부만 있으면 모델 0회로 다시 멈춘다 |
+| 2 | `NEED_USER` | `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
 | 1 | `ENV_ERROR` | CLI·환경 오류 |
 
 `DONE` 뒤 별도 명령 `--feature <id> --finalize`(사용자 승인 뒤에만, 아래 "사용")의 종료 코드는 0 `FINALIZED`(또는 already finalized) / 2 `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE`(사용자 확인) / 1 거부·오류(원본·worktree 불변) 다.
 
-재실행은 항상 같은 명령. 러너는 `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물과 교차 확인해 재개 지점을 고른다. 대조하는 산출물은 합의 PASS 파일, `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint` 다.
+재실행은 항상 같은 명령. 러너는 `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물과 교차 확인해 재개 지점을 고른다. 대조하는 산출물은 합의 PASS 파일(또는 합의 에스컬레이션의 유효한 사용자 수리 `user-escalation-resume-<target>.json`), `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint` 다.
 러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째와 같은 형태·같은 한도다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
 
 ### 구현 단위(implementation unit) 직렬 실행
@@ -107,7 +108,9 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **근거는 스키마와 러너가 강제한다**: blocker마다 증거 유형(`DIRECT_MISMATCH` 문서 대조 / `REACHABLE_FAILURE` 실행 경로 / `UNDECIDED_CHOICE` 순수 정책 미결정)에 맞는 필드가 있어야 하고 사용하지 않는 필드는 비어 있어야 한다. `consensus-loop.sh`가 조건부 필수·상호 배제·id 유일성을 검사하고 어긋나면 검증자 응답 오류로 중단한다.
 - **Round 2는 종결 검토다**: Round 1은 입장 조건을 만족하는 문제를 전부 낸다. Round 2부터는 직전 이슈의 해결 여부와 직전 수정이 만든 직접 회귀만 다룬다. 러너는 blocker의 `origin`(UNRESOLVED_PREVIOUS / REVISION_REGRESSION / NEWLY_EXPOSED_BY_REVISION)과 연계 필드(직전 이슈 id, 스냅샷 대비 실제 바뀐 문서)를 대조한다. "라운드당 N건" 같은 페이지네이션은 없다.
 - **ASK_USER 분리**: 문서 재작성으로 풀리지 않는 문제(허용 범위 밖 공용 컴포넌트 수정, 제품 정책 선택)는 디자이너를 거치지 않고 `user_question`·`options`를 그대로 사용자에게 전달한다.
+- **합의 에스컬레이션의 사용자 결정은 최종이다**: `ASK_USER`·`DEADLOCK`·`MAX_ROUNDS` 로 멈추면 합의 루프가 마지막 실제 리뷰(경로·내용 해시·blocker 사본)와 발생 시점 지문을 `user-escalation-resume-<target>.json`(`WAITING_USER`)에 남긴다. 사용자가 그 리뷰의 모든 blocker 에 `[USER-QUESTION][scope=<target>][escalation=<id>]` 답(선택·수용·기각 모두 같은 형식, 발생 뒤 추가한 줄만 인정, 빈 답·`<답>` 플레이스홀더·다른 scope·다른 id·그 blocker 와 다른 질문 문구 불가)을 달면(`ASK_USER` 는 선택을 그 단계 문서에도 반영해야 한다 — 문서가 발생 시점과 같으면 수리되지 않는다) 재실행은 `USER_RESOLVED` 로 수리하고 **같은 단계의 검증자·디자이너를 다시 부르지 않는다** — 검증자가 사용자 결정을 다시 심판하지 않는다. `USER_RESOLVED` 는 검증자 `PASS` 가 아니다: `consensus-<target>.json` 은 PASS 가 되지 않고 리뷰 JSON 의 BLOCK 도 그대로이며, 다음 단계의 게이트(design 수리 뒤 impl 합의, 코드 리뷰, verify)는 그대로 돈다. 우회는 좁다 — 대기 중 `request.md`·conventions·(impl) `design.md`·`feature-scope.json`·`implementation-units.json`·`decisions.md` 기존 줄이 바뀌었거나 계약 버전이 달라졌으면, 또는 수리 뒤 문서·결정을 또 바꿨으면 체크포인트는 `SUPERSEDED` 가 되고 Round 1 부터 재합의한다. impl 을 사용자 수리로 통과한 뒤 워커·리뷰어가 DOC_GAP 을 내면 기존 `doc-gap-resume.json` 경로가 그 수리를 밑바탕(`base_kind=USER_RESOLVED`)으로 이어받는다.
 - **디자이너는 처방을 복사하지 않는다**: blocking issue를 5단계(요구 근거, 이번 변경 관련, 도달 가능한 경로, 지금 결정 필요, 불변식만 요구)로 판정해 REJECT한다. ACCEPT해도 위반된 불변식만 문서에 반영한다.
+- **검증자는 문서를 믿지 않고 대조한다**: 문서의 사실 주장("X 는 변경 불필요", "기존 구현 없음")은 확인 대상이다. 검증자는 ① 적용되는 `conventions.md` 명시 규칙과의 직접 충돌(동작이 같아도 BLOCK) ② 요구·확정 결정·기존 필수 계약에 근거 없는 새 제품 동작 ③ 변경 대상 함수·쿼리·서비스의 직접 호출부·피호출부 ④ 새 responsibility boundary 의 탐색 근거를 독립적으로 확인한다. 탐색은 변경 대상과 직접 의존까지이고, 확정적인 계약 위반만 막는다 — 필수 파생 기술 변경·helper/지역 변수 같은 표현 차이·스타일 선호는 대상이 아니다. 같은 세 가지(요구 출처·컨벤션 대조·실제 코드 경로)를 오케스트레이터도 material decision 에 한해 문서 작성 전에 확인한다(SKILL.md Phase 0 4번).
 - **검증 계약 버전**: 검증자 프롬프트·스키마·러너 검사 중 하나라도 바꾸면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 다른 버전의 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
 - **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건을 모두 만족할 때만 등록된다. 이번 diff 가 만든 문제, 아홉 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 해결(`UNDECIDED_APPROACH` 는 동작이 맞아도 예외), 기존 결함·장래 개선이 아님, 정확한 위치다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 기준선 tree(`worker-baseline.tree`) 대비다. 이 tree 는 러너가 워커 진입 직전에 기록하므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않는다. 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
 - **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어 프롬프트·스키마·루프 검사가 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을 올린다.
@@ -119,7 +122,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
   `- [USER-QUESTION][scope=design|impl] <질문> → <답>` 형식으로 남아 검증자 이슈 판정(ACCEPT/REJECT)과 구분 추적된다.
   scope 는 질문이 발생한 합의 gate 다(Phase 0·design 루프 → `design`, impl 루프·워커 `USER_DECISION` → `impl`).
 - **사용자 결정의 의존성 범위**: design PASS 지문은 `scope=design` 결정만, impl PASS 지문은 `scope=design`+`scope=impl` 결정을 본다.
-  impl 합의 중 사용자가 검증자 요구를 기각해도 design PASS 는 그대로 재사용되고 impl 만 재검증된다. `request.md`/`design.md` 변경은 기존처럼 design 부터 다시 돈다.
+  impl 합의 중 사용자가 검증자 요구를 기각해도 design PASS 는 그대로 재사용되고, impl 도 그 에스컬레이션의 모든 blocker 에 `[escalation=<id>]` 답이 있으면 재검증 없이 워커로 간다(위 "합의 에스컬레이션의 사용자 결정은 최종이다"). 에스컬레이션과 무관하게 추가한 `scope=impl` 결정은 기존처럼 impl 만 재검증시킨다. 두 지문 모두 worktree `conventions.md` 내용을 포함하므로(없으면 고정 부재 표지) conventions 가 바뀌면 design·impl PASS 가 함께 무효화된다. `request.md`/`design.md` 변경은 기존처럼 design 부터 다시 돈다.
   scope 없는 옛 형식 줄은 러너가 LLM 호출 전에 `DECISION_SCOPE_REQUIRED` 로 멈추고 사람이 태그를 붙인다(자동 추정 없음). 지문 의미가 바뀌면 `CONSENSUS_CHECKPOINT_VERSION` 을 올린다.
 - **워커 하위 Agent·백그라운드 차단(SH 강제)**: `run_edit_role` 이 `role=WORKER` 호출에만 claude `--disallowedTools "Agent,ScheduleWakeup"` + child 전용 환경변수(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`), codex `exec`/`exec resume` 양쪽에 `-c 'agents.enabled=false'` 를 배열로 붙인다(`SendMessage` 는 막지 않음, 다른 역할·전역 codex 설정 불변, CLI 가 거부하면 그 호출은 실패 — 제한 없는 재실행 없음). claude 워커의 stream-json 은 `result` 이벤트가 정확히 하나일 때만 수용하고, 워커 세션 확정은 CLI rc 가 아니라 결과 검증(`worker_result_valid`) 뒤 `role_session_accept` 에서만 한다(무효 첫 턴의 대화는 잇지 않음). unit 미결정을 사용자가 해결하면 재개 프롬프트의 `[RESOLVED GAPS]` 에 ID·질문·답이 들어가고, 같은 ID·질문을 다시 내면 `RESOLVED_GAP_REPEATED` 로 멈춘다(자동 재시도 없음).
 - **커밋 통제**: 워커는 커밋·푸시 불가(claude 훅 + codex 훅 이중 차단). 커밋은 사용자가 요청했을 때만
@@ -201,6 +204,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    DESIGNER_EFFORT="<지원 effort>"
    VALIDATOR_MODEL="<검증자 모델>"
    VALIDATOR_EFFORT="<지원 effort>"       # 게이트 모드 기본 medium — 검증자는 구현을 막을 최소 사유만 판정
+   VALIDATOR_PROFILE="guided"             # 판정 전략 오버레이. 빈 값이면 VALIDATOR_MODEL 의 정확한 ID 로 기본값(매핑에 없는 모델은 conservative)
    WORKER_MODEL="<워커 모델>"
    WORKER_EFFORT="<지원 effort>"
    REVIEWER_MODEL="<리뷰어 모델>"
@@ -278,6 +282,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
 | `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 `new_file_roots` 소유권 판정의 시점 기준선(변경 소유권 증거가 아니며 원복 근거로 쓰지 않는다) |
 | `decisions.md` | 이슈별 ACCEPT/REJECT 사유 + `[USER-QUESTION][scope=design|impl]` 기록 |
+| `user-escalation-resume-<target>.json` | design/impl 합의 에스컬레이션의 사용자 수리 체크포인트: 사유·마지막 리뷰(경로+해시)·blocker 사본·발생 시점 지문·답 줄·수리 지문, `WAITING_USER` → `USER_RESOLVED`(검증자 PASS 아님) / `SUPERSEDED` |
 | `reviews/` | 라운드별 판정 JSON (`validator-design-*`, `validator-impl-*`, `impl-attempt-*/reviewer-*`) |
 | `state.json` / `usage.jsonl` / `live.log` | 단계 상태 / invocation 별 usage telemetry / 실시간 로그 |
 | `cli-anomalies.jsonl` / `worker-outcome.guard.json` / `designer-scope.guard.json` | CLI 종료코드 불일치 복구 기록(append-only: role·cli·label·raw_exit_code·recovery=STRUCTURED_RESULT\|FORWARD_TO_VALIDATOR\|FORWARD_TO_REVIEWER·evidence; `usage.jsonl` 의 raw exit_code/success 는 그대로) / 결과 없는 불확실 워커 변경의 fail-closed 가드(호출 전 tree) / 디자이너의 문서 밖 source 변경 가드(호출 전 tree). codex read-only 결과는 invocation 전용 임시 `-o`(`<out>.invocation-<id>.tmp`)에만 쓰이고 usable 할 때만 `<out>` 으로 옮겨진다 |
@@ -334,6 +339,7 @@ bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 �
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음
 bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음
 bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지문·stage 회귀·DECISION_SCOPE_REQUIRED. LLM 호출 없음
+bash tests/smoke-user-escalation-resume.sh # 합의 에스컬레이션(ASK_USER/DEADLOCK/MAX_ROUNDS) 사용자 결정 뒤 검증자·디자이너 0회로 다음 단계, 미답·잘못된 답·stale provenance 차단, DOC_GAP 체인. LLM 호출 없음
 bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 워커 DONE/DOC_GAP 종료 코드·impl PASS provenance 전제·usage summary. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
@@ -356,7 +362,8 @@ bash tests/worker-regression.sh      # 워커 material-contract 충실도. 사�
 - **`[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요.`**: 설치 2번을 안 한 것. `TEST_CMD`/`LINT_CMD`를 채운다.
 - **`[FAIL] codex 실행 실패 (모델 '...' 확인)`**: codex 계정에서 해당 모델 ID가 유효한지 확인 (`codex -m` 후보 목록).
 - **`[FAIL] 모델 '...' 의 CLI 를 이름으로 정하지 못함`**: 모델 ID 가 `claude*`/`gpt-*`/`o*`/`codex*` 어디에도 맞지 않는다. `config.sh` 에 `<ROLE>_CLI=claude|codex` 를 지정한다.
-- **루프가 exit 2로 멈춤**: 설계된 에스컬레이션이다. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON을 보고 사람이 결정한 뒤 재개한다.
+- **루프가 exit 2로 멈춤**: 설계된 에스컬레이션이다. `state.json`의 `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS_EXCEEDED`와 마지막 리뷰 JSON(`state.json.review`)을 보고 사람이 결정한다. 그 리뷰의 blocker 마다 `- [USER-QUESTION][scope=<target>][escalation=<id>] <쟁점> → <답>` 을 `decisions.md` 에 추가하고(문서 반영 포함) 재실행하면 검증자를 다시 부르지 않고 exit 0(`state.json.status=USER_RESOLVED`)이다. 답이 빠진 blocker 가 있으면 모델 호출 없이 다시 exit 2 다.
+- **사용자가 답했는데 검증 라운드가 다시 돎**: 에스컬레이션 우회 전제가 깨진 것이다(로그의 `전제가 깨짐: …`). 대기 중 `request.md`·conventions·상위 문서·범위 파일·`decisions.md` 기존 줄을 바꿨거나 수리 뒤 문서를 또 고쳤다. 정상 동작이며 `user-escalation-resume-<target>.json` 은 `SUPERSEDED` 로 남는다.
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 blocker`**: 검증자가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어긴 것. 재실행하면 되고 반복되면 `tests/validator-regression.sh`로 프롬프트 회귀를 본다.
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).
 - **`NEED_USER(DECISION_SCOPE_REQUIRED)`**: `decisions.md`에 scope 없는 `- [USER-QUESTION] …` 줄이 있다. detail 의 행번호를 보고 `[USER-QUESTION][scope=design]` 또는 `[USER-QUESTION][scope=impl]` 로 고친 뒤 재실행(LLM 은 호출되지 않았다).

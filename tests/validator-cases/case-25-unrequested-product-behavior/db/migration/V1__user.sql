@@ -1,0 +1,4 @@
+CREATE TABLE user (
+  id BIGINT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL
+);

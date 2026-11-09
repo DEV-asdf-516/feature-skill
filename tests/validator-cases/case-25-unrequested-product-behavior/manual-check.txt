@@ -1,0 +1,1 @@
+issue 가 정확히 하나이고 USER_NOTE 변경 이력 추가(approach 결정 4·implementation 4번의 history.save)를 가리키는가. basis_refs 가 request/design 의 범위 위치, conflict_refs 가 그 동작을 추가한 문서 위치인가. minimum_contract_needed 가 "이 동작은 요구 근거를 갖거나 문서에서 빠져야 한다" 수준이고 이력 설계를 처방하지 않는가. migration·User.note·UserRepository.updateNote·UserView/UserMapper 변경(필수 파생 기술 변경)을 요구 외 동작으로 낸 issue 가 있으면 실패 — 대조군은 case-30

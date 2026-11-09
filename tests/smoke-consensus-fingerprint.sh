@@ -11,6 +11,9 @@
 #   C. 일반 decision audit line([round N] … REJECT)은 어느 PASS 지문도 바꾸지 않는다
 #   D. stage=worker 에서 scope=impl 결정 추가 후 러너 재실행 → design 으로 내려가지 않고 impl 로만 내려간다 (design 검증자 호출 0회, impl 검증자 1회)
 #   E. design.md 변경은 impl 결정 여부와 무관하게 design PASS 를 깬다
+#   G. worktree conventions.md 내용은 design·impl 합의 입력이다 — 생성·변경·삭제하면 이전 PASS 를 재사용하지 않는다(upstream 지문도 함께).
+#      conventions 가 없는 프로젝트의 지문은 결정론적이고, conventions 가 있어도 합의 이력 줄은 PASS 를 깨지 않으며 scope 분리 규칙은 그대로다.
+#      러너 재실행은 design 부터 다시 검증하고, 재검증 검증자 프롬프트에는 바뀐 conventions 본문이 들어간다.
 #   F. scope 없는 옛 형식 [USER-QUESTION] 이 있으면 LLM 호출 0회로 DECISION_SCOPE_REQUIRED (러너·합의 루프 단독 모두)
 # =============================================================
 set -u
@@ -63,6 +66,9 @@ if [ "$readonly_sb" = 1 ]; then
   if printf '%s' "$prompt" | grep -q '설계 검증자'; then echo "validator design" >> "$MOCK_LOG"
   elif printf '%s' "$prompt" | grep -q '구현 문서 검증자'; then echo "validator impl" >> "$MOCK_LOG"
   else echo "readonly unknown" >> "$MOCK_LOG"; fi
+  # 검증자 프롬프트에 렌더링된 conventions 본문 표지(사례 G) — 재검증이 바뀐 conventions 로 도는지 본다
+  conv_tag="$(printf '%s' "$prompt" | grep -o 'CONV-RULE-V[0-9]*' | sort -u | paste -sd, -)"
+  [ -z "$conv_tag" ] || echo "conventions-in-prompt $conv_tag" >> "$MOCK_LOG"
   printf '{"schema_version":%s,"verdict":"PASS","blocking_issues":[]}\n' "$MOCK_VALIDATOR_CONTRACT" > "$out"
   exit 0
 fi
@@ -92,7 +98,7 @@ llm_calls() { grep -c . "$MOCK_LOG" || true; }
 fake_pass design; fake_pass impl
 [ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "전제: design/impl PASS 체크포인트가 유효하지 않음"
 jq -e --argjson cv "$CHECKPOINT_VERSION" '.version==$cv' .agent-work/consensus-design.json >/dev/null || fail "전제: 체크포인트 포맷 버전이 $CHECKPOINT_VERSION 이 아님"
-[ "$CHECKPOINT_VERSION" -ge 3 ] || fail "전제: 지문 의미가 바뀌었으므로 CONSENSUS_CHECKPOINT_VERSION 은 3 이상이어야 함 (현재 $CHECKPOINT_VERSION)"
+[ "$CHECKPOINT_VERSION" -ge 4 ] || fail "전제: 지문 의미가 바뀌었으므로(conventions 포함) CONSENSUS_CHECKPOINT_VERSION 은 4 이상이어야 함 (현재 $CHECKPOINT_VERSION)"
 
 # ===== 사례 A: impl 결정은 design PASS 를 깨지 않는다 =====
 design_fp_before="$(pass_fp design)"; design_up_before="$(upstream_fp design)"
@@ -143,6 +149,54 @@ echo "changed" >> .agent-work/design.md
 cp "$TMP/design.keep" .agent-work/design.md
 [ "$(current design)" = true ] || fail "E: design.md 를 되돌렸는데 design PASS 가 복구되지 않음"
 pass "E: design.md 변경 → design(과 impl) PASS 무효, 되돌리면 복구"
+
+# ===== 사례 G: conventions.md 내용은 합의 입력 — 변경 시 design·impl PASS 무효 =====
+fake_pass impl
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G: 전제 — design/impl PASS 가 유효하지 않음"
+[ ! -e conventions.md ] || fail "G: 전제 — 임시 저장소에 conventions.md 가 이미 있음"
+d_none="$(pass_fp design)"; i_none="$(pass_fp impl)"; du_none="$(upstream_fp design)"; iu_none="$(upstream_fp impl)"
+[ "$(pass_fp design)" = "$d_none" ] && [ "$(pass_fp impl)" = "$i_none" ] || fail "G: conventions 없는 프로젝트의 PASS 지문이 호출마다 다름"
+# G-1. 생성: 없던 conventions 가 생기면 둘 다 무효 (upstream 지문도 — 저장된 BLOCK 리뷰 역시 옛 규칙에 대한 것)
+printf '# conventions\n- CONV-RULE-V1 Service 는 엔티티를 반환하지 않는다\n' > conventions.md
+[ "$(current design)" = false ] && [ "$(current impl)" = false ] || fail "G-1: conventions.md 가 생겼는데 이전 PASS 가 재사용됨 (design=$(current design) impl=$(current impl))"
+[ "$(upstream_fp design)" != "$du_none" ] && [ "$(upstream_fp impl)" != "$iu_none" ] || fail "G-1: conventions 생성이 upstream 지문을 바꾸지 않음"
+: > "$MOCK_LOG"; fake_pass design; fake_pass impl
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G-1: conventions 반영 재합의 뒤 PASS 가 유효하지 않음"
+[ "$(grep -c '^conventions-in-prompt CONV-RULE-V1$' "$MOCK_LOG")" -eq 2 ] || fail "G-1: design·impl 검증자 프롬프트에 conventions 본문이 없음: $(paste -sd'|' "$MOCK_LOG")"
+d_v1="$(pass_fp design)"; i_v1="$(pass_fp impl)"
+# G-2. conventions 가 있어도 합의 이력 줄은 PASS 를 깨지 않는다 (불필요한 재검증 없음)
+printf '%s\n' '- [round 2] CONV-01 ACCEPT: 반환 타입 수정' '- [fix round 1] R-07 REJECT: diff 밖' >> .agent-work/decisions.md
+[ "$(pass_fp design)" = "$d_v1" ] && [ "$(pass_fp impl)" = "$i_v1" ] || fail "G-2: 합의 이력 줄이 PASS 지문을 바꿈 (conventions 있음)"
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G-2: 합의 이력 줄이 PASS 를 무효화함 (conventions 있음)"
+# G-3. 내용 변경: 둘 다 무효. 되돌리면 복구(지문은 내용만 본다 — mtime 아님)
+cp conventions.md "$TMP/conventions.v1"
+printf -- '- CONV-RULE-V2 Repository 는 Service 에서만 호출한다\n' >> conventions.md
+[ "$(current design)" = false ] && [ "$(current impl)" = false ] || fail "G-3: conventions.md 내용이 바뀌었는데 이전 PASS 가 재사용됨 (design=$(current design) impl=$(current impl))"
+cp "$TMP/conventions.v1" conventions.md
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G-3: conventions.md 를 되돌렸는데 PASS 가 복구되지 않음"
+# G-4. 러너: stage=worker 에서 conventions 변경 후 재실행 → design 부터 다시 검증, 프롬프트에는 새 conventions
+printf -- '- CONV-RULE-V2 Repository 는 Service 에서만 호출한다\n' >> conventions.md
+printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
+rc="$(run_runner)"
+grep -q 'design 합의 PASS 가 현재 입력에 대해 유효하지 않음 — design 부터' "$TMP/run.log" || { tail -20 "$TMP/run.log"; fail "G-4: conventions 변경 뒤 러너가 design 으로 내려가지 않음"; }
+[ "$(grep -c '^validator design' "$MOCK_LOG")" -eq 1 ] && [ "$(grep -c '^validator impl' "$MOCK_LOG")" -eq 1 ] || fail "G-4: design·impl 검증자 호출이 각 1회가 아님: $(paste -sd'|' "$MOCK_LOG")"
+[ "$(grep -c '^conventions-in-prompt CONV-RULE-V1,CONV-RULE-V2$' "$MOCK_LOG")" -eq 2 ] || fail "G-4: 재검증 프롬프트에 바뀐 conventions 본문이 없음: $(paste -sd'|' "$MOCK_LOG")"
+grep -q 'claude-called' "$MOCK_LOG" && fail "G-4: 디자이너/리뷰어가 호출됨 (PASS 픽스처인데)"
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G-4: 재합의 뒤 PASS 가 현재 conventions 에 대해 유효하지 않음"
+# G-5. scope 분리 규칙은 conventions 가 있어도 그대로: scope=impl 결정은 impl 만 깬다
+echo '- [USER-QUESTION][scope=impl] conventions 예외 요청 → 기각' >> .agent-work/decisions.md
+[ "$(current design)" = true ] || fail "G-5: conventions 가 있을 때 scope=impl 결정이 design PASS 를 무효화함"
+[ "$(current impl)" = false ] || fail "G-5: conventions 가 있을 때 scope=impl 결정인데 impl PASS 가 유효함"
+# G-6. 삭제: 다시 conventions 없는 프로젝트 → 무효, design 지문은 처음의 '없음' 지문과 같다(부재 표지가 고정)
+mv conventions.md "$TMP/conventions.removed"
+[ "$(current design)" = false ] && [ "$(current impl)" = false ] || fail "G-6: conventions.md 가 사라졌는데 이전 PASS 가 재사용됨"
+[ "$(pass_fp design)" = "$d_none" ] || fail "G-6: conventions 없는 상태의 design PASS 지문이 처음과 다름 (부재 표지가 결정론적이지 않음)"
+: > conventions.md
+[ "$(pass_fp design)" != "$d_none" ] || fail "G-6: 빈 conventions.md 와 파일 부재가 같은 지문임"
+mv conventions.md "$TMP/conventions.empty"
+fake_pass design; fake_pass impl
+[ "$(current design)" = true ] && [ "$(current impl)" = true ] || fail "G-6: conventions 없는 상태로 재합의한 PASS 가 유효하지 않음"
+pass "G: conventions.md 생성·변경·삭제 → design·impl PASS 무효(되돌리면 복구), 이력 줄은 무관, scope 분리 유지, 러너는 design 부터 새 conventions 로 재검증"
 
 # ===== 사례 F: scope 없는 옛 형식 → LLM 호출 0회, DECISION_SCOPE_REQUIRED =====
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
