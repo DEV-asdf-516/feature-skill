@@ -1,0 +1,1 @@
+issue 가 정확히 하나이고 `OrderService.findAllSummary → OrderQuery.selectOrders` 직접 호출(src/OrderService.java L11-L13)을 code_refs 또는 conflict_refs 근거로 드는가 — 문서의 "요약은 별도 조회라 영향 없음" 서술을 그대로 믿고 PASS 하면 실패. minimum_contract_needed 가 "요약 조회가 보관 주문을 계속 포함해야 한다는 계약이 selectOrders 변경과 함께 지켜져야 한다" 수준이고 쿼리 분리·파라미터 추가 같은 기법을 처방하지 않는가

@@ -140,6 +140,9 @@ for case_dir in "$CASES_DIR"/case-*/; do
   fi
   rm -f "$cfg.bak"
   [ -d "$case_dir/src" ] && cp -R "$case_dir/src" "$target/src"
+  if [ -d "$case_dir/db" ]; then cp -R "$case_dir/db" "$target/db"; fi
+  # 사례에 conventions.md 가 있으면 임시 저장소 루트에 둔다 — 검증자 프롬프트의 [PROJECT CONVENTIONS] 블록으로 렌더링된다(없는 사례는 블록 없음)
+  if [ -f "$case_dir/conventions.md" ]; then cp "$case_dir/conventions.md" "$target/conventions.md"; fi
   touch "$target/.agent-work/decisions.md"
   (cd "$target" && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture)
 

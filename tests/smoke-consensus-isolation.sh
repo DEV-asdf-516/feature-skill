@@ -14,7 +14,8 @@
 #      - [USER-QUESTION] 사용자 결정은 매 라운드 검증자에게 전달된다 — decisions.md 원본이 아니라 scope 로 추린 확정 결정 파일로, 합의 이력 줄 없이
 #      - 디자이너는 blocker 의 구조화된 주장·증거를 받고 검증자 자유 서술(why_blocks_now)은 받지 않는다
 #   B. 같은 내용의 blocker 2라운드 연속 → DEADLOCK (exit 2)
-#   C. ASK_USER → exit 2, 디자이너 0회. 재실행(Round 1 재시작)도 검증자는 옛 세션을 --resume 하지 않는다
+#   C. ASK_USER → exit 2, 디자이너 0회. 사용자 결정([escalation=<id>] 답) 뒤 재실행은 검증자를 다시 부르지 않는다(USER_RESOLVED, 검증자 PASS 아님)
+#      — 전체 사례는 tests/smoke-user-escalation-resume.sh
 #   D. MAX_SPEC_ROUNDS=1 에서 수렴 실패 → MAX_ROUNDS_EXCEEDED (exit 2)
 # =============================================================
 set -u
@@ -168,19 +169,33 @@ rc="$(run_loop)"
 [ "$(grep -c '^designer ' "$MOCK_LOG")" -eq 1 ] || fail "B: DEADLOCK 인데 디자이너가 다시 호출됨"
 pass "B: 같은 내용 blocker 2라운드 연속 → DEADLOCK"
 
-# ===== 사례 C: ASK_USER + Round 1 재시작 =====
+# ===== 사례 C: ASK_USER + 사용자 결정 수리(검증자 재호출 없음) =====
 reset_case 2
 verdict 1 BLOCK "$(issue ROUND_1 "" "" ASK_USER)"
 rc="$(run_loop)"
 [ "$rc" -eq 2 ] && [ "$(status)" = ASK_USER ] || { tail -30 "$TMP/loop.log"; fail "C: exit 2/ASK_USER 기대, 실제 $rc/$(status)"; }
 grep -q '^designer ' "$MOCK_LOG" && fail "C: ASK_USER 인데 디자이너가 호출됨"
+jq -e '.next_step=="WAITING_USER" and .reason=="ASK_USER" and .issues[0].id=="B-01"' .agent-work/user-escalation-resume-design.json >/dev/null || fail "C: 사용자 에스컬레이션 체크포인트(WAITING_USER)가 없음"
+verdict 2 PASS   # 호출되면 안 된다 — 호출되면 아래 횟수 검사가 잡는다
+# blocker id 태그가 없는 답은 어느 blocker 의 답인지 확인할 수 없다 → 수리되지 않고 모델 호출 0회로 다시 멈춘다
 echo '- [USER-QUESTION][scope=design] 어느 정책? → a' >> .agent-work/decisions.md
-verdict 2 PASS
 rc="$(run_loop)"
-[ "$rc" -eq 0 ] && [ "$(status)" = PASS ] || { tail -30 "$TMP/loop.log"; fail "C: 사용자 답 뒤 재실행이 PASS 로 끝나지 않음 ($rc/$(status))"; }
-[ "$(session_flags validator)" = "--session-id --session-id" ] && [ "$(session_ids validator | sort -u | grep -c .)" -eq 2 ] \
-  || fail "C: Round 1 재시작이 옛 검증자 세션을 이어감: $(grep '^validator ' "$MOCK_LOG" | paste -sd'|' -)"
-pass "C: ASK_USER → exit 2·디자이너 0회, 재실행 Round 1 도 fresh 검증자"
+[ "$rc" -eq 2 ] && [ "$(status)" = ASK_USER ] && [ "$(grep -c '^validator ' "$MOCK_LOG")" -eq 1 ] || { tail -30 "$TMP/loop.log"; fail "C: 태그 없는 답으로 수리됐거나 검증자가 다시 호출됨 ($rc/$(status)): $(paste -sd'|' "$MOCK_LOG")"; }
+# 사용자 결정이 최종이다: 모든 blocker 에 [escalation=<id>] 답이 있으면 검증자·디자이너를 다시 부르지 않고 exit 0(USER_RESOLVED — 검증자 PASS 아님)
+echo '- [USER-QUESTION][scope=design][escalation=B-01] 어느 정책? → a' >> .agent-work/decisions.md
+# ASK_USER 의 선택은 design.md 에도 반영돼야 한다 — 문서가 그대로면 수리되지 않는다(모델 0회)
+rc="$(run_loop)"
+[ "$rc" -eq 2 ] && [ "$(status)" = ASK_USER ] && [ "$(grep -c '^validator ' "$MOCK_LOG")" -eq 1 ] || fail "C: 문서 반영 없이 수리됐거나 검증자가 호출됨 ($rc/$(status))"
+echo '정책 a (사용자 결정 B-01)' >> .agent-work/design.md
+rc="$(run_loop)"
+[ "$rc" -eq 0 ] && [ "$(status)" = USER_RESOLVED ] || { tail -30 "$TMP/loop.log"; fail "C: 사용자 답 뒤 재실행이 USER_RESOLVED exit 0 이 아님 ($rc/$(status))"; }
+[ "$(grep -c '^validator ' "$MOCK_LOG")" -eq 1 ] || fail "C: 사용자 결정 뒤 검증자가 다시 호출됨: $(grep '^validator ' "$MOCK_LOG" | paste -sd'|' -)"
+grep -q '^designer ' "$MOCK_LOG" && fail "C: 사용자 결정 뒤 디자이너가 호출됨"
+[ "$(jq -r .next_step .agent-work/consensus-design.json)" != PASS ] || fail "C: consensus-design.json 이 PASS 로 위조됨"
+jq -e '.verdict=="BLOCK"' .agent-work/reviews/validator-design-round-01.json >/dev/null || fail "C: 리뷰 JSON 의 BLOCK 이 덮어써짐"
+rc="$(run_loop)"
+[ "$rc" -eq 0 ] && [ "$(status)" = USER_RESOLVED ] && [ "$(grep -c '^validator ' "$MOCK_LOG")" -eq 1 ] || fail "C: 수리 뒤 동일 입력 재실행에서 검증자가 호출됨 ($rc/$(status))"
+pass "C: ASK_USER → exit 2·디자이너 0회, 태그 없는 답은 대기, 사용자 결정 수리 뒤 검증자 재호출 0회(USER_RESOLVED)"
 
 # ===== 사례 D: MAX_ROUNDS =====
 reset_case 1

@@ -5,8 +5,11 @@
 # 사용법: consensus-loop.sh [design|impl]  (저장소 루트에서 실행)
 #   design: $WORK_DIR/design.md 합의 (오케스트레이터가 초안을 먼저 작성)
 #   impl  : $WORK_DIR/implementation.md(무엇) + approach.md(어떻게) 합의 (design 합의 후 실행)
-# 종료 코드: 0=PASS 수렴, 2=라운드 초과/교착/ASK_USER/DESIGNER_SCOPE_VIOLATION(디자이너가 문서 밖 source 를 변경 — fail-closed), 1=환경 오류
+# 종료 코드: 0=PASS 수렴 또는 USER_RESOLVED(사용자가 에스컬레이션의 모든 blocker 를 결정 — 검증자 PASS 아님, state.json.status 로 구분),
+#            2=라운드 초과/교착/ASK_USER(사용자 결정 대기 포함)/DESIGNER_SCOPE_VIOLATION(디자이너가 문서 밖 source 를 변경 — fail-closed), 1=환경 오류
 # 리뷰는 MAX_SPEC_ROUNDS+1 회 — 마지막 수정도 반드시 재검증한다.
+# 사용자 에스컬레이션(ASK_USER/DEADLOCK/MAX_ROUNDS_EXCEEDED): user-escalation-resume-<target>.json 에 마지막 리뷰·blocker·지문을 남기고 멈춘다.
+#   사용자가 모든 blocker 에 `- [USER-QUESTION][scope=<target>][escalation=<id>] … → <답>` 을 추가하면 재실행은 검증자·디자이너 0회로 exit 0 이다.
 # 재개: $WORK_DIR/consensus-<target>.json 에 round/next_step(VALIDATOR_PENDING|DESIGNER_PENDING|PASS)·
 #   리뷰·스냅샷 경로·입력 지문을 남긴다. 디자이너 호출이 실패하면 재실행 시 검증자를 다시 부르지 않고
 #   같은 리뷰 JSON 으로 디자이너만 재시도한다. PASS 도 지문과 함께 캐시한다.
@@ -122,10 +125,65 @@ save_consensus_checkpoint() { # round next_step review snapshot
       input_fingerprint:$input, updated_at:$now}' \
     > "$RESUME_STATE.tmp" && mv "$RESUME_STATE.tmp" "$RESUME_STATE"
 }
-# 사용자 판단으로 넘어가는 종료(ASK_USER/DEADLOCK/MAX_ROUNDS)는 사용자가 문서를 고친 뒤 재실행하므로
-# 라운드 중간이 아니라 Round 1 부터 다시 시작해야 한다 — 체크포인트를 초기 상태로 되돌린다(파일 삭제 대신 덮어쓰기).
+# 사용자 판단으로 넘어가는 종료(ASK_USER/DEADLOCK/MAX_ROUNDS)는 라운드 중간에서 이어가지 않는다 — 체크포인트를 초기 상태로 되돌린다(파일 삭제 대신 덮어쓰기).
+# 이 초기 상태는 "합의를 다시 돌린다면 Round 1 부터" 라는 뜻일 뿐 재검증 예약이 아니다: 재개는 아래 사용자 에스컬레이션 체크포인트가 먼저 판정한다.
 reset_consensus_checkpoint() { save_consensus_checkpoint 1 "VALIDATOR_PENDING" "" ""; }
 restart_from_round_1() { round=1; next_step="VALIDATOR_PENDING"; prev_review=""; prev_snapshot=""; }
+# 사용자 에스컬레이션 종료: 마지막 실제 리뷰·blocker·발생 시점 지문을 user-escalation-resume-<target>.json(WAITING_USER)에 **먼저** 남기고, 그 뒤에 합의 체크포인트를 초기화한다.
+# (DEADLOCK/MAX_ROUNDS 는 리뷰 경로가 체크포인트에만 있었으므로 순서가 바뀌면 근거가 사라진다.) 기록 뒤 초기화 전에 죽어도 재실행은 WAITING_USER 를 먼저 본다.
+escalate_to_user() { # reason review
+  local ids; ids="$(jq -r '[.blocking_issues[].id] | join(",")' "$2")"
+  user_escalation_record "$TARGET" "$1" "$2" "$round" || { echo "[FAIL] 사용자 에스컬레이션 체크포인트 기록 실패: $(user_escalation_file "$TARGET")" >&2; exit 1; }
+  jq -n --arg t "$TARGET" --arg s "$1" --arg i "$ids" --arg r "$2" '{phase:$t, status:$s, issues:$i, review:$r}' > "$WORK_DIR/state.json"
+  reset_consensus_checkpoint
+  echo "[STOP] 사용자 결정 필요($1) — 아래 blocker **전부**에 답이 있어야 재개된다(일부만 답하면 모델 호출 0회로 다시 멈춘다). 사용자 결정이 최종이며 $TARGET 검증자·디자이너를 다시 부르지 않는다. 결정 내용은 $TARGET 문서에 반영한다:" >&2
+  user_escalation_report "$TARGET" >&2
+  exit 2
+}
+
+# ---------- 사용자 에스컬레이션 재개 판정 (모델 호출 전) ----------
+# WAITING_USER: 전제가 그대로면 답을 기계적으로 확인한다 — 모든 blocker 에 답이 있으면 USER_RESOLVED 로 수리하고 exit 0(검증자·디자이너 0회), 아니면 exit 2(모델 0회).
+# USER_RESOLVED: 수리 지문이 현재 입력과 같으면 그대로 exit 0. 전제가 깨졌거나(상위 문서·범위·conventions·계약 버전·decisions 기존 줄·리뷰 변조)
+# 수리 뒤 입력이 또 바뀌었으면 SUPERSEDED 로 남기고 종전 규칙대로 Round 1 부터 재합의한다.
+case "$(user_escalation_step "$TARGET")" in
+  USER_RESOLVED)
+    if user_escalation_resolved_current "$TARGET"; then
+      echo "=== [$TARGET] 사용자 수리(USER_RESOLVED, $(user_escalation_field "$TARGET" '.reason')) 재사용 — 입력 변경 없음, 검증자·디자이너 호출 없음 (검증자 PASS 아님) ==="
+      jq -n --arg t "$TARGET" --arg r "$(user_escalation_field "$TARGET" '.reason')" --arg i "$(user_escalation_field "$TARGET" '[.issues[].id] | join(",")')" --arg rv "$(user_escalation_field "$TARGET" '.review')" \
+        '{phase:$t, status:"USER_RESOLVED", escalation:$r, issues:$i, review:$rv}' > "$WORK_DIR/state.json"
+      exit 0
+    fi
+    echo "[$(date '+%F %T')] 사용자 수리(USER_RESOLVED)가 현재 입력·계약에 대해 유효하지 않음(수리 뒤 문서·결정·범위·conventions·계약이 바뀜) — 이전 사용자 결정으로 우회하지 않고 Round 1 부터 재합의"
+    user_escalation_supersede "$TARGET" "수리 뒤 입력 또는 계약 변경" || { echo "[FAIL] 사용자 에스컬레이션 체크포인트 갱신 실패" >&2; exit 1; };;
+  WAITING_USER)
+    esc_violation="$(user_escalation_premise_violation "$TARGET")"
+    if [ -n "$esc_violation" ]; then
+      echo "[$(date '+%F %T')] 사용자 에스컬레이션($(user_escalation_field "$TARGET" '.reason'))의 전제가 깨짐: $esc_violation — 사용자 결정 우회 대상이 아니므로 Round 1 부터 재합의"
+      user_escalation_supersede "$TARGET" "$esc_violation" || { echo "[FAIL] 사용자 에스컬레이션 체크포인트 갱신 실패" >&2; exit 1; }
+    else
+      esc_reason="$(user_escalation_field "$TARGET" '.reason')"
+      esc_unanswered="$(user_escalation_unanswered "$TARGET" | paste -sd, -)"
+      if [ -n "$esc_unanswered" ]; then
+        echo "[STOP] 사용자 결정 대기 중($esc_reason) — 답 없는 blocker: $esc_unanswered. 모델 호출 없음. 답은 발생 뒤 decisions.md 에 추가한 줄만 인정한다(빈 답·'<답>' 같은 플레이스홀더·다른 scope·다른 id·질문 문구 불일치 불가):" >&2
+        user_escalation_report "$TARGET" >&2
+        jq -n --arg t "$TARGET" --arg s "$esc_reason" --arg i "$(user_escalation_field "$TARGET" '[.issues[].id] | join(",")')" --arg r "$(user_escalation_field "$TARGET" '.review')" --arg u "$esc_unanswered" \
+          '{phase:$t, status:$s, issues:$i, review:$r, unanswered:$u}' > "$WORK_DIR/state.json"
+        exit 2
+      fi
+      if ! user_escalation_docs_synced "$TARGET"; then
+        echo "[STOP] 사용자 결정 대기 중($esc_reason) — 모든 blocker 에 답은 있지만 $TARGET 단계 문서가 발생 시점과 같다. ASK_USER 의 선택을 문서에 반영한 뒤 재실행(러너·디자이너가 대신 쓰지 않는다). 모델 호출 없음." >&2
+        jq -n --arg t "$TARGET" --arg s "$esc_reason" --arg i "$(user_escalation_field "$TARGET" '[.issues[].id] | join(",")')" --arg r "$(user_escalation_field "$TARGET" '.review')" \
+          '{phase:$t, status:$s, issues:$i, review:$r, unanswered:"", docs_unsynced:true}' > "$WORK_DIR/state.json"
+        exit 2
+      fi
+      user_escalation_accept "$TARGET" || { echo "[FAIL] 사용자 에스컬레이션 수리 기록 실패: $(user_escalation_file "$TARGET")" >&2; exit 1; }
+      echo "=== [$TARGET] 사용자 결정 수리(USER_RESOLVED, $esc_reason): blocker $(user_escalation_field "$TARGET" '[.issues[].id] | join(",")') 전부에 사용자 답 — 검증자·디자이너를 다시 부르지 않고 다음 단계로 (검증자 PASS 아님) ==="
+      user_escalation_field "$TARGET" '.answers[].line' | sed 's/^/  /'
+      jq -n --arg t "$TARGET" --arg r "$esc_reason" --arg i "$(user_escalation_field "$TARGET" '[.issues[].id] | join(",")')" --arg rv "$(user_escalation_field "$TARGET" '.review')" \
+        '{phase:$t, status:"USER_RESOLVED", escalation:$r, issues:$i, review:$rv}' > "$WORK_DIR/state.json"
+      exit 0
+    fi;;
+esac
 
 round=1
 next_step="VALIDATOR_PENDING"
@@ -275,19 +333,16 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # ASK_USER: 문서 재작성으로 풀리지 않는 문제(범위 밖 공용 컴포넌트 수정·제품 정책 선택)는 디자이너를 거치지 않고 즉시 사용자에게
   ask_ids=$(jq -r '[.blocking_issues[] | select(.action=="ASK_USER") | .id] | join(",")' "$review")
   if [ -n "$ask_ids" ]; then
-    echo "[STOP] 검증자가 사용자 결정을 요구함($ask_ids). user_question / options 를 사용자에게 그대로 전달. 답은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록." >&2
-    jq -n --arg t "$TARGET" --arg i "$ask_ids" --arg r "$review" '{phase:$t, status:"ASK_USER", issues:$i, review:$r}' > "$WORK_DIR/state.json"
-    reset_consensus_checkpoint
-    exit 2
+    # 같은 리뷰에 REVISE_DOC blocker 가 섞여 있어도 묵시적으로 승인하지 않는다 — 에스컬레이션은 리뷰의 모든 blocker 를 들고 가고 각각 사용자 답이 필요하다.
+    echo "[STOP] 검증자가 사용자 결정을 요구함($ask_ids). user_question / options 를 사용자에게 그대로 전달." >&2
+    escalate_to_user ASK_USER "$review"
   fi
 
   # 교착 감지: 이슈 '내용'까지 동일한 집합이 2라운드 연속이면 사람에게 에스컬레이션
   # (같은 id라도 reachable_scenario/minimum_contract_needed 가 달라지면 진전 중으로 본다)
   if [ -n "$ids" ] && [ "$fingerprint" = "$prev_fingerprint" ]; then
-    echo "[STOP] 동일 이슈($ids)가 내용 변화 없이 2라운드 연속 반복됨. 사용자 판단 필요 — 답은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록." >&2
-    jq -n --arg t "$TARGET" --arg i "$ids" '{phase:$t, status:"DEADLOCK", issues:$i}' > "$WORK_DIR/state.json"
-    reset_consensus_checkpoint
-    exit 2
+    echo "[STOP] 동일 이슈($ids)가 내용 변화 없이 2라운드 연속 반복됨. 사용자 판단 필요(검증자 요구의 수용/기각)." >&2
+    escalate_to_user DEADLOCK "$review"
   fi
   prev_fingerprint="$fingerprint"
   prev_review="$review"
@@ -350,7 +405,5 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   fi # DESIGNER_PENDING
 done
 
-echo "[STOP] $MAX_SPEC_ROUNDS 라운드 내 수렴 실패. 쟁점을 사용자에게 보고하고 중단 — 사용자 결정은 decisions.md 에 '- [USER-QUESTION][scope=$TARGET] <질문> → <답>' 으로 기록(검증자 요구를 기각한 경우도 같은 형식, 체크포인트·리뷰 JSON 수동 편집 없음)." >&2
-jq -n --arg t "$TARGET" '{phase:$t, status:"MAX_ROUNDS_EXCEEDED"}' > "$WORK_DIR/state.json"
-reset_consensus_checkpoint
-exit 2
+echo "[STOP] $MAX_SPEC_ROUNDS 라운드 내 수렴 실패. 마지막 리뷰($prev_review)의 쟁점을 사용자에게 보고하고 중단(검증자 요구를 기각한 경우도 같은 답 형식, 체크포인트·리뷰 JSON 수동 편집 없음)." >&2
+escalate_to_user MAX_ROUNDS_EXCEEDED "$prev_review"
