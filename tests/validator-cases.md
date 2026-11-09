@@ -1,12 +1,12 @@
 # 검증자 판정 감도 회귀
 
-고정된 `input/*.md`와 `src/`를 임시 저장소의 `.agent-work/`와 `src/`로 복사해 실제 validator를 실행한다. fixture 원본은 Git으로 관리하고 `.agent-work/`는 실행 산출물로만 쓴다. 모델 응답에 기대값이나 판정 힌트를 주지 않는다.
+고정된 `input/*.md`와 `src/`를 임시 저장소의 `.agent-work/`와 `src/`로 복사해 실제 validator를 실행한다. 사례에 `conventions.md`(저장소 루트로 복사 → 검증자 프롬프트의 `[PROJECT CONVENTIONS]` 블록)나 `db/` 가 있으면 함께 복사한다 — 없는 사례는 conventions 없는 프로젝트로 돈다. fixture 원본은 Git으로 관리하고 `.agent-work/`는 실행 산출물로만 쓴다. 모델 응답에 기대값이나 판정 힌트를 주지 않는다.
 
 ```bash
 python3 tests/validator-fixture-smoke.py              # 유료 호출 없는 fixture/비교 검사
 # 사용자 지시 후에만 1회용 승인 파일 생성:
 touch .claude/ALLOW_REAL_LLM_REGRESSION
-bash tests/validator-regression.sh                   # 29개, 최대 실제 검증자 29회
+bash tests/validator-regression.sh                   # 35개, 최대 실제 검증자 35회
 bash tests/validator-regression.sh case-08b-round2-new-issue # 08a 먼저 + 08b, 최대 2회
 bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 ```
@@ -46,6 +46,12 @@ bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 | 23b rejected-blocker-round2 | 직전 리뷰에 그 blocker(B-01)가 있고 디자이너는 "DB 제약으로 커버" 라며 **REJECT**, 문서는 그대로. fresh 종결 검증자는 REJECT 사실·사유를 입력으로 받지 않는다 | impl Round 2 **BLOCK** / REVISE_DOC 1건 / origin UNRESOLVED_PREVIOUS — PASS 하면(REJECT 로 blocker 가 소멸하면) 회귀 |
 | 24a reachable-failure-round1 | 24b 의 Round 1 대조군. 05b 와 같은 input/src — 키 포함 URL 을 공용 get 이 기록 | design Round 1 BLOCK / REVISE_DOC / SECURITY / REACHABLE_FAILURE |
 | 24b reachable-failure-resolved-round2 | 직전 리뷰의 REACHABLE_FAILURE(B-01, reachable_scenario·impact 포함)를 design 수정(요청 기록에서 쿼리 문자열 제외)이 실제로 해결. src 는 아직 옛 동작 | design Round 2 **PASS** — 이전 주장(scenario/impact)만으로 UNRESOLVED_PREVIOUS 를 내면 회귀 |
+| 25 unrequested-product-behavior | 사용자 비고 저장 요구. implementation·approach 가 "주문 비고가 이력을 남기므로" 라는 이유로 request·design 어디에도 없는 `USER_NOTE` 변경 이력 기록(`ChangeHistoryRepository.save`)을 REQUIRED 로 추가. migration·repository·view 변경은 필수 파생 | impl BLOCK / REVISE_DOC / REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH **정확히 1건** — 파생 기술 변경을 함께 문제 삼으면 실패 |
+| 26 missed-direct-caller | 목록(`findAll`)만 보관 주문 제외, 요약(`findAllSummary`)은 그대로라는 요구. 문서는 `OrderQuery.selectOrders` SQL 에 필터를 넣고 "요약은 별도 조회라 영향 없음·변경 불필요" 라고 적었지만 `findAllSummary → selectOrders` 직접 호출이 있다 | impl BLOCK / REVISE_DOC / REQUIREMENT_CONTRADICTION·REQUIREMENT_MISSING·IMPLEMENTATION_IMPOSSIBLE 중 하나 / DIRECT_MISMATCH 또는 REACHABLE_FAILURE — 문서 서술을 믿고 PASS 하면 회귀 |
+| 27 explicit-convention-conflict | `conventions.md` 1.1 이 Service public 메서드의 엔티티 노출을 금지(기존 엔티티 반환은 legacy 라 근거 아님). 문서는 "적용 conventions: 1.1, 1.2" 를 나열하고도 기존 `get` 관례를 따라 `List<OrderEntity>` 반환을 REQUIRED 로 정함. 호출자가 얻는 값은 같다 | impl BLOCK / REVISE_DOC / REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH **정확히 1건** |
+| 28 competing-structure-false-evidence | NEW `PhoneFormatter.digitsOnly` 에 탐색 근거 세 가지가 형식상 있지만 "숫자만 남기는 구현이 없다" 는 주장이 변경 대상 `ClientService` 가 직접 쓰는 `PhoneNormalizer.normalize` 와 어긋남(인용 줄 범위가 그 호출을 빼고 잡힘) | impl BLOCK / REVISE_DOC / REUSE_DISCOVERY_GAP / DIRECT_MISMATCH **정확히 1건** — 재사용을 처방하면 manual-check 실패 |
+| 29 equivalent-expression-pass | 27 과 같은 request·design·src·conventions. 문서는 1.1 을 실제로 지키고(응답 record), conventions 절 번호를 나열하지 않으며, 변환의 helper 분리·지역 변수·for/stream 은 DELEGATED | impl PASS (절 번호 미기재·helper/local 미명세·legacy 코드·스타일 규칙을 이유로 BLOCK 이면 v19 과잉 BLOCK 회귀) |
+| 30 derived-technical-change-pass | 25 와 같은 request·design·src. 문서에 이력 기록이 없고 request 가 이름을 적지 않은 migration 컬럼·`Client.memo`·`ClientRepository.updateMemo`·`ClientView`/`ClientMapper.toView` 변경만 있음 | impl PASS (필수 파생 기술 변경을 요구 외 동작으로 내면 v19 과잉 BLOCK 회귀) |
 
 SECURITY는 표를 위한 축약이며 실제 JSON은 `CHANGE_INTRODUCES_SECURITY_RISK`다.
 
@@ -67,6 +73,14 @@ v16 부터 종결 검증자는 fresh 세션이고 입력은 `prev-blockers-*.jso
 - **24b — evidence seed 는 anchoring 이 아니다.** 직전 주장의 실행 경로·영향은 재확인의 출발점이다. design 이 그 경로를 끊도록 바뀌었으면(코드는 아직 구현 전) 제외해야 한다.
 
 a 쪽은 08a 와 같은 역할의 Round 1 대조군이다(실패하면 b 의 유료 호출 생략). 23 쌍은 "같은 blocker 가 다시 성립하는가" 를 보는 사례라 category 는 06 보다 넓게 허용한다(REQUIREMENT_MISSING 포함 — v16 실모델에서 관측). category 분류 감도는 06 이 본다.
+
+## 25~30: 문서 주장의 교차 검증(v19)
+
+v19 는 검증자가 오케스트레이터 문서의 사실 주장을 그대로 받아들여 잘못된 material 계약을 PASS 시키던 문제를 다룬다. 새 category·단계는 없고 기존 category 로 낸다. 네 BLOCK 사례는 검사 하나씩(요구 외 제품 동작 25 · 직접 호출 경로 26 · 명시적 convention 충돌 27 · 재사용 탐색 근거의 사실 불일치 28)을, 두 PASS 사례는 그 검사가 번지면 안 되는 쪽을 본다. 25↔30, 27↔29 는 request·design·src(·conventions)가 바이트 단위로 같고 구현 문서만 다른 대조군이다(`validator-fixture-smoke.py` 가 동일성을 검사) — BLOCK 쪽만 통과하고 PASS 쪽이 BLOCK 이면 정책이 불필요한 BLOCK 을 늘린 것이다. 기존 PASS 사례(01·03·04·09·10·12·14·15·17~20)도 같은 방향의 회귀 감시다: v19 뒤 이들이 호출부 발굴·conventions 미기재·파생 변경을 이유로 BLOCK 이 되면 프롬프트의 교차 검증 절 범위를 먼저 본다.
+
+합의 캐시 쪽(conventions 변경 → 이전 PASS 무효, conventions 없는 프로젝트·scope 분리·합의 이력 줄은 기존 동작 유지)은 모델 호출이 필요 없으므로 `tests/smoke-consensus-fingerprint.sh` 사례 G 가 mock 으로 본다.
+
+**v19 실모델 회귀는 아직 실행하지 않았다**(35개 전부 미실행 — 유료, 사용자 승인 필요).
 
 ## 채점
 
@@ -90,6 +104,7 @@ a 쪽은 08a 와 같은 역할의 Round 1 대조군이다(실패하면 b 의 유
 - 17: 테스트 내부(helper·local·assertion 방식·프레임워크)를 이유로 한 issue 가 없는가.
 - 09·18·19·20: blocking_issues 가 비어 있는가. 정규식 vs 스캔 / 건별 add vs 사전 합산 / helper·local 이름·intermediate / overload 를 이유로 한 issue 는 전부 local expression 회귀다.
 - 21·22: impact 가 I/O 횟수(DB 호출 1 vs n / 외부 SMS 호출 횟수·실패 semantics)를 적는가. minimum_contract_needed 가 어느 쪽을 고를지·횟수를 처방하지 않는가.
+- 25: issue 가 이력 기록 하나만 가리키는가(파생 변경 제외). 26: 근거에 `findAllSummary → selectOrders` 호출 위치가 있는가. 27: basis_refs 가 conventions 1.1 인가. 28: 재사용을 처방하지 않는가. 29·30: blocking_issues 가 비어 있는가.
 - 08b가 BLOCK이면 docs diff와 revision_ref의 실제 인과를 확인한다.
 - 문서/코드 인용 범위의 존재는 로컬 fixture 검사로 확인한다. 단편 Java 코드는 모델 입력이며 완성된 애플리케이션 빌드 테스트가 아니다.
 - guided는 새 05b 실행 전에 탐색 전략을 바꾸지 않는다. 결과가 실패하면 공통 계약의 직접 의존 확인 범위와 충돌하는지 검토한다.
@@ -123,6 +138,6 @@ VALIDATOR_CONTRACT_VERSION 13 실모델 회귀에서 8개 사례가 깨졌다. �
 
 프롬프트 변경(v14) 요약: ① 관할에 "문서가 소유한 구현 포인트" 정의와 발명 금지 ② CODE_SPEC_GAP 여섯 입장 조건(확정 구현 대상 / solution 소유 / trivia 아님 / production diff 구조·명명·API 를 유의미하게 바꿈 / convention·reference·precedent 가 정하지 않음 / 워커가 임의 선택해야 함) ③ "두 워커 다른 diff" 는 ④ 의 보조 판정 ④ 선형 흐름 = helper 없음, signature 의 modifier 는 세부 ⑤ 테스트 코드의 경계 ⑥ category 우선순위·중복 금지(REQUIREMENT_MISSING → 접근법 누락 → REUSE_DISCOVERY_GAP → CODE_SPEC_GAP, 하위가 성립하면 상위 추가 금지). guided 오버레이 4단계 동기화. case-13(BLOCK)·case-14(PASS) 의 기대는 그대로다.
 
-v14 실모델 회귀는 실행되지 않은 채 v15 로 넘어갔다. 사용자 승인 뒤 `touch .claude/ALLOW_REAL_LLM_REGRESSION && bash tests/validator-regression.sh` 로 29개를 돌린다.
+v14 실모델 회귀는 실행되지 않은 채 v15 로 넘어갔다. 사용자 승인 뒤 `touch .claude/ALLOW_REAL_LLM_REGRESSION && bash tests/validator-regression.sh` 로 35개(v19 기준)를 돌린다.
 
 v16(판정 격리: fresh 검증자, prev-blockers 요약, decisions.md 를 뺀 diff, REJECT 재제기 금지 폐기)은 Round 2 사례(08a/b·23a/b·24a/b)만 실모델로 통과를 확인했다(2026-10-06). v17(검증자 입력에서 decisions.md 원본 제거)도 같은 여섯 사례를 실모델로 통과했고(2026-10-06, Gate 6/6·Classification 6/6), 23b 의 Round 2 결과 JSON·이벤트 로그에 디자이너 REJECT 사유가 나타나지 않음을 확인했다. Round 1 위주의 나머지 23개는 v16·v17 모두 미실행이다.

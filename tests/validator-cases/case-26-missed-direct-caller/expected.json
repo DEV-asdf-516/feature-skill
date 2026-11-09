@@ -1,0 +1,19 @@
+{
+  "stage": "impl",
+  "verdict": "BLOCK",
+  "issues": [
+    {
+      "action": "REVISE_DOC",
+      "category_any_of": [
+        "REQUIREMENT_CONTRADICTION",
+        "REQUIREMENT_MISSING",
+        "IMPLEMENTATION_IMPOSSIBLE"
+      ],
+      "evidence_type_any_of": [
+        "DIRECT_MISMATCH",
+        "REACHABLE_FAILURE"
+      ],
+      "origin": "ROUND_1"
+    }
+  ]
+}
