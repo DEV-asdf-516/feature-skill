@@ -37,6 +37,7 @@ mkdir -p src && for u in 01 02; do echo "base $u" > "src/u$u.txt"; done
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 mkdir -p .agent-work/reviews
 for doc in request design implementation approach; do printf '# %s\n' "$doc" > ".agent-work/$doc.md"; done
+printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' >> .agent-work/implementation.md   # unit references(implementation.md#NN)가 가리키는 절 — 러너가 그 절 본문으로 unit 별 계약 변경을 판정한다
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt","src/u02.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 cat > .agent-work/implementation-units.json <<EOF
@@ -323,7 +324,7 @@ rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "H-3: 전제 실패"; answer_review_
 printf '\n새 요구\n' >> .agent-work/implementation.md
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SCOPE_EXCEEDED ] && [ ! -s "$MOCK_LOG" ] && [ "$(gap .next_step)" = WAITING_USER ] || { tail -5 "$TMP/run.log"; fail "H-3: implementation.md 변경이 사용자 해결 경로로 수리됨 ($rc/$(reason))"; }
-printf '# implementation\n' > .agent-work/implementation.md
+printf '# implementation\n\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' > .agent-work/implementation.md   # 픽스처 원문 그대로 되돌린다
 rc="$(run_runner)"; [ "$rc" -eq 0 ] && [ "$(calls validator)" -eq 0 ] || fail "H-3: 되돌린 뒤 재개 실패 ($rc)"
 # H-4 수리 뒤(WORKER_PENDING) 답 줄 삭제 → provenance 깨짐, 모델 0회
 reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"

@@ -3,7 +3,7 @@
 # feature 파이프라인 러너 — 교통정리기 (agent 가 아니다)
 # 파일 경로: .claude/skills/feature/scripts/feature-run.sh
 # 사용법 (저장소 루트에서):
-#   feature-run.sh [--feature <id>] [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>]
+#   feature-run.sh [--feature <id>] [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>] [--new-review-attempt]
 #   feature-run.sh --feature <id> --finalize
 #     --feature : 피처 전용 worktree 를 id 로 결정론적으로 확정(권장, scripts/feature-worktree.sh)
 #     --finalize: DONE 된 피처 worktree 의 결과(B→F delta)를 원본 working tree 에 커밋 없이 3-way 반영하고 worktree·브랜치를 정리.
@@ -11,6 +11,8 @@
 #     --worktree: 피처 전용 git worktree 에서 실행(권장). 없으면 --branch 로 생성. 다른 세션의 미커밋 변경과 물리적으로 분리.
 #     --new     : 이전 피처 산출물을 archive/ 로 mv 하고 처음부터 시작
 #     --branch  : 워커 진입 전 해당 브랜치가 없으면 생성·체크아웃
+#     --new-review-attempt : REVIEW_OUTPUT_INVALID(리뷰어 출력 계약 위반)로 멈춘 리뷰 단계에 한정한 **명시적 새 리뷰 시도**. 무효 기록을 닫고 새 attempt Round 1(새 세션)로
+#                 리뷰한다. 피처 전체를 다시 시작하는 --new 가 아니며, 대기 중인 무효 출력이 없으면 아무 효과가 없다. 이 실행의 첫 리뷰 루프 호출에만 적용된다.
 #   인자 없이 다시 실행하면 run-state.json 의 stage 에서 재개한다. 합의·리뷰 루프는 자체 체크포인트
 #   (consensus-<target>.json, review-impl.json)로 round/substep 까지 이어가며, stage 결정은 consensus_stage_accepted(검증자 PASS 또는
 #   합의 에스컬레이션의 유효한 사용자 수리 USER_RESOLVED)로 교차 확인한다.
@@ -30,10 +32,18 @@
 #            unit 사이에 이어지는 것은 worktree 의 코드 + 합의 문서 + 같은 Worker 세션의 대화 문맥 + implementation-context.json(앞 unit 이
 #            확정한 사실의 압축 색인 — 세션 기억은 source of truth 가 아니고 이 색인·문서가 체크포인트다). unit 별 리뷰·수정자·설계는 없다.
 #            Unit N 이 끝나기 전에는 N+1 을 시작하지 않는다 — 다음 unit 시작 권한은 러너만 갖는다.
-#            병렬·DAG·우선순위·worker pool 없음. 재실행은 첫 미완료 unit 부터(유효한 결과 + after-tree 일치면 워커 재호출 없이 테스트부터).
+#            병렬·DAG·우선순위·worker pool 없음. 재실행은 첫 미완료 unit 부터(유효한 결과 + after-tree 일치 + **워커가 받은 계약 == 현재 계약**이면 워커 재호출 없이 테스트부터).
+#            unit 유효 계약(config.sh "unit 유효 계약 스냅샷"): unit 마다 references 가 가리키는 문서 절 본문·그 unit 의 사용자 결정·unit JSON(local)과
+#            request/conventions/묶이지 않은 결정(global)을 최초 워커 호출 직전에 스냅샷한다. 네 지점이 같은 지문을 본다 — ① 완료 체크포인트 건너뛰기 전
+#            ② 과거 worker-result 로 테스트부터 재개하기 전 ③ done.json 확정 전 ④ review/verify/DONE 진입 전. local 이 바뀐 unit 만 stale 이 되어
+#            [UNIT TURN]/[CHANGED CONTRACT](실제 diff)를 받은 워커 턴 + targeted test 뒤에만 새 done.json 이 생긴다. 다른 unit 의 독립 절 변경은 영향이 없다.
+#            전역 입력만 바뀌었거나(영향 unit 을 코드가 정하지 않는다), 스냅샷 없는 과거 산출물이거나, references 를 해석할 수 없으면 모델 0회로
+#            UNIT_CONTRACT_IMPACT_REQUIRED — 사용자가 unit-contract-impact.json(version 2, 러너가 내준 target_fingerprint 포함)으로 영향 unit 을 확정한다(추가 LLM 분석 없음).
 #            모든 unit 완료 후 unit 결과를 worker-result.json 으로 합쳐 기존 전체 review 로.
 #   review : impl-review-loop.sh (리뷰어 게이트 → FIX_CODE 만 수정자 → 종결 검토)
 #            DOC_GAP → 사용자(REVIEW_DOC_GAP, doc-gap-resume.json), DEADLOCK/MAX_ROUNDS → 사용자
+#            리뷰어 출력 계약 위반 → 사용자(REVIEW_OUTPUT_INVALID, reviews/invalid-review.json) — 일반 재실행은 리뷰어 0회로 같은 진단(검사기를 고쳤으면 저장된 출력을
+#            로컬 재검증), 새 리뷰는 --new-review-attempt 로만. CLI 결과 불확실(결과 JSON 없음 — ENV_ERROR, codex resume marker 유지)과 다른 상태다.
 #   doc-gap: 구현 후 DOC_GAP 재개 경로(doc-gap-resume.json 이 pending 인 동안 impl 지문 추론보다 우선). impl consensus 는 최초 워커 진입 전
 #            사전 게이트일 뿐이고, 워커·리뷰어가 구현 중 발견한 DOC_GAP/USER_DECISION 은 사용자 결정이 최종이다 — 검증자·디자이너 재호출 없음.
 #            WAITING_USER(답 전 — 모델 0회) → 답·approach 동기화·source tree 불변 확인 → WORKER_PENDING(unit 이면 그 unit 부터 worker stage,
@@ -45,9 +55,9 @@
 # 종료 코드 / run-state.json status:
 #   0 DONE        완료
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED(워커 DOC_GAP/USER_DECISION) | REVIEW_DOC_GAP | DOC_GAP_SOURCE_CHANGED | DOC_GAP_SCOPE_EXCEEDED |
-#                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION |
+#                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | REVIEW_OUTPUT_INVALID |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
-#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
+#                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | UNIT_CONTRACT_IMPACT_REQUIRED | UNIT_CONTRACT_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
 #                 RESOLVED_GAP_REPEATED(이미 사용자가 결정한 unit 미결정을 워커가 같은 질문으로 재반환 — 자동 재시도 없음) |
 #                 WORKER_SESSION_MISMATCH(세션 전제 불일치 — 자동 resume·자동 fresh 금지) | WORKER_SESSION_MISSING(이전 fresh-워커 실행의 묵시적 마이그레이션 금지))
 #   3 NEED_DOCS   오케스트레이터가 문서를 써야 함 (reason: DESIGN_MISSING | IMPL_DOCS_MISSING | SCOPE_MISSING)
@@ -66,7 +76,7 @@ source "$SKILL_DIR/config.sh"
 ROOT="$(git rev-parse --show-toplevel)"
 
 # ---------- 인자 ----------
-NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0
+NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0; NEW_REVIEW_ATTEMPT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1;;
@@ -75,6 +85,7 @@ while [ $# -gt 0 ]; do
     --worktree) WORKTREE="$2"; shift;;
     --feature) FEATURE_ID="$2"; shift;;
     --finalize) FINALIZE=1;;
+    --new-review-attempt) NEW_REVIEW_ATTEMPT=1;;
     *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
   esac
   shift
@@ -260,6 +271,110 @@ on_unexpected_exit() { # rc
 trap 'rc=$?; case $rc in 0|2|3) ;; *) on_unexpected_exit "$rc";; esac; release_runner_lock' EXIT
 [ -z "$FEATURE_ID" ] || log "피처 worktree: $ROOT (feature $FEATURE_ID, branch $BRANCH, $FEATURE_WORKTREE_MODE${FEATURE_SNAPSHOT_TREE:+, snapshot tree $FEATURE_SNAPSHOT_TREE}) — 문서·산출물은 $ROOT/$WORK_DIR"
 
+# ---------- unit 유효 계약: 영향 확정 게이트 (모델 호출 0회) ----------
+# 진행 흔적이 있는 unit(done.json / 워커 호출 흔적) 가운데 코드가 영향 여부를 정할 수 없는 것을 모은다:
+#   NO_BASELINE      스냅샷 없는 과거 산출물 — '현재 문서가 첫 시도 당시와 같다'를 증명할 수 없다(최초 실행으로 오판 금지)
+#   IMPACT_REQUIRED  완료된 unit 인데 전역 입력(request.md·conventions.md·묶이지 않은 사용자 결정·references 에 절이 없는 design.md)만 바뀜
+# 사용자가 $UNIT_CONTRACT_IMPACT_FILE 로 unit 마다 affected / unaffected 를 확정해야 진행한다. 조용히 '영향 없음'으로 넘어가지 않고 LLM 에게 묻지도 않는다.
+#   unaffected : 기준 계약의 전역 부분을 현재로 옮긴다(스냅샷 없던 unit 은 현재 문서를 기준으로 확정). 완료 체크포인트는 그 결정 기록과 함께 유지된다.
+#   affected   : 그 unit 을 stale 로 만든다 — 워커가 변경 계약을 받아 기존 구현을 대조·수정하고 targeted test 뒤에만 새 done.json 이 생긴다.
+# mode check: 확정 파일이 없거나 대상과 맞지 않으면 멈춘다(합의 단계 전의 조기 확인 — 파일 적용은 문서가 확정된 worker 진입 때).  mode apply: 검증 → 적용 → 파일 소비(.used.<ts>).
+# 확정은 '그때 본 계약'에 대한 것이다: 러너가 확정 대상의 지문(target_fingerprint = 대상 unit 마다 id·상태·local 계약 지문·전역 계약 지문)을
+#   $UNIT_CONTRACT_IMPACT_REQUEST 와 중단 사유에 내주고, 확정 파일은 그 값을 그대로 적어야 한다(version 2). check·apply 모두 직전에 다시 계산해 대조한다 —
+#   사용자가 판단한 뒤 계약 문서가 한 번 더 바뀌었으면(합의 단계의 디자이너 수정 포함) 대상 집합이 같아도 같은 확정을 적용하지 않고 모델 0회로 다시 확정을 요구한다.
+#   지문 없는 옛 형식(version 1)은 무엇을 보고 확정했는지 증명할 수 없으므로 적용하지 않는다.
+UNIT_CONTRACT_IMPACT_REQUEST="$WORK_DIR/unit-contract-impact.request.json"
+apply_unit_contract_impact() { # unit-id affected|unaffected
+  local id="$1" dec="$2" ud="$WORK_DIR/units/$1" dir meta compose
+  dir="$(unit_contract_dir "$id")"; meta="$dir/contract.json"
+  unit_contract_current "$id" || env_error "unit $id: 계약 렌더링 실패 — $UC_WHY"
+  if [ "$dec" = unaffected ]; then
+    if [ -f "$meta" ]; then
+      compose="$WORK_DIR/.unit-contract/$id.rebase"
+      mkdir -p "$compose" && cp "$dir/baseline/contract.txt" "$compose/contract.txt" && cp "$UC_DIR/global.txt" "$compose/global.txt" || env_error "unit $id: 기준 계약 전역 부분 갱신 준비 실패"
+      unit_contract_write_baseline "$id" user-confirmed-unaffected "$compose" || env_error "unit $id: 기준 계약 기록 실패"
+    else
+      unit_contract_write_baseline "$id" user-confirmed-unaffected "$UC_DIR" || env_error "unit $id: 기준 계약 기록 실패"
+      # 사용자가 '현재 문서 == 첫 시도 당시 문서'로 확정했다 — 이미 있는 워커 결과가 받은 계약도 현재 계약으로 본다(테스트-only 재개 판정용)
+      if [ -f "$ud/worker-result.json" ] && [ ! -f "$ud/worker-contract.json" ]; then
+        jq -n --arg id "$id" --arg l "$UC_LOCAL" --arg g "$UC_GLOBAL" --arg fp "$(unit_contract_fingerprint_of "$UC_LOCAL" "$UC_GLOBAL")" --arg now "$(date '+%FT%T%z')" \
+          '{unit_id:$id, kind:"USER_CONFIRMED_BASELINE", local_fingerprint:$l, global_fingerprint:$g, fingerprint:$fp, previous_fingerprint:$fp, recorded_at:$now}' \
+          > "$ud/worker-contract.json.tmp" && mv "$ud/worker-contract.json.tmp" "$ud/worker-contract.json" || env_error "unit $id: worker-contract.json 기록 실패"
+      fi
+    fi
+    if [ -f "$ud/done.json" ]; then
+      jq --argjson v "$UNIT_DONE_VERSION" --arg fp "$(jq -r '.fingerprint' "$meta")" --arg tfp "$(jq -r '.target_fingerprint' "$UNIT_CONTRACT_IMPACT_FILE")" --arg now "$(date '+%FT%T%z')" \
+        '.contract_determinations=((.contract_determinations // []) + [{decision:"unaffected", by:"unit-contract-impact.json", target_fingerprint:$tfp, from_version:.version, at:$now}])
+         | .version=$v | .unit_contract_fingerprint=$fp' "$ud/done.json" > "$ud/done.json.tmp" && mv "$ud/done.json.tmp" "$ud/done.json" || env_error "unit $id: done.json 갱신 실패"
+    fi
+  elif [ -f "$meta" ]; then
+    jq --arg g "$UC_GLOBAL" --arg now "$(date '+%FT%T%z')" '.impact_confirmed_global=$g | .impact_confirmed_at=$now' "$meta" > "$meta.tmp" && mv "$meta.tmp" "$meta" || env_error "unit $id: contract.json 갱신 실패"
+  else
+    unit_contract_write_baseline "$id" user-confirmed-affected "" || env_error "unit $id: 기준 계약 기록 실패"
+  fi
+}
+units_contract_preflight() { # check | apply
+  local mode="$1" id ud st need="" why="" unresolved="" dir bad ts targets="" target_fp
+  [ -f "$UNITS_MANIFEST_LOCK" ] || return 0
+  for id in $(unit_ids); do
+    ud="$WORK_DIR/units/$id"
+    { [ -f "$ud/done.json" ] || [ -f "$ud/worker-before.tree" ] || [ -f "$ud/worker-result.json" ]; } || continue
+    st="$(unit_contract_status "$id")"
+    case "$st" in
+      UNRESOLVED) unit_contract_current "$id" || true; unresolved="$unresolved[$id] $UC_WHY ; ";;
+      NO_BASELINE)
+        unit_contract_current "$id" || env_error "unit $id: 계약 렌더링 실패 — $UC_WHY"
+        targets="$targets$id"$'\t'"$st"$'\t'"$UC_LOCAL"$'\t'"$UC_GLOBAL"$'\n'
+        need="$need$id "; why="$why[$id] 계약 스냅샷 없음(이 기능 이전의 산출물 — 현재 문서가 첫 시도 당시와 같은지 증명할 수 없다) ; ";;
+      IMPACT_REQUIRED)
+        # 전역 입력만 바뀐 완료 unit. 구현 후 gap 의 사용자 해결은 전역 계약을 바꾸지 않으므로(unit_contract_drift_covered ②) 그 예외는 여기 해당하지 않는다.
+        if [ -f "$ud/done.json" ]; then
+          dir="$(unit_contract_dir "$id")"
+          unit_contract_current "$id" || env_error "unit $id: 계약 렌더링 실패 — $UC_WHY"
+          { diff -u -L "previous/global.txt" -L "current/global.txt" "$dir/baseline/global.txt" "$UC_DIR/global.txt" || true; } > "$ud/global-impact.diff"
+          targets="$targets$id"$'\t'"$st"$'\t'"$UC_LOCAL"$'\t'"$UC_GLOBAL"$'\n'
+          need="$need$id "; why="$why[$id] 완료된 unit 인데 전역 입력이 바뀜(diff: $ud/global-impact.diff) ; "
+        fi;;
+    esac
+  done
+  if [ -n "$unresolved" ] && [ "$mode" = apply ]; then
+    stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "이미 진행된 unit 의 references 를 현재 문서에서 해석할 수 없다 — '영향 없음'으로 넘어가지 않는다(모델 호출 0회). ${unresolved}가리키던 절이 삭제·개명됐거나 같은 heading 이 둘 이상이다. 문서의 heading 을 복구하거나 implementation-units.json 의 references 를 정확한 절(design.md#… 포함)로 고친 뒤 재실행(범위·분할이 바뀌면 impl 재합의)"
+  fi
+  [ -n "$need" ] || return 0
+  need="${need% }"
+  # 확정 대상 지문: 대상 unit 의 (id, 상태, local 계약 지문, 전역 계약 지문). 사용자가 본 계약과 적용 시점의 계약이 같은지 이 값 하나로 대조한다.
+  target_fp="$(printf '%s' "$targets" | sha256_stdin)"
+  printf '%s' "$targets" | jq -Rn --arg fp "$target_fp" --arg now "$(date '+%FT%T%z')" \
+    '{version:2, target_fingerprint:$fp, units:[inputs | select(length>0) | split("\t") | {id:.[0], status:.[1], local_fingerprint:.[2], global_fingerprint:.[3]}], generated_at:$now}' \
+    > "$UNIT_CONTRACT_IMPACT_REQUEST.tmp" && mv "$UNIT_CONTRACT_IMPACT_REQUEST.tmp" "$UNIT_CONTRACT_IMPACT_REQUEST" || env_error "unit-contract-impact.request.json 기록 실패"
+  if [ ! -f "$UNIT_CONTRACT_IMPACT_FILE" ]; then
+    stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "unit 계약의 영향 여부를 코드가 정할 수 없다(모델 호출 0회, 자동 재실행·자동 원복 없음): ${why}영향 unit 을 명시적으로 확정하라 — $UNIT_CONTRACT_IMPACT_FILE 에 {\"version\":2,\"target_fingerprint\":\"$target_fp\",\"affected_units\":[…],\"unaffected_units\":[…]} 를 쓰고 재실행. target_fingerprint 는 지금 확정 대상인 계약의 지문이다(대상별 내역: $UNIT_CONTRACT_IMPACT_REQUEST) — 확정 뒤 계약 문서가 다시 바뀌면 이 값이 달라져 같은 확정이 적용되지 않는다. 대상 unit($need)을 빠짐없이 둘 중 한 목록에만 넣는다. unaffected = 이 변경이 그 unit 의 구현 계약에 영향이 없음(스냅샷 없던 unit 은 '현재 문서가 구현 당시와 같음')을 사용자가 확정 — 완료 체크포인트 유지. affected = 그 unit 을 변경 계약으로 다시 돌린다(뒤 unit 이 이미 완료돼 있으면 기존 UNIT_CHECKPOINT_CHAIN_STALE 정책대로 멈춘다). 다음부터 전역 변경에 덜 걸리려면 unit references 에 의존하는 design.md#<절> 을 명시한다"
+  fi
+  # 확정 파일의 형식·대상 일치는 check 단계에서도 본다 — 틀린 파일을 들고 합의 단계(유료 검증자)까지 갔다가 worker 진입에서 거부되지 않게 한다
+  # 지문 대조는 check·apply 모두에서 한다 — apply 는 check 뒤에 합의 단계(디자이너의 문서 수정)를 지났을 수 있으므로 적용 직전의 현재 계약으로 다시 계산한 값이다.
+  bad="$(jq -r --arg need "$need" --arg fp "$target_fp" '
+    ($need | split(" ")) as $n
+    | if type=="object" and .version==1 then "지문 없는 옛 형식(version 1) — 어떤 계약을 보고 확정했는지 증명할 수 없다. version 2 로 다시 확정하라(target_fingerprint 필수)"
+      elif type!="object" or .version!=2 or (.target_fingerprint|type)!="string" or ((.affected_units // [])|type)!="array" or ((.unaffected_units // [])|type)!="array" then "형식이 {version:2, target_fingerprint:\"…\", affected_units:[], unaffected_units:[]} 가 아님"
+      elif .target_fingerprint != $fp then "확정 당시의 계약 지문(\(.target_fingerprint))이 현재 확정 대상의 지문(\($fp))과 다름 — 확정한 뒤 계약 문서(절 본문·전역 입력·사용자 결정)나 대상 unit 이 다시 바뀌었다. 이전 판단을 그대로 적용하지 않는다: 현재 diff 를 다시 확인하고 target_fingerprint 를 현재 값으로 고쳐 다시 확정하라"
+      elif (((.affected_units // []) + (.unaffected_units // [])) | sort) != ($n | sort) then "두 목록의 합집합이 확정 대상 unit(\($n|join(", ")))과 정확히 같지 않음(누락·중복·대상 아닌 unit)"
+      else "" end' "$UNIT_CONTRACT_IMPACT_FILE" 2>/dev/null)" || bad="JSON 파싱 실패"
+  [ -z "$bad" ] || stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "$UNIT_CONTRACT_IMPACT_FILE 을 적용할 수 없다(모델 호출 0회) — $bad. 확정 대상: $need (${why}), 현재 target_fingerprint: $target_fp (내역: $UNIT_CONTRACT_IMPACT_REQUEST). 파일을 고친 뒤 재실행"
+  [ "$mode" = apply ] || return 0
+  for id in $(jq -r '(.unaffected_units // [])[]' "$UNIT_CONTRACT_IMPACT_FILE"); do apply_unit_contract_impact "$id" unaffected; done
+  for id in $(jq -r '(.affected_units // [])[]' "$UNIT_CONTRACT_IMPACT_FILE"); do apply_unit_contract_impact "$id" affected; done
+  ts="$(date '+%Y%m%d-%H%M%S')"
+  log "unit 계약 영향 확정 적용 — unaffected: $(jq -r '(.unaffected_units // []) | join(",")' "$UNIT_CONTRACT_IMPACT_FILE") / affected: $(jq -r '(.affected_units // []) | join(",")' "$UNIT_CONTRACT_IMPACT_FILE") (기록: $WORK_DIR/unit-contract-impact.used.$ts.json)"
+  mv "$UNIT_CONTRACT_IMPACT_FILE" "$WORK_DIR/unit-contract-impact.used.$ts.json" || env_error "unit-contract-impact.json 소비 실패"
+  mv "$UNIT_CONTRACT_IMPACT_REQUEST" "$WORK_DIR/unit-contract-impact.request.used.$ts.json" || env_error "unit-contract-impact.request.json 소비 실패"
+}
+# review / verify / DONE 진입 직전: 모든 unit 의 완료 체크포인트가 **현재 계약**에 대해 유효해야 한다(같은 실행 안에서 문서·결정이 바뀐 경우까지 잡는다).
+require_units_contract_current() { # 다음-단계
+  [ -f "$UNITS_MANIFEST_LOCK" ] || return 0
+  all_units_done && return 0
+  stop_need_user UNIT_CONTRACT_STALE "$1 진입 전 검사: 구현 단위 완료 체크포인트가 현재 계약(문서 절·사용자 결정·unit JSON)에 대해 전부 유효하지 않다 — 이전 완료·승인을 재사용하지 않는다. 그대로 재실행하면 러너가 합의 상태를 다시 확인한 뒤 첫 stale unit 부터 변경 계약으로 워커를 돌린다(자동 원복 없음)"
+}
+
 # ---------- preflight ----------
 STAGE=preflight
 require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
@@ -278,7 +393,7 @@ if [ "$NEW" = 1 ]; then
   archive_name="$ARCHIVE_NAME"
   archive_dir="$WORK_DIR/archive/$archive_name"
   moved=0
-  for item in "$WORK_DIR"/* "$WORK_DIR"/.session-*; do
+  for item in "$WORK_DIR"/* "$WORK_DIR"/.session-* "$WORK_DIR"/.unit-contract; do   # .unit-contract = unit 계약 렌더링(파생물) — 이전 피처 것이 남지 않게 함께 옮긴다
     [ -e "$item" ] || continue
     case "$(basename "$item")" in archive|live.log|feature.json) continue;; esac   # feature.json 은 worktree 자체의 기록 — 피처 재시작에도 남긴다
     mkdir -p "$archive_dir"; mv "$item" "$archive_dir/"; moved=1
@@ -292,7 +407,7 @@ fi
 # scope 없는 옛 형식 `- [USER-QUESTION] …` 은 어느 합의 gate 의 결정인지 코드가 안전하게 추론할 수 없다(design 으로 보면
 # impl 결정이 design PASS 를 깨는 버그가 유지되고, impl 로 보면 과거 design 결정을 잃는다). LLM 호출 전에 사람이 태그를 붙이게 멈춘다.
 unscoped_decisions="$(consensus_unscoped_user_decisions)"
-[ -z "$unscoped_decisions" ] || stop_need_user DECISION_SCOPE_REQUIRED "decisions.md 에 scope 없는 [USER-QUESTION] 줄이 있음 — 각 줄을 그 질문이 발생한 합의 gate 에 따라 '[USER-QUESTION][scope=design]'(요구·설계 선택, design ASK_USER/DEADLOCK/MAX_ROUNDS) 또는 '[USER-QUESTION][scope=impl]'(impl ASK_USER/DEADLOCK/MAX_ROUNDS, 워커 USER_DECISION) 로 직접 고친 뒤 재실행. 자동 추정 없음. 해당 줄(행번호:내용): $(printf '%s' "$unscoped_decisions" | paste -sd'|' -)"
+[ -z "$unscoped_decisions" ] || stop_need_user DECISION_SCOPE_REQUIRED "decisions.md 에 scope 없는 [USER-QUESTION] 줄이 있음 — 각 줄을 그 결정이 **처음 영향을 주는 단계**에 따라 '[USER-QUESTION][scope=design]'(요구·외부 동작·design.md 에 영향 — 질문이 impl/워커/리뷰 단계에서 나왔어도) 또는 '[USER-QUESTION][scope=impl]'(합의된 설계는 그대로이고 implementation.md·approach.md·unit 분할·범위에만 영향) 로 직접 고친 뒤 재실행. 자동 추정 없음. 해당 줄(행번호:내용): $(printf '%s' "$unscoped_decisions" | paste -sd'|' -)"
 
 # 실시간 로그 뷰어. 저장소별 lock을 먼저 선점해 러너 재실행·동시 실행이
 # 같은 뷰어 터미널을 여러 개 열지 못하게 한다.
@@ -359,6 +474,8 @@ require_baseline_guard_resolved \
 # 되돌리기 전에는 stage 와 무관하게 모델·테스트 호출 0회로 다시 멈춘다 — 같은 편집을 정상 반영된 작업 위에 반복하지 않는다.
 require_worker_outcome_guard_resolved \
   || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 워커 호출($(jq -r '.label' "$WORKER_OUTCOME_GUARD"))이 작업 트리를 바꿨지만 유효한 결과 JSON 없이 exit $(jq -r '.raw_exit_code' "$WORKER_OUTCOME_GUARD") 로 끝났고, 작업 트리가 호출 전 tree($(jq -r '.expected' "$WORKER_OUTCOME_GUARD"))로 복구되지 않음 — 변경 내용을 확인한 뒤 ① 호출 전 tree 로 명시적으로 되돌리고 재실행(워커 재호출) 하거나 ② 변경을 유지하려면 사용자가 직접 정리. 자동 원복·자동 재호출 없음 (stage $STAGE 재개 전 전역 검사)"
+# unit 계약의 영향 확정이 필요한데 확정 파일이 없으면 합의 단계(검증자)로 가기 전에 모델 0회로 멈춘다. 구현 후 gap 대기 중에는 그 경로의 provenance 규칙이 먼저다.
+doc_gap_pending || units_contract_preflight check
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
 # 합의 PASS 판정은 config.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
 # 현재 입력 지문(request/design/impl docs + 그 target 범위의 [USER-QUESTION][scope=…])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
@@ -386,7 +503,9 @@ esac
 case "$STAGE" in
   review|verify|done)
     { [ -f "$WORKER_RESULT" ] && jq -e '.status=="DONE"' "$WORKER_RESULT" >/dev/null 2>&1; } || STAGE=worker
-    # 구현 단위 lock 이 있으면 모든 unit 의 done 체크포인트(내용 + 현재 spec 지문)도 유효해야 review 이상으로 간다 — worker-result.json 만 믿지 않는다
+    # 구현 단위 lock 이 있으면 모든 unit 의 done 체크포인트(내용 + 현재 spec 지문 + 현재 유효 계약 지문)도 유효해야 review 이상으로 간다 — worker-result.json 만 믿지 않는다.
+    # 영향 확정 파일이 있으면 여기서 적용한다(이 경로는 worker stage 를 거치지 않을 수 있다).
+    [ "$STAGE" = worker ] || units_contract_preflight apply
     if [ "$STAGE" != worker ] && [ -f "$UNITS_MANIFEST_LOCK" ] && ! all_units_done; then
       log "구현 단위 체크포인트가 전부 유효하지 않음 — worker 부터(첫 미완료 unit 에서 재개)"; STAGE=worker
     fi;;
@@ -418,7 +537,9 @@ source "$SKILL_DIR/scripts/notify-done.sh"
 run_unit() { # unit-id
   local id="$1" unit_dir="$WORK_DIR/units/$1" test_cmd test_log test_rc test_retries=0 test_n=0 title
   local pending=()   # 이번 시도의 결과 파일(워커 → test-fix 순). targeted test 최종 PASS 전까지 context_updates 는 pending 이다
-  if unit_done_valid "$id"; then log "unit $id: 완료 체크포인트 유효 — 건너뜀"; return 0; fi
+  if unit_done_valid "$id"; then log "unit $id: 완료 체크포인트 유효(spec + 현재 계약 지문) — 건너뜀"; return 0; fi
+  [ ! -f "$unit_dir/done.json" ] || log "unit $id: 완료 체크포인트가 현재 spec·계약에 대해 유효하지 않음($(unit_contract_status "$id")) — 과거 DONE 을 재사용하지 않고 다시 실행"
+  # (계약이 바뀐 unit 만 여기까지 온다 — 다른 unit 의 독립 절 변경은 이 unit 을 무효화하지 않으므로 불필요한 연쇄 stale 을 만들지 않는다.)
   # 직렬 의존성: 이 unit 을 (다시) 실행해야 하는데 뒤 unit 이 이미 완료돼 있으면 그 완료는 옛 결과 위에 쌓인 것이고 worktree 에도 그 코드가 남아 있다.
   # 뒤 unit 의 spec_hash 가 그대로여도 재사용하지 않고, 자동 원복(before.tree 로 되돌려 replay)도 하지 않는다 — 사람이 정리한 뒤 재실행.
   local later="" seen=0 u
@@ -462,7 +583,13 @@ run_unit() { # unit-id
      && [ -f "$unit_dir/$latest-after.tree" ] && [ "$(cat "$unit_dir/$latest-after.tree")" = "$cur_tree" ] \
      && jq -e '.status=="DONE"' "$unit_dir/$latest-result.json" >/dev/null 2>&1; then
     # 유효한 UNDECIDED 결과 + tree 일치는 DOC_GAP 해결 후 재개 — resume 이 아니라 워커 턴을 다시 돈다(아래 일반 경로)
-    resume_tag="$latest"
+    # 계약 게이트: 그 DONE 결과는 '워커가 그때 받은 계약'에 대한 것이다. 문서 절·사용자 결정·unit JSON 이 그 뒤 바뀌었으면 테스트만 다시 돌려 완료시키지 않고
+    # 워커 턴을 다시 돈다(변경 계약 diff 전달 → 기존 구현 대조). tree 가 같다는 사실은 계약이 같다는 증거가 아니다.
+    if unit_worker_contract_current "$id" "$unit_dir"; then
+      resume_tag="$latest"
+    else
+      log "unit $id: 직전 결과($latest)의 tree 는 일치하지만 워커가 받은 계약과 현재 계약이 다르다${UC_WHY:+ ($UC_WHY)} — 테스트-only 재개 금지, 워커 턴부터"
+    fi
   elif [ -n "$last_attempt" ] && [ ! -f "$unit_dir/$last_attempt-after.tree" ] \
        && [ "$cur_tree" != "$(cat "$unit_dir/$last_attempt-before.tree")" ]; then
     # run_worker 는 CLI 반환 직후(게이트 전에) after-tree 를 기록한다 — before-tree 만 있고 after-tree 가 없는 시도는
@@ -508,8 +635,16 @@ run_unit() { # unit-id
   { local f; for f in "${pending[@]}"; do context_update_of "$f" "$(basename "$f" -result.json)"; done; } \
     | jq -s --arg id "$id" --argjson v "$IMPL_CONTEXT_VERSION" '{version:$v, unit_id:$id, updates:.}' > "$unit_dir/context-updates.json.tmp" \
     && mv "$unit_dir/context-updates.json.tmp" "$unit_dir/context-updates.json" || env_error "unit $id: context-updates.json 기록 실패"
-  jq -n --arg id "$id" --arg h "$(unit_spec_hash "$id")" --arg now "$(date '+%FT%T%z')" \
-    '{version:1, unit_id:$id, spec_hash:$h, worker_status:"DONE", targeted_test_status:"PASS", completed_at:$now}' \
+  # DONE 확정 직전 계약 게이트: 워커 턴이 받은 계약과 지금 유효한 계약이 같아야 한다 — 워커 실행·테스트 도중 문서·결정이 바뀌었으면
+  # 통과한 테스트는 옛 계약에 대한 것이다. done.json 을 쓰지 않고 멈춘다(재실행이 합의 상태 확인 → 변경 계약으로 워커 턴을 다시 돈다).
+  unit_worker_contract_current "$id" "$unit_dir" \
+    || stop_need_user UNIT_CONTRACT_STALE "unit $id: targeted test 는 통과했지만 워커 턴이 받은 계약과 현재 유효 계약이 다르다(워커 실행·테스트 도중 문서 절·사용자 결정·unit JSON 이 바뀜${UC_WHY:+ — $UC_WHY}) — done.json 을 확정하지 않았다. 재실행하면 변경 계약(units/$id/changed-contract.diff)을 받은 워커 턴부터 다시 돈다. 자동 원복 없음"
+  # 완료 시점 계약이 다음 세대의 기준이 된다(옛 기준은 contract/history 로). done.json 은 그 지문을 든다 — spec_hash 만으로는 문서 변경을 못 잡는다.
+  unit_contract_write_baseline "$id" unit-done "$UC_DIR" || env_error "unit $id: 완료 시점 계약 스냅샷 기록 실패"
+  jq -n --arg id "$id" --arg h "$(unit_spec_hash "$id")" --argjson v "$UNIT_DONE_VERSION" --arg now "$(date '+%FT%T%z')" \
+    --arg fp "$(jq -r '.fingerprint' "$(unit_contract_dir "$id")/contract.json")" --arg l "$UC_LOCAL" --arg g "$UC_GLOBAL" \
+    '{version:$v, unit_id:$id, spec_hash:$h, unit_contract_fingerprint:$fp, contract_local_fingerprint:$l, contract_global_fingerprint:$g,
+      worker_status:"DONE", targeted_test_status:"PASS", completed_at:$now}' \
     > "$unit_dir/done.json.tmp" && mv "$unit_dir/done.json.tmp" "$unit_dir/done.json" || env_error "unit $id: done.json 기록 실패"
   impl_context_write || env_error "unit $id: implementation-context.json 갱신 실패"
   # 세션 저널의 진행 체크포인트 갱신 — 상태 문자열이 아니라 done.json·실제 tree 와 함께 대조되는 보조 기록이다
@@ -552,9 +687,24 @@ while :; do
       # 구현 단위 manifest 는 합의 입력이므로 검증자를 부르기 전에 형식을 확정한다 (오케스트레이터 문서 오류 → NEED_DOCS)
       units_manifest_valid_file "$UNITS_MANIFEST_FILE" \
         || stop_need_docs IMPL_DOCS_MISSING "$ROOT/$UNITS_MANIFEST_FILE 형식 오류 — schemas/implementation-units.schema.json: version 1, units ≥1, unit 마다 id(순번-kebab, 유일, 배열 순서대로 증가)·title·goal·requirements≥1·scope(files/new_file_roots, canonical, 하나 이상)·references≥1·targeted_test(비어 있지 않음) 필수, 그 외 필드(depends_on/priority/parallel 등) 금지"
+      # unit references 는 계약 의존의 유일한 근거다 — 가리키는 절이 없거나 모호한 manifest 로 검증자를 부르지 않는다(모델 0회).
+      bad_refs="$(units_unresolved_references "$UNITS_MANIFEST_FILE" | paste -sd';' -)"
+      if [ -n "$bad_refs" ]; then
+        if ls "$WORK_DIR"/units/*/worker-before.tree >/dev/null 2>&1 || ls "$WORK_DIR"/units/*/done.json >/dev/null 2>&1; then
+          stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "이미 워커가 진행한 피처인데 unit references 를 현재 문서에서 해석할 수 없다 — '영향 없음'으로 넘어가지 않는다(모델 호출 0회): $bad_refs. 삭제·개명된 heading 을 복구하거나 references 를 정확한 절로 고친 뒤 재실행"
+        fi
+        stop_need_docs IMPL_DOCS_MISSING "implementation-units.json 의 references 가 문서의 절을 정확히 가리키지 않는다: $bad_refs. references 는 'implementation.md#<heading>' / 'approach.md#<heading>' / 'design.md#<heading>'(heading 텍스트 또는 slug, 문서 안에서 유일) 형식이어야 한다 — 러너가 그 절의 본문으로 unit 별 계약 변경을 판정한다. 고친 뒤 재실행"
+      fi
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
       case $rc in
-        0) consensus_exit0_note impl; STAGE=worker;;
+        0) consensus_exit0_note impl
+           # 상위 계약이 정상 재합의로 다시 확정됐다 — 그 전 문서 위에서 기록된 pending gap 은 밑바탕이 달라졌으므로 재개 대상이 아니다(SUPERSEDED 로 보존).
+           # 그 unit 은 변경 계약으로 다시 돈다. 옛 doc-gap-resume.json 으로 이 재합의를 건너뛰거나, 재합의 뒤 옛 gap 대기로 되돌아가지 않는다.
+           if doc_gap_pending && ! doc_gap_base_consensus_valid; then
+             log "impl 재합의 완료 — 이전 문서 위의 pending gap($(doc_gap_next_step), $(doc_gap_field '[.gaps[].key] | join(",")'))을 SUPERSEDED 로 남긴다"
+             doc_gap_supersede "impl 재합의로 밑바탕 문서가 다시 확정됨" || env_error "doc-gap-resume.json 갱신 실패"
+           fi
+           STAGE=worker;;
         2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 문서 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 state.json.review 의 쟁점을 사용자에게 보고. $(escalation_detail impl 'implementation.md/approach.md')";;
         *) env_error "consensus-loop impl 실패 (exit $rc)";;
       esac;;
@@ -598,9 +748,15 @@ while :; do
         esac
       fi
       log "구현 단위 lock: $UNITS_MANIFEST_LOCK ($(jq -r '[.units[].id] | length' "$UNITS_MANIFEST_LOCK") units: $(unit_ids | paste -sd' ' -))"
+      # lock 기준으로 references 를 다시 확인하고(아직 시작하지 않은 unit 포함), 영향 확정이 필요한 unit 을 워커 호출 전에 정리한다 — 모델 0회
+      bad_refs="$(units_unresolved_references "$UNITS_MANIFEST_LOCK" | paste -sd';' -)"
+      [ -z "$bad_refs" ] || stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "unit references 를 현재 문서에서 해석할 수 없다 — '영향 없음'으로 넘어가지 않는다(모델 호출 0회): $bad_refs. 삭제·개명된 heading 을 복구하거나 references 를 정확한 절로 고친 뒤 재실행(manifest 를 고치면 impl 재합의)"
+      units_contract_preflight apply
       for unit_id in $(unit_ids); do
         run_unit "$unit_id"
       done
+      # 같은 실행 안에서 앞 unit 의 계약이 바뀌었을 수 있다 — 전체 review 로 넘기기 전에 모든 완료 체크포인트를 현재 계약으로 다시 본다
+      require_units_contract_current review
       # 모든 unit 완료 → unit 별 워커 결과를 전체 review 입력(worker-result.json)으로 합친다. 최종 품질 승인은 여기가 아니라 전체 review/verify 다.
       { for unit_id in $(unit_ids); do cat "$WORK_DIR/units/$unit_id/worker-result.json"; done; } \
         | jq -s '{status:"DONE", undecided:[], delegated_choices:(map(.delegated_choices[])), tests:(map(.tests[])), context_updates:{upsert:[],remove:[]}}' > "$WORKER_RESULT.tmp" \
@@ -647,6 +803,12 @@ while :; do
             # verify 의 worker-fix 가 낸 미결정: 결정이 approach.md 에 반영됐으므로 verify 로 돌아가 테스트 → 필요하면 worker-fix 가 다시 돈다
             doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"; STAGE=verify; continue
           fi
+          # gap 해결(approach.md 반영)이 그 gap 과 연결되지 않은 unit 의 계약까지 바꿨으면 그 unit 의 완료는 더 이상 유효하지 않다(unit_contract_drift_covered) —
+          # review-gap 워커는 그 unit 을 다시 구현하지 않으므로 워커·리뷰어를 부르기 전에 모델 0회로 멈춘다.
+          if [ -f "$UNITS_MANIFEST_LOCK" ]; then
+            stale_units=""; for unit_id in $(unit_ids); do unit_done_valid "$unit_id" || stale_units="$stale_units$unit_id "; done
+            [ -z "$stale_units" ] || stop_need_user DOC_GAP_SCOPE_EXCEEDED "리뷰 DOC_GAP($(doc_gap_field '[.gaps[].key] | join(",")')) 해결 과정에서 그 gap 과 연결되지 않은 unit(${stale_units% })의 계약이 바뀌었다 — 사용자 해결 예외는 ⓐ gap 의 코드 위치가 scope 에 속한 unit 의 ⓑ approach.md 절 변경 가운데 ⓒ 그 절 본문에 gap tag($(doc_gap_field '[.gaps[] | "[" + .tag + "]"] | join(" / ")'))가 적힌 절에만 적용된다 — 표시 없는 절 변경(같은 unit 의 다른 절 포함)과 그 밖의 unit 은 gap 해결로 확정할 수 없어 완료 체크포인트를 재사용하지 않는다(모델 호출 0회). ① 의도하지 않은 변경이면 그 절을 gap 발생 시점으로 되돌리고 재실행 ② gap 해결로 고친 절인데 표시만 빠졌으면 그 절에 해당 tag 를 적고 재실행 ③ gap 과 무관하게 의도한 변경이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의 → 그 unit 부터 변경 계약으로 다시 돈다). 자동 원복·자동 재실행 없음"
+          fi
           # 리뷰 DOC_GAP: review-gap 워커 1회. 재시작 안전성 — 워커가 이미 끝났으면(after tree == 현재, 유효 DONE 결과) 재호출 없이 리뷰로,
           # source tree 가 기록과 다르면(외부 변경) fail closed. 모델 호출 없이 판정.
           cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
@@ -669,7 +831,9 @@ while :; do
       esac;;
 
     review)
-      set +e; bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
+      # --new-review-attempt 는 이 실행의 첫 리뷰 루프 호출에만 전달한다(verify 실패 뒤의 재리뷰까지 새 시도로 만들지 않는다)
+      set +e; FEATURE_REVIEW_NEW_ATTEMPT="$NEW_REVIEW_ATTEMPT" bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
+      NEW_REVIEW_ATTEMPT=0
       case $rc in
         0)
           [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"
@@ -679,10 +843,14 @@ while :; do
           # 리뷰어 DOC_GAP: 사용자 결정. 루프가 doc-gap-resume.json(WAITING_USER, 리뷰·source tree 포함)을 남겼다 — impl 재합의 없음.
           log "리뷰어 DOC_GAP — 사용자 결정 필요:"; doc_gap_report
           stop_need_user REVIEW_DOC_GAP "리뷰어가 구현 중 미결정 solution shape 를 보고함($(jq -r '.issues' "$WORK_DIR/state.json")) — 사용자 결정이 최종이며 검증자·디자이너·impl 재합의 없이 review-gap 워커 1회(DOC_GAP 결정 + 같은 리뷰의 FIX_CODE $(jq -r '[.issues[] | select(.action=="FIX_CODE") | .id] | join(",")' "$(jq -r '.review' "$WORK_DIR/state.json")")) → 리뷰로 간다. 각 issue 의 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행. 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); refs: \(.refs|join(", ")); impact: \(.impact))"] | join(" ; ")')";;
+        4)
+          # 리뷰어 출력 계약 위반: 승인도 수정 요청도 아니다. 루프가 원본·진단·입력 지문을 reviews/invalid-review.json 에 남겼고 재실행은 리뷰어 0회다.
+          stop_need_user REVIEW_OUTPUT_INVALID "리뷰어 출력이 계약에 어긋나 수용하지 않음(attempt $(jq -r '.attempt' "$WORK_DIR/state.json") round $(jq -r '.round' "$WORK_DIR/state.json"), invocation $(jq -r '.invocation_id' "$WORK_DIR/state.json")) — $(jq -r '.why' "$WORK_DIR/state.json"). 위반: $(jq -r '[.errors[] | "[\(.rule_id)] issue=\(if .issue_id=="" then "-" else .issue_id end) field=\(.field) observed=\(.observed)"] | join(" ; ")' "$WORK_DIR/state.json"). 같은 프롬프트를 같은 세션에 재전송하지 않는다 — 그대로 재실행하면 모델 호출 0회로 같은 진단이 나온다. 복구: ① 검사기 버그였으면 고친 뒤 재실행(저장된 출력을 로컬 재검증) ② 새 리뷰가 필요하면 '--new-review-attempt' 를 붙여 재실행(새 attempt Round 1, 새 세션 — 이전 미수용 세션·resume marker 는 건드리지 않는다). 기록: $WORK_DIR/reviews/invalid-review.json, 원본: $(jq -r '.review' "$WORK_DIR/state.json")";;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
 
     verify)
+      require_units_contract_current verify
       if ! verify_approved_fingerprint; then
         STALE_COUNT=$((STALE_COUNT + 1))
         [ "$STALE_COUNT" -ge 2 ] && stop_need_user APPROVAL_STALE_REPEATED "승인 후 작업 트리가 반복 변경됨 — 외부 변경 원인 확인 필요"
@@ -709,6 +877,7 @@ while :; do
       STAGE=done;;
 
     done)
+      require_units_contract_current DONE
       write_state done DONE "" "Phase 3 승인 + 전체 테스트 통과. 커밋은 사용자 지시 시에만."
       notify_feature_done || true   # DONE 기록 성공 뒤에만, 피처당 1회 — 실패해도 exit 0 그대로
       anomaly_n="$(cli_anomaly_count)"
