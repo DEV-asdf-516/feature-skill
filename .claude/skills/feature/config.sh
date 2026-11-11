@@ -12,7 +12,7 @@
 # 어느 CLI 로 돌릴지는 모델 ID 로 정한다(claude* → claude, gpt-*/o*/codex* → codex). 아래 "역할 → CLI 라우팅" 참고.
 # DESIGN_REVISION_MODEL: 검증자가 BLOCK 한 합의 문서(design/implementation/approach)를 수정하는 하위 실행(consensus-loop 의 DESIGNER 역할) 전용.
 #   초안 작성은 interactive 오케스트레이터 세션이 직접 하며 그 모델은 이 설정으로 제어되지 않는다.
-DESIGN_REVISION_MODEL="claude-fable-5-1"
+DESIGN_REVISION_MODEL="claude-fable-5-2"
 DESIGNER_EFFORT="low"
 VALIDATOR_MODEL="gpt-6-astra"     # 명세 검증자
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정)지만 문서 주장을 직접 호출 경로·conventions 와 교차 확인하므로 low 로 내리지 않는다. 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
@@ -49,7 +49,11 @@ FIXER_CLI=""
 # 17: 검증자 입력에서 decisions.md 원본을 뺐다 — 러너가 추린 확정 사용자 결정 파일(reviews/user-decisions-<target>.md, [USER-QUESTION][scope=…] 줄만)을 준다. v16 실모델에서 검증자가 decisions.md 의 REJECT 사유를 읽고 추론에 쓴 것이 관측됨.
 # 18: validator-review-impl.md 1행에 ${PROJECT_CONVENTIONS} 추가 — design 검증자만 conventions.md 본문을 받고 impl 검증자는 받지 못하던 누락 수정(consensus-loop 는 두 검증자 모두에 인자 "" 를 넘기고 프롬프트 본문 렌더링에만 의존한다). 루프 start-up 에서 플레이스홀더 부재를 fail-closed 로 검사.
 # 19: 문서 주장의 독립 교차 검증 — ① 명시적 conventions 규칙과 직접 충돌하는 문서 결정은 동작이 같아도 DIRECT_MISMATCH ② request·확정 사용자 결정·기존 필수 계약에 근거 없는 신규 제품 동작 ③ 문서가 변경 대상으로 지정한 함수·쿼리·서비스의 직접 호출부·피호출부 확인(누락으로 명시 계약 위반·구현 불가일 때만) ④ NEW 탐색 근거가 직접 범위 코드와 사실로 어긋나면 REUSE_DISCOVERY_GAP. category·스키마 필드는 그대로(schema_version 만 19). 탐색 범위는 여전히 변경 대상 + 직접 의존.
-VALIDATOR_CONTRACT_VERSION=19
+# 20: 사용자 결정의 scope 는 '발생 단계'가 아니라 '처음 영향을 주는 단계'다 — 요구·외부 동작·설계에 영향을 주는 결정은 어느 단계에서 나왔어도 scope=design(design·impl 검증자 모두 본다),
+#     구현 수단만 정한 결정은 scope=impl(impl 검증자만). request.md 의 `## 요구 변경/추가` 절(시간순 append)과 scope=design 결정이 함께 있을 때만, 그 항목이 명시한 범위에서
+#     뒤 요구가 옛 요구를 대체한다(범위 밖은 원 요구 유지, 문서 소유자의 주장만으로는 대체되지 않는다). 두 검증자 프롬프트가 같은 출처 우선순위를 쓴다.
+#     검증자에게 주는 결정 파일과 PASS/upstream 지문은 같은 함수(consensus_user_decision_lines)의 출력이다. 지문 계산 의미·체크포인트 포맷은 그대로라 CONSENSUS_CHECKPOINT_VERSION 은 올리지 않는다.
+VALIDATOR_CONTRACT_VERSION=20
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -58,7 +62,23 @@ VALIDATOR_CONTRACT_VERSION=19
 # 11: code-spec 수준 REQUIRED(호출 순서·helper 분해·naming·local 구조·reference pattern) 이탈을 동작이 같아도 CONTRACT_VIOLATION 으로 검사. 제외는 formatter/import/compiler 세부뿐.
 # 14: DOC_GAP issue 에 user_question(비어 있지 않음)·options(≥2) 필수, FIX_CODE 는 둘 다 빈 값 — 리뷰어 DOC_GAP 은 impl 재합의가 아니라 사용자 결정으로 간다(doc-gap-resume.json).
 # 15: CONTRACT_VIOLATION/UNDECIDED_APPROACH 를 material 계약(책임 배치·재사용·호출 횟수·상태 순서·transaction/lock/retry/cache·public 계약·명시 convention)으로 한정. helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection/반환 직전 alias 는 문서가 적어 두었어도 issue 아님. REDUNDANT_CODE 에 문서가 요구하지 않은 standalone abstraction(outcome/context/kind 등) 추가. 수정자는 material contract 만 복구.
-REVIEWER_CONTRACT_VERSION=15
+# 16: fix_ref 정의를 프롬프트·스키마·루프 검사에서 하나로 통일(REVIEW_FIX_REF_RULE) — 수정 후 소스 파일 경로:L시작-L끝, 패치 파일(fix-diff-round-N.patch) 경로·행 번호 금지,
+#     실제 변경 파일 + 새 버전 hunk 교차를 git tree 로 검사. origin 별 필드(ROUND_1 / UNRESOLVED_PREVIOUS / FIX_REGRESSION·NEWLY_EXPOSED_BY_FIX)를 명시.
+#     출력 계약 위반은 ENV_ERROR 가 아니라 REVIEW_OUTPUT_INVALID(reviews/invalid-review.json, 구조화 진단, 재실행 모델 0회)다.
+# 리뷰어에게 주는 지시(프롬프트·스키마)가 그대로이고 루프 검사기의 버그만 고친 경우에는 올리지 않는다 — 그래야 저장된 REVIEW_OUTPUT_INVALID 출력을
+# 고친 검사기로 로컬 재검증(모델 0회)할 수 있다. 지시가 바뀌면 올리고, 그때 저장된 출력은 옛 계약의 것이므로 명시적 새 리뷰 시도가 필요하다.
+# 검사기만 고친 경우에는 대신 아래 REVIEW_CHECKER_VERSION 을 올린다 — 올리지 않으면 옛 검사기가 통과시킨 APPROVE 가 재검증 없이 재사용된다.
+REVIEWER_CONTRACT_VERSION=16
+# 루프 검사기(impl-review-loop.sh validate_review_output + 아래 review_fix_ref_* )의 버전 — 리뷰어 계약 버전과 목적이 다르다.
+#   REVIEWER_CONTRACT_VERSION : 리뷰어에게 주는 지시(프롬프트·스키마). 바뀌면 저장된 출력은 옛 계약의 것 → 새 리뷰.
+#   REVIEW_CHECKER_VERSION    : 같은 지시에 대한 러너의 결정론적 검사. 검사기만 고쳤으면 이것만 올린다 → 저장된 출력(무효 기록 **과 승인 캐시 모두**)을
+#                               새 검사기로 로컬 재검증한다(모델 0회). 리뷰 입력 지문에는 넣지 않는다(넣으면 무효 출력의 로컬 재검증이 불가능해진다).
+#   REVIEW_CHECKPOINT_VERSION : review-impl.json 필드·지문의 의미(아래).
+# 승인 체크포인트는 자신을 통과시킨 검사기 버전(checker_version)을 든다 — 현재 값과 다르면 그 APPROVE 를 그대로 믿지 않고 리뷰 루프가 저장된 출력을 재검증한 뒤에만 재사용한다.
+# 2: hunk 없는 변경(binary·파일 mode 만)을 가리킨 fix_ref 를 거부(전에는 임의의 줄 번호가 통과).
+# 3: 스키마(schemas/impl-review.schema.json)의 required·enum·minItems·minLength·additionalProperties 를 실제로 검사(json_schema_violations).
+#    전에는 일부 필드의 타입만 봐서 필드 누락·enum 밖 origin·빈 code_refs 가 통과했다.
+REVIEW_CHECKER_VERSION=3
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
@@ -66,7 +86,10 @@ REVIEWER_CONTRACT_VERSION=15
 # 다른 의미의 지문을 비교해 "부분 실행"으로 오판하고 단계를 건너뛰는 것을 막는다.
 # consensus 4: upstream·PASS 지문에 worktree conventions.md 내용 포함(없으면 고정 부재 표지) — conventions 가 바뀌면 이전 design·impl PASS 를 재사용하지 않는다.
 CONSENSUS_CHECKPOINT_VERSION=4
-REVIEW_CHECKPOINT_VERSION=2
+# review 3: next_step 에 REVIEW_OUTPUT_INVALID 추가(리뷰어 출력 계약 위반 — reviews/invalid-review.json 이 진단·입력 지문을 든다).
+# review 4: APPROVE 체크포인트가 contract_docs_sha256(승인 당시 계약 문서 + 사용자 결정 줄 + conventions.md 내용 지문)을 들고, 승인 재사용이 그 값을 현재와 대조한다.
+#           옛 포맷(3 이하)의 체크포인트는 그 지문이 없거나 의미가 달라 해석하지 않는다 — 새 attempt 로 Round 1 부터 리뷰한다.
+REVIEW_CHECKPOINT_VERSION=4
 
 # --- 수렴/안전 한도 ---
 MAX_SPEC_ROUNDS=1        # 명세 합의 최대 라운드
@@ -138,7 +161,6 @@ validator_profile() {
     gpt-6-sol)   printf 'compact' ;;
     gpt-5.6-sol)   printf 'compact' ;;
     gpt-6-astra)   printf 'guided' ;;
-    gpt-5.6-astra) printf 'guided' ;;
     *)             printf 'conservative' ;;
   esac
 }
@@ -459,10 +481,11 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
 #   두 CLI 모두 같은 session_name(key) 이면 '수용된' 세션을 이어간다(claude --resume / codex exec resume). 호출자가 호출마다 다른 이름을 주면
 #   fresh 다(합의 루프의 검증자). 세션 확정은 호출자의 role_session_accept 가 한다 — 이 함수는 스테이징까지만.
 #   두 CLI 모두 invocation 마다 usage.jsonl 에 행 1개(log_role_usage).
+RUN_READONLY_INVOCATION_ID=""   # 마지막 run_readonly_json_role 의 invocation id — 호출자가 무효 출력 기록(invalid-review.json)에 남긴다
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
   local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
-  inv="$(new_invocation_id)"
+  inv="$(new_invocation_id)"; RUN_READONLY_INVOCATION_ID="$inv"
   case "$cli" in
     codex)
       [ -z "$conv" ] || prompt="$conv"$'\n\n'"$prompt"
@@ -968,13 +991,287 @@ unit_ids() { jq -r '.units[].id' "$(units_manifest_file)"; }
 unit_json() { jq -c --arg id "$1" '.units[] | select(.id==$id)' "$(units_manifest_file)"; }
 # unit spec 지문: lock 의 해당 unit 객체(정렬된 compact JSON)의 해시. done.json 의 spec_hash 와 대조해 spec 이 바뀐 unit 의 체크포인트를 무효화한다.
 unit_spec_hash() { jq -Sc --arg id "$1" '.units[] | select(.id==$id)' "$(units_manifest_file)" | sha256_stdin; }
-# 완료 체크포인트가 유효한가: run-state 는 힌트일 뿐이고 실제 판정은 units/<id>/done.json 의 내용 + 현재 spec 지문 교차 확인이다.
+# ---------- unit 유효 계약(effective contract) 스냅샷 ----------
+# unit JSON 해시(spec_hash)만으로는 "문서가 바뀌었는데 unit JSON 은 그대로"인 경우를 못 잡는다. 그래서 unit 마다 그 unit 이 실제로 의존하는
+# 계약 본문을 스냅샷으로 남기고, 완료 판정·테스트-only 재개·DONE 확정·review 진입이 전부 같은 지문을 본다.
+#   local  (그 unit 의 계약 — 바뀌면 그 unit 만 stale):
+#     · lock 의 unit JSON(정렬) · references 가 가리키는 design.md/implementation.md/approach.md 절의 **본문**(heading 줄 + 조상 heading 경로 포함)
+#     · 이 unit 에 묶인 사용자 결정(decisions.md 의 [USER-QUESTION]…[worker-gap=<unit id>#N] 줄)
+#   global (전역 입력 — 바뀌면 영향 unit 을 코드가 추정하지 않는다):
+#     · request.md · conventions.md · unit 에 묶이지 않은 사용자 결정([worker-gap=…]/[review-issue=…] 태그가 없는 [USER-QUESTION] 줄)
+#     · design.md 전체 — 단, 그 unit 이 design.md#… 절을 references 에 하나라도 적었으면 그 절만 local 로 보고 전체는 global 에서 뺀다.
+# references 형식: "<design.md|implementation.md|approach.md>#<anchor>"(절) 또는 "#" 없는 문서 이름(문서 전체). anchor 는 heading 텍스트 그대로,
+# 그 GitHub 식 slug, 또는 heading 끝의 명시적 {#id} 와 대조하고, 정확히 맞는 heading 이 없을 때만 slug 의 단어 경계 접두(예: "결정-1" ↔ "## 결정 1: 없는 id 처리",
+# "결정 10" 은 맞지 않는다)로 대조한다. 0개(삭제·이름 변경)·2개 이상(모호)·지원하지 않는 형식은 '영향 없음'이 아니라 해석 불가다.
+# 비교는 내용 기반이다 — heading 문자열이 그대로여도 본문이 바뀌면 변경이고, 절이 다른 상위 절 아래로 옮겨지면 경로 줄이 달라져 변경으로 잡힌다.
+# 파일:
+#   units/<id>/contract/baseline/{contract.txt,global.txt}  현재 세대의 기준 계약(최초 워커 호출 직전에 기록, unit 완료 시 완료 시점 계약으로 교체 — 옛 것은 history/NN)
+#   units/<id>/contract/first/                               그 unit 의 최초 스냅샷(불변)
+#   units/<id>/contract/contract.json                        {version, unit_id, local_fingerprint, global_fingerprint, fingerprint, baseline_source, source_tree, consensus_provenance, …}
+#   units/<id>/worker-contract.json                          마지막 워커 턴(worker-unit.md)이 프롬프트로 받은 계약의 지문 — 테스트-only 재개·DONE 확정이 이것과 현재를 대조한다
+#   units/<id>/changed-contract.diff                         재개 턴에 준 기준 계약 → 현재 계약의 실제 unified diff
+#   $WORK_DIR/.unit-contract/<id>/                           현재 계약 렌더링(파생물, 매번 덮어씀)
+UNIT_CONTRACT_VERSION=1
+UNIT_DONE_VERSION=2
+UNIT_CONTRACT_IMPACT_FILE="$WORK_DIR/unit-contract-impact.json"   # 사용자의 명시적 영향 확정: {"version":2,"target_fingerprint":"<러너가 내준 값>","affected_units":[…],"unaffected_units":[…]}
+UNIT_CONTRACT_DIFF_MAX_LINES="${UNIT_CONTRACT_DIFF_MAX_LINES:-400}" # 이보다 큰 변경 계약 diff 는 프롬프트에 싣지 않고(임의 절단 금지) 전체 파일을 읽게 한다
+unit_contract_dir() { printf '%s/units/%s/contract' "$WORK_DIR" "$1"; }
+unit_contract_fingerprint_of() { printf '%s:%s' "$1" "$2" | sha256_stdin; } # local global
+# 문서의 한 절: "@path: <조상 heading 경로>" 줄 + heading 줄부터 같은/상위 level 의 다음 heading 직전까지(끝의 빈 줄 제거). 1 = 없음, 2 = 복수 매칭. 3 = 문서 해석 실패.
+unit_contract_section() { # doc-path anchor
+  local out n
+  out="$(jq -Rs --arg a "$2" '
+    def slug: ascii_downcase | gsub("[^\\p{L}\\p{N}_ -]"; "") | gsub("^ +| +$"; "") | gsub(" +"; "-");
+    split("\n") as $L
+    | (reduce range(0; $L|length) as $i ({fence:"", heads:[]};
+        $L[$i] as $l | .fence as $f
+        | if $f != "" then (if ($l|test("^\\s{0,3}" + $f)) then .fence="" else . end)
+          elif ($l|test("^\\s{0,3}(```|~~~)")) then .fence=($l|capture("^\\s{0,3}(?<f>```|~~~)").f)
+          elif ($l|test("^#{1,6}[ \\t]+\\S")) then .heads += [{i:$i, level:($l|capture("^(?<h>#+)").h|length),
+                text:($l|sub("^#+[ \\t]+";"")|sub("[ \\t]+#+[ \\t]*$";"")|sub("[ \\t\\r]+$";""))}]
+          else . end) | .heads) as $H
+    | ($a|slug) as $as
+    | [range(0; $H|length) | select(($H[.].text == $a) or ($as != "" and ($H[.].text|slug) == $as) or ($H[.].text|endswith("{#" + $a + "}")))] as $exact
+    | (if ($exact|length) > 0 or $as == "" then $exact
+       else [range(0; $H|length) | select($H[.].text|slug|startswith($as + "-"))] end) as $m
+    | {count:($m|length), text:(if ($m|length)==1 then
+        $m[0] as $k | $H[$k] as $h
+        | (reduce ([range(0; $k)] | reverse[]) as $j ({lvl:$h.level, acc:[]};
+            if $H[$j].level < .lvl then {lvl:$H[$j].level, acc:([$H[$j].text] + .acc)} else . end) | .acc) as $anc
+        | ([$H[$k+1:][] | select(.level <= $h.level) | .i] | first // ($L|length)) as $end
+        | "@path: " + ($anc|join(" > ")) + "\n" + ($L[$h.i:$end] | join("\n") | sub("[\\s]+$"; ""))
+      else "" end)}' "$1")" || return 3
+  n="$(jq -r '.count' <<< "$out")"
+  if [ "$n" -eq 0 ]; then return 1; elif [ "$n" -gt 1 ]; then return 2; fi
+  jq -r '.text' <<< "$out"
+}
+# unit 의 현재 유효 계약을 out-dir/{contract.txt,global.txt} 로 렌더링한다. 1 = 해석 불가(사유는 UC_WHY) — 호출자는 '영향 없음'으로 넘어가지 않는다.
+UC_WHY=""; UC_LOCAL=""; UC_GLOBAL=""; UC_DIR=""
+unit_contract_render() { # unit-id out-dir
+  local id="$1" out="$2" uj ref doc anchor path body rc has_design=0
+  UC_WHY=""
+  uj="$(unit_json "$id")"
+  [ -n "$uj" ] || { UC_WHY="unit $id 가 구현 단위 manifest 에 없음"; return 1; }
+  mkdir -p "$out" || { UC_WHY="렌더링 디렉터리 생성 실패: $out"; return 1; }
+  {
+    printf '=== unit (implementation-units.json) ===\n'; jq -S . <<< "$uj"
+    while IFS= read -r ref; do
+      doc="${ref%%#*}"; anchor=""; case "$ref" in *'#'*) anchor="${ref#*#}";; esac
+      case "$doc" in
+        design.md|implementation.md|approach.md) ;;
+        *) UC_WHY="references '$ref' 는 지원하지 않는 형식 — 'design.md#<절>' / 'implementation.md#<절>' / 'approach.md#<절>'(또는 # 없이 문서 전체)만 계약 의존으로 해석한다"; return 1;;
+      esac
+      path="$WORK_DIR/$doc"
+      [ -f "$path" ] || { UC_WHY="references '$ref': $path 가 없음"; return 1; }
+      [ "$doc" != design.md ] || has_design=1
+      printf '\n=== reference: %s ===\n' "$ref"
+      if [ -z "$anchor" ]; then
+        cat "$path"
+      else
+        rc=0; body="$(unit_contract_section "$path" "$anchor")" || rc=$?
+        case "$rc" in
+          0) printf '%s\n' "$body";;
+          2) UC_WHY="references '$ref': $doc 에 그 anchor 와 맞는 heading 이 둘 이상(모호)"; return 1;;
+          3) UC_WHY="references '$ref': $doc 의 heading 구조를 해석하지 못함(jq 오류)"; return 1;;
+          *) UC_WHY="references '$ref': $doc 에 그 anchor 와 맞는 heading 이 없음(삭제·이름 변경)"; return 1;;
+        esac
+      fi
+    done < <(jq -r '.references[]' <<< "$uj")
+    printf '\n=== user decisions bound to this unit (decisions.md [worker-gap=%s#N]) ===\n' "$id"
+    if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "^[[:space:]]*- \[USER-QUESTION\](\[[^]]*\])*\[worker-gap=$id#[0-9]+\]" "$WORK_DIR/decisions.md" || true; fi
+  } > "$out/contract.txt"
+  {
+    printf '=== request.md ===\n'; if [ -f "$WORK_DIR/request.md" ]; then cat "$WORK_DIR/request.md"; else printf '(absent)\n'; fi
+    printf '\n=== conventions.md ===\n'; if [ -f "${CONVENTIONS_FILE:-}" ]; then cat "$CONVENTIONS_FILE"; else printf '(absent)\n'; fi
+    if [ "$has_design" -eq 0 ]; then
+      printf '\n=== design.md (전체 — 이 unit 의 references 에 design.md#… 절이 없어 영향 절을 특정할 수 없다) ===\n'
+      if [ -f "$WORK_DIR/design.md" ]; then cat "$WORK_DIR/design.md"; else printf '(absent)\n'; fi
+    fi
+    printf '\n=== user decisions not bound to a unit (decisions.md) ===\n'
+    if [ -f "$WORK_DIR/decisions.md" ]; then
+      { grep -E '^[[:space:]]*- \[USER-QUESTION\]' "$WORK_DIR/decisions.md" || true; } | { grep -vE '\[(worker-gap|review-issue)=[^]]*\]' || true; }
+    fi
+  } > "$out/global.txt"
+}
+# manifest 의 모든 unit references 를 현재 문서와 대조해 해석할 수 없는 것을 "<unit id>: <사유>" 줄로 낸다(빈 출력 = 전부 해석됨). 모델 호출 없음.
+# impl 합의(검증자) 전에 불러, 가리키는 절이 없는 manifest 로 유료 검증을 돌리지 않는다. lock 이 아니라 인자로 받은 파일을 본다.
+units_unresolved_references() { # manifest-path
+  local id ref doc anchor rc
+  while IFS=$'\t' read -r id ref; do
+    [ -n "$id" ] || continue
+    doc="${ref%%#*}"; anchor=""; case "$ref" in *'#'*) anchor="${ref#*#}";; esac
+    case "$doc" in
+      design.md|implementation.md|approach.md) ;;
+      *) printf "%s: '%s' 는 지원하지 않는 형식(design.md#<절> / implementation.md#<절> / approach.md#<절> 또는 문서 이름)\n" "$id" "$ref"; continue;;
+    esac
+    [ -f "$WORK_DIR/$doc" ] || { printf "%s: '%s' 의 문서가 없음\n" "$id" "$ref"; continue; }
+    [ -n "$anchor" ] || continue
+    rc=0; unit_contract_section "$WORK_DIR/$doc" "$anchor" >/dev/null || rc=$?
+    case "$rc" in
+      0) ;;
+      2) printf "%s: '%s' 와 맞는 heading 이 둘 이상(모호)\n" "$id" "$ref";;
+      *) printf "%s: '%s' 와 맞는 heading 이 없음\n" "$id" "$ref";;
+    esac
+  done < <(jq -r '.units[] | .id as $i | .references[] | [$i, .] | @tsv' "$1")
+}
+# 현재 계약 렌더링 + 지문(UC_LOCAL/UC_GLOBAL/UC_DIR). 1 = 해석 불가(UC_WHY).
+unit_contract_current() { # unit-id
+  UC_DIR="$WORK_DIR/.unit-contract/$1"; UC_LOCAL=""; UC_GLOBAL=""
+  unit_contract_render "$1" "$UC_DIR" || return 1
+  UC_LOCAL="$(sha256_stdin < "$UC_DIR/contract.txt")"; UC_GLOBAL="$(sha256_stdin < "$UC_DIR/global.txt")"
+}
+# 기준 계약 대비 현재 상태 한 단어:
+#   CURRENT          local·global 모두 기준과 같다
+#   STALE            이 unit 의 local 계약이 바뀌었다(또는 전역 변경에 대해 사용자가 '영향 있음'으로 확정했다)
+#   IMPACT_REQUIRED  local 은 같고 전역 입력만 바뀌었다 — 영향 여부를 코드가 정하지 않는다
+#   NO_BASELINE      기준 스냅샷이 없다(이 변경 이전의 산출물)
+#   UNRESOLVED       references 를 해석할 수 없다(절 삭제·모호·형식)
+unit_contract_status() { # unit-id
+  local meta; meta="$(unit_contract_dir "$1")/contract.json"
+  unit_contract_current "$1" || { printf 'UNRESOLVED'; return 0; }
+  jq -e --argjson v "$UNIT_CONTRACT_VERSION" '.version==$v' "$meta" >/dev/null 2>&1 || { printf 'NO_BASELINE'; return 0; }
+  [ "$(jq -r '.local_fingerprint' "$meta")" = "$UC_LOCAL" ] || { printf 'STALE'; return 0; }
+  if [ "$(jq -r '.global_fingerprint' "$meta")" = "$UC_GLOBAL" ]; then printf 'CURRENT'; return 0; fi
+  if [ "$(jq -r '.impact_confirmed_global // ""' "$meta")" = "$UC_GLOBAL" ]; then printf 'STALE'; return 0; fi
+  printf 'IMPACT_REQUIRED'
+}
+# 합의 입력의 유효 provenance(스냅샷 메타데이터 — 지문에는 넣지 않는다).
+unit_contract_provenance() {
+  local d=UNVERIFIED i=UNVERIFIED
+  if consensus_pass_current design; then d=PASS; elif user_escalation_resolved_current design; then d=USER_RESOLVED; fi
+  if consensus_pass_current impl; then i=PASS; elif user_escalation_resolved_current impl; then i=USER_RESOLVED; elif doc_gap_resolved_current; then i=DOC_GAP_RESOLVED; fi
+  jq -nc --arg d "$d" --arg i "$i" '{design:$d, impl:$i}'
+}
+# 기준 계약 기록(교체): src-dir 의 contract.txt/global.txt 를 baseline 으로. 기존 baseline·contract.json 은 history/NN 으로 옮겨 보존한다.
+#   source: first-worker-call | unit-done | user-confirmed-unaffected | user-confirmed-affected(src-dir 빈 문자열 = 이전 계약을 알 수 없음, 지문 UNKNOWN)
+unit_contract_write_baseline() { # unit-id source src-dir
+  local id="$1" source="$2" src="$3" dir base n=1 l g tree
+  dir="$(unit_contract_dir "$id")"; base="$dir/baseline"
+  mkdir -p "$dir/history" || return 1
+  if [ -d "$base" ]; then
+    while [ -e "$dir/history/$(printf '%02d' "$n")" ]; do n=$((n + 1)); done
+    mv "$base" "$dir/history/$(printf '%02d' "$n")" || return 1
+    [ ! -f "$dir/contract.json" ] || cp "$dir/contract.json" "$dir/history/$(printf '%02d' "$n")/contract.json" || return 1
+  fi
+  mkdir -p "$base" || return 1
+  if [ -n "$src" ]; then
+    cp "$src/contract.txt" "$src/global.txt" "$base/" || return 1
+    l="$(sha256_stdin < "$base/contract.txt")"; g="$(sha256_stdin < "$base/global.txt")"
+  else
+    : > "$base/contract.txt"; : > "$base/global.txt"; l=UNKNOWN; g=UNKNOWN
+  fi
+  [ -d "$dir/first" ] || cp -R "$base" "$dir/first" || return 1
+  tree="$(snapshot_worktree_tree)" || return 1
+  jq -n --argjson v "$UNIT_CONTRACT_VERSION" --arg id "$id" --arg l "$l" --arg g "$g" --arg fp "$(unit_contract_fingerprint_of "$l" "$g")" \
+    --arg source "$source" --arg tree "$tree" --argjson prov "$(unit_contract_provenance)" --arg now "$(date '+%FT%T%z')" \
+    '{version:$v, unit_id:$id, local_fingerprint:$l, global_fingerprint:$g, fingerprint:$fp, baseline_source:$source,
+      source_tree:$tree, consensus_provenance:$prov, recorded_at:$now}' > "$dir/contract.json.tmp" && mv "$dir/contract.json.tmp" "$dir/contract.json"
+}
+# 워커 턴(worker-unit.md) 직전: 기준 계약을 확정하고 [UNIT TURN]/[CHANGED CONTRACT] 블록과 worker-contract.json 을 만든다(모델 호출 없음).
+#   kind 는 프롬프트 블록의 비어 있음이 아니라 러너 상태로 정한다 — 이 unit 의 워커 CLI 가 한 번이라도 시작됐으면(worker-before.tree) RESUME.
+#   반환: 0 준비됨 / 1 references 해석 불가(UC_WHY) / 2 과거 진행 흔적은 있는데 기준 스냅샷이 없음(최초 실행으로 오판하지 않는다) / 3 기록 실패
+UNIT_TURN_BLOCK=""; UNIT_CHANGED_CONTRACT_BLOCK=""
+unit_contract_prepare_turn() { # unit-id unit-dir
+  local id="$1" ud="$2" dir meta kind=FIRST prev cur diff_file lines
+  dir="$(unit_contract_dir "$id")"; meta="$dir/contract.json"
+  unit_contract_current "$id" || return 1
+  [ ! -f "$ud/worker-before.tree" ] || kind=RESUME
+  cur="$(unit_contract_fingerprint_of "$UC_LOCAL" "$UC_GLOBAL")"
+  if ! jq -e --argjson v "$UNIT_CONTRACT_VERSION" '.version==$v' "$meta" >/dev/null 2>&1; then
+    if [ "$kind" = RESUME ] || [ -f "$ud/worker-result.json" ] || [ -f "$ud/done.json" ]; then return 2; fi
+    unit_contract_write_baseline "$id" first-worker-call "$UC_DIR" || return 3
+  elif [ "$kind" = FIRST ] && [ "$(jq -r '.fingerprint' "$meta")" != "$cur" ]; then
+    # 스냅샷만 남기고 워커 CLI 는 시작되지 않았다(호출 직전 중단) — 워커가 본 적 없는 계약과의 diff 는 의미가 없으므로 최초 스냅샷을 현재로 다시 잡는다
+    unit_contract_write_baseline "$id" first-worker-call "$UC_DIR" || return 3
+  fi
+  prev="$(jq -r '.fingerprint' "$meta")"
+  diff_file="$ud/changed-contract.diff"
+  {
+    diff -u -L "previous/contract.txt" -L "current/contract.txt" "$dir/baseline/contract.txt" "$UC_DIR/contract.txt" || true
+    diff -u -L "previous/global.txt" -L "current/global.txt" "$dir/baseline/global.txt" "$UC_DIR/global.txt" || true
+  } > "$diff_file.tmp" && mv "$diff_file.tmp" "$diff_file" || return 3
+  lines="$(wc -l < "$diff_file" | tr -d ' ')"
+  UNIT_TURN_BLOCK="kind=$kind
+unit_id=$id
+previous_contract_fingerprint=$prev
+current_contract_fingerprint=$cur"
+  if [ "$prev" = "$cur" ]; then
+    UNIT_CHANGED_CONTRACT_BLOCK="none"
+  elif [ "$(jq -r '.local_fingerprint' "$meta")" = UNKNOWN ]; then
+    UNIT_CHANGED_CONTRACT_BLOCK="이 unit 의 이전 계약 스냅샷이 없다(이 기능 이전의 산출물이고 사용자가 '영향 있음'으로 확정했다) — 무엇이 바뀌었는지 diff 로 줄 수 없다. 현재 계약 전문: $UC_DIR/contract.txt, $UC_DIR/global.txt. 두 파일 전체를 읽고 기존 구현 전체를 현재 계약과 대조하라."
+  elif [ "$lines" -le "$UNIT_CONTRACT_DIFF_MAX_LINES" ]; then
+    UNIT_CHANGED_CONTRACT_BLOCK="$(cat "$diff_file")
+(위가 전체 diff 다 — 파일: $diff_file. previous = 이 unit 의 기준 계약, current = 지금 유효한 계약)"
+  else
+    UNIT_CHANGED_CONTRACT_BLOCK="변경 계약 diff 가 $lines 줄이라 프롬프트에 싣지 않았다(일부만 잘라 보여 주지 않는다). 전체 diff: $diff_file — 구현 전에 이 파일 **전체**를 읽어라. 이전 계약 전문: $dir/baseline/, 현재 계약 전문: $UC_DIR/. 파일을 끝까지 읽을 수 없으면 구현하지 말고 undecided(kind=DOC_GAP, decision_needed 에 '변경 계약 diff 를 읽을 수 없음')로 보고하라 — 사람이 직접 확인한다."
+  fi
+  jq -n --arg id "$id" --arg kind "$kind" --arg l "$UC_LOCAL" --arg g "$UC_GLOBAL" --arg fp "$cur" --arg prev "$prev" --arg now "$(date '+%FT%T%z')" \
+    '{unit_id:$id, kind:$kind, local_fingerprint:$l, global_fingerprint:$g, fingerprint:$fp, previous_fingerprint:$prev, recorded_at:$now}' \
+    > "$ud/worker-contract.json.tmp" && mv "$ud/worker-contract.json.tmp" "$ud/worker-contract.json" || return 3
+}
+# 마지막 워커 턴이 받은 계약 == 현재 계약인가. 과거 DONE 결과로 워커 없이 테스트부터 재개할 때와 done.json 확정 직전에 본다.
+unit_worker_contract_current() { # unit-id unit-dir
+  [ -f "$2/worker-contract.json" ] || return 1
+  unit_contract_current "$1" || return 1
+  [ "$(jq -r '.fingerprint // ""' "$2/worker-contract.json")" = "$(unit_contract_fingerprint_of "$UC_LOCAL" "$UC_GLOBAL")" ]
+}
+# 기준 계약과 달라진 **이 unit 의** 차이가 '구현 후 gap 의 사용자 해결'로 설명되는가. 유효한 해결 기록이 있다는 것만으로는 부족하다 —
+# 그 해결이 이 unit 의 이 계약 변경을 낳은 것이어야 한다. 네 조건을 모두 만족할 때만 true:
+#   ① 해결 provenance 가 현재 입력에 유효(doc_gap_resolved_current)하고 리뷰 DOC_GAP(또는 verify 의 worker-fix 미결정)이다. unit 워커 gap(unit_id 있음)은 그 unit 을 다시 돌리므로 해당하지 않는다.
+#   ② 전역 입력(global.txt)은 기준 그대로다 — gap 해결은 request·conventions·design·묶이지 않은 결정을 바꾸지 않는다([review-issue=…]/[worker-gap=…] 줄은 전역 계약에 들어가지 않는다).
+#   ③ local 계약의 차이가 approach.md 를 가리키는 reference 블록 안에만 있다(해결 범위 = approach.md 반영 + decisions.md 추가). implementation·design 절이나 unit JSON 이 달라졌으면 gap 해결이 아니다.
+#   ④ 이 unit 이 그 gap 과 연결돼 있다: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 이 unit 의 scope(files / new_file_roots) 안이다.
+#   ⑤ 달라진 approach 절 **각각**이 그 gap 의 해결임이 명시돼 있다: 절 본문에 연결된 gap 의 tag(`[review-issue=<id>]` / `[worker-gap=review-gap#<n>]`)가 있다.
+#      절과 gap 의 관계를 코드가 추정하지 않는다 — 표시가 없는 절 변경은 gap 해결로 확정할 수 없으므로 자동 승인하지 않고 stale 로 사용자에게 돌아간다.
+# 그 해결의 구현자는 unit 워커가 아니라 review-gap 워커(→ 전체 리뷰)다. gap 과 무관한 unit 의 approach 절까지 같이 고쳤으면 그 unit 은 정상 stale 이다(변경 계약으로 다시 돈다).
+# gap 과 연결된 unit 인가: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 unit scope(files / new_file_roots) 안인 gap 의 tag 목록(JSON 배열).
+# new_file_roots 는 manifest 가 'src/gen/' 처럼 끝 슬래시를 달 수 있으므로 정규화한 뒤 접두 비교한다('src/gen//' 와 비교해 정상 경로를 놓치지 않게).
+_unit_gap_linked_tags() { # unit-json
+  jq -c --argjson u "$1" '
+    ($u.scope.files // []) as $f | [($u.scope.new_file_roots // [])[] | sub("/+$"; "")] as $r
+    | [.gaps[]
+        | select([((.refs // []) + [.location // ""])[] | select(type=="string") | split(", ")[] | sub(":L?[0-9]+(-L?[0-9]+)?$"; "") | select(length>0)]
+                 | any(.[]; . as $p | any($f[]; . == $p) or any($r[]; . as $root | $p | startswith($root + "/"))))
+        | .tag]' "$DOC_GAP_RESUME"
+}
+unit_contract_drift_covered() { # unit-id
+  local id="$1" dir uj tags
+  doc_gap_resolved_current || return 1
+  [ "$(doc_gap_field '.origin')" = review ] || [ -z "$(doc_gap_field '.unit_id')" ] || return 1
+  dir="$(unit_contract_dir "$id")"
+  [ -f "$dir/baseline/contract.txt" ] && [ -f "$dir/contract.json" ] || return 1
+  unit_contract_current "$id" || return 1
+  [ "$(jq -r '.global_fingerprint // ""' "$dir/contract.json")" = "$UC_GLOBAL" ] || return 1
+  uj="$(unit_json "$id")"; [ -n "$uj" ] || return 1
+  tags="$(_unit_gap_linked_tags "$uj")" || return 1
+  [ "$tags" != "[]" ] || return 1
+  # 계약을 '=== … ===' 머리줄 단위 블록으로 나눠 기준과 현재를 블록별로 대조한다. 달라진 블록은 전부 ③ approach.md reference 블록이어야 하고,
+  # ⑤ 그 블록마다 연결된 gap 의 tag 가 본문에 있어야 한다 — 같은 unit 의 다른 approach 절(B04)을 같이 고친 것까지 덮지 않는다.
+  jq -ne --rawfile a "$dir/baseline/contract.txt" --rawfile b "$UC_DIR/contract.txt" --argjson tags "$tags" '
+    def blocks: split("\n") | reduce .[] as $l ({cur:"", m:{}};
+      if ($l|test("^=== .* ===$")) then .cur=$l | .m[$l]="" else .m[.cur] = ((.m[.cur] // "") + $l + "\n") end) | .m;
+    ($a|blocks) as $A | ($b|blocks) as $B
+    | [ (($A + $B) | keys[]) | select($A[.] != $B[.]) ] as $changed
+    | ($changed|length) > 0
+      and all($changed[]; . as $k
+            | ($k|test("^=== reference: approach\\.md(#.*)? ===$"))
+              and (($B[$k] // "") as $body | any($tags[]; . as $t | $body | contains("[" + $t + "]"))))' >/dev/null 2>&1
+}
+# 완료 체크포인트가 유효한가: run-state 는 힌트일 뿐이고 실제 판정은 units/<id>/done.json 의 내용 + 현재 spec 지문 + **현재 유효 계약 지문** 교차 확인이다.
+# 문서가 달라졌는데 unit JSON 이 같다는 이유로 DONE 을 재사용하지 않는다. done.json 포맷(version 2)만 맞춘다고 유효해지지 않는다 — 기준 스냅샷과 현재 계약이 같아야 한다.
 unit_done_valid() { # unit-id
-  local done="$WORK_DIR/units/$1/done.json"
+  local done="$WORK_DIR/units/$1/done.json" st
   [ -f "$done" ] || return 1
-  jq -e --arg id "$1" --arg h "$(unit_spec_hash "$1")" \
-    '.version==1 and .unit_id==$id and .spec_hash==$h and .worker_status=="DONE" and .targeted_test_status=="PASS"' \
-    "$done" >/dev/null 2>&1
+  jq -e --arg id "$1" --arg h "$(unit_spec_hash "$1")" --argjson v "$UNIT_DONE_VERSION" \
+    '.version==$v and .unit_id==$id and .spec_hash==$h and .worker_status=="DONE" and .targeted_test_status=="PASS"
+     and (.unit_contract_fingerprint|type=="string" and length>0)' "$done" >/dev/null 2>&1 || return 1
+  [ "$(jq -r '.unit_contract_fingerprint' "$done")" = "$(jq -r '.fingerprint // ""' "$(unit_contract_dir "$1")/contract.json" 2>/dev/null)" ] || return 1
+  st="$(unit_contract_status "$1")"
+  case "$st" in
+    CURRENT) return 0;;
+    STALE|IMPACT_REQUIRED) unit_contract_drift_covered "$1";;
+    *) return 1;;
+  esac
 }
 all_units_done() { local id; for id in $(unit_ids); do unit_done_valid "$id" || return 1; done; }
 
@@ -1101,7 +1398,12 @@ consensus_docs_for() { # design | impl
 # [USER-QUESTION] 의 의존성 범위(scope) — downstream 은 upstream 결정을 상속하지만 upstream 은 downstream 결정을 보지 않는다:
 #   design ← [USER-QUESTION][scope=design]
 #   impl   ← [USER-QUESTION][scope=design] + [USER-QUESTION][scope=impl]
-# 그래서 impl 합의 중 사용자가 검증자 요구를 기각한 결정(scope=impl)은 이미 PASS 한 design 을 무효화하지 않는다.
+# scope 는 질문이 '발생한 단계'가 아니라 그 결정이 **처음 영향을 주는 단계**다:
+#   scope=design : 요구·외부 동작·설계(design.md)에 영향을 주는 결정 — impl 합의·워커·리뷰 도중에 나왔어도 design 이다.
+#   scope=impl   : 합의된 설계는 그대로이고 구현 수단(implementation.md·approach.md·unit 분할·범위)에만 영향을 주는 결정.
+# 그래서 impl 합의 중 사용자가 검증자 요구를 기각한 결정(scope=impl)은 이미 PASS 한 design 을 무효화하지 않고, 늦게 나온 제품 요구(scope=design)는
+# design PASS·impl upstream 지문을 깨서 정상 재합의를 거친다. scope=impl 전부를 design 검증자에게 넘기지 않는다(단계 격리).
+# 이미 기록된 줄의 scope 를 문구로 추정해 재분류하지 않는다 — 새 규칙은 앞으로 기록하는 결정에 적용된다.
 # scope 없는 옛 형식 `- [USER-QUESTION] ...` 은 어느 단계의 결정인지 코드가 추론할 수 없으므로 여기서 추정하지 않는다 —
 # 러너·합의 루프가 LLM 호출 전에 DECISION_SCOPE_REQUIRED 로 멈추고 사용자가 태그를 명시한다(consensus_unscoped_user_decisions).
 _fingerprint_files() { # file... → NUL 구분 내용 스트림
@@ -1115,16 +1417,21 @@ consensus_unscoped_user_decisions() {
   [ -f "$WORK_DIR/decisions.md" ] || return 0
   grep -nE '^[[:space:]]*- \[USER-QUESTION\]' "$WORK_DIR/decisions.md" | grep -vE '^[0-9]+:[[:space:]]*- \[USER-QUESTION\]\[scope=(design|impl)\]' || true
 }
-# target 이 보는 사용자 결정 줄만 → NUL 구분 스트림 (지문 입력). [round N] ACCEPT/REJECT 같은 합의 이력은 넣지 않는다.
-consensus_user_decisions_for() { # design | impl
+# target 이 보는 확정 사용자 결정 줄(한 줄 하나, 없으면 빈 출력). **지문과 검증자 프롬프트 입력이 이 함수 하나를 쓴다** — 검증자가 보지 못한 결정이
+# PASS 지문에 들어가거나, 지문에 없는 결정을 검증자가 보는 일이 없게 한다(consensus-loop 의 reviews/user-decisions-<target>.md 도 이 출력이다).
+consensus_user_decision_lines() { # design | impl
   local pattern
   case "$1" in
     design) pattern='^[[:space:]]*- \[USER-QUESTION\]\[scope=design\]';;
     impl) pattern='^[[:space:]]*- \[USER-QUESTION\]\[scope=(design|impl)\]';;
-    *) echo "[FAIL] consensus_user_decisions_for: 대상은 design 또는 impl 이어야 함: '$1'" >&2; return 1;;
+    *) echo "[FAIL] consensus_user_decision_lines: 대상은 design 또는 impl 이어야 함: '$1'" >&2; return 1;;
   esac
-  printf 'decisions:USER-QUESTION:%s\0' "$1"
   if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "$pattern" "$WORK_DIR/decisions.md" || true; fi
+}
+# 같은 줄 집합 → NUL 구분 스트림 (지문 입력). [round N] ACCEPT/REJECT 같은 합의 이력은 넣지 않는다.
+consensus_user_decisions_for() { # design | impl
+  printf 'decisions:USER-QUESTION:%s\0' "$1"
+  consensus_user_decision_lines "$1" || return 1
   printf '\0'
 }
 # 프로젝트 conventions(해당 worktree 의 CONVENTIONS_FILE) → NUL 구분 스트림 (지문 입력). 경로가 아니라 고정 라벨을 쓴다(내용만 지문에 들어간다).
@@ -1185,16 +1492,139 @@ consensus_pass_current() { # design | impl
   valid_spec_pass_review "$review"
 }
 
+# ---------- JSON Schema 검사 (모델 출력의 구조 검증 — 조건부 필드 규칙과 분리) ----------
+# schema-file 로 json-file 을 검사해 위반 배열 [{path, observed, expected}] 을 낸다(통과면 []). 반환 1 = 실행 실패(JSON 파싱 불가 등).
+# 지원 keyword: type(object|array|string|integer|number|boolean) · properties · required · additionalProperties:false · enum · minItems · minLength · items.
+# 이 저장소의 스키마가 쓰는 keyword 전부다 — 스키마에 다른 keyword(oneOf·pattern 등)를 추가하면 여기에도 추가한다(조용히 무시되는 검사를 만들지 않는다).
+json_schema_violations() { # schema-file json-file
+  jq -c --slurpfile schema "$1" '
+    def typeok($t): if $t=="object" then type=="object" elif $t=="array" then type=="array" elif $t=="string" then type=="string"
+      elif $t=="integer" then (type=="number" and . == floor) elif $t=="number" then type=="number" elif $t=="boolean" then type=="boolean" else true end;
+    def v($s; $p): . as $d
+      | if ($s.type != null) and ($d | typeok($s.type) | not) then [{path:$p, observed:("type " + ($d|type)), expected:("type " + $s.type)}]
+        else
+          (if ($s.enum != null) and (any($s.enum[]; . == $d) | not) then [{path:$p, observed:($d|tojson), expected:("enum " + ($s.enum|tojson))}] else [] end)
+          + (if ($d|type)=="string" and ($s.minLength != null) and ($d|length) < $s.minLength then [{path:$p, observed:("length " + ($d|length|tostring)), expected:("minLength " + ($s.minLength|tostring))}] else [] end)
+          + (if ($d|type)=="array" then
+               (if ($s.minItems != null) and ($d|length) < $s.minItems then [{path:$p, observed:("items " + ($d|length|tostring)), expected:("minItems " + ($s.minItems|tostring))}] else [] end)
+               + (if $s.items != null then ([range(0; $d|length) as $i | ($d[$i] | v($s.items; $p + "[" + ($i|tostring) + "]"))] | add // []) else [] end)
+             else [] end)
+          + (if ($d|type)=="object" then
+               [($s.required // [])[] | select(. as $k | $d | has($k) | not) | {path:($p + "." + .), observed:"missing", expected:"required field"}]
+               + (if $s.additionalProperties == false then [$d | keys[] | select(. as $k | ($s.properties // {}) | has($k) | not) | {path:($p + "." + .), observed:"unexpected field", expected:"additionalProperties false"}] else [] end)
+               + ([($s.properties // {}) | to_entries[] | . as $e | select($d | has($e.key)) | ($d[$e.key] | v($e.value; $p + "." + $e.key))] | add // [])
+             else [] end)
+        end;
+    v($schema[0]; "$")' "$2"
+}
+
+# ---------- 리뷰가 기준으로 읽는 계약 문서의 내용 지문 (리뷰 루프의 입력 지문과 승인 캐시가 같이 쓴다) ----------
+# prompts/reviewer.md 의 기준 문서: request · design · implementation · approach · decisions. 파일별 SHA256(없으면 ABSENT)의 객체를 낸다.
+#   (인자 없음)  decisions.md 전체 — 그 리뷰 호출의 정확한 입력(Round 2 는 수정자의 [fix round N] 줄까지 읽는다). 무효 출력의 로컬 재검증용.
+#   approval     decisions.md 는 사용자 결정([USER-QUESTION]) 줄만 — 승인 뒤에 쌓이는 판정 기록(ACCEPT/REJECT 이력)이 승인을 깨지 않게 하되,
+#                계약(문서 본문·사용자 결정)이 바뀌면 그 APPROVE 는 다른 계약에 대한 승인이다.
+#                worktree conventions.md 의 내용 해시(없으면 ABSENT)도 넣는다 — 리뷰어는 [PROJECT CONVENTIONS] 본문과 그 파일을 기준으로 컨벤션 위반을 판정하므로,
+#                컨벤션이 바뀌거나 새로 생기거나 없어지면 과거 APPROVE 는 다른 기준에 대한 승인이다(무효 출력용 지문은 conventions_sha256 을 따로 든다 — 두 지문은 분리 유지).
+REVIEW_CONTRACT_DOCS="request.md design.md implementation.md approach.md decisions.md"
+review_contract_docs_json() { # [approval]
+  local mode="${1:-}" docs='{}' d h key
+  for d in $REVIEW_CONTRACT_DOCS; do
+    h=ABSENT; key="$d"
+    if [ "$d" = decisions.md ] && [ "$mode" = approval ]; then
+      key="decisions.md#USER-QUESTION"
+      if [ -f "$WORK_DIR/$d" ]; then h="$({ grep -E '^[[:space:]]*- \[USER-QUESTION\]' "$WORK_DIR/$d" || true; } | sha256_stdin)" || return 1; fi
+    elif [ -f "$WORK_DIR/$d" ]; then
+      h="$(sha256_stdin < "$WORK_DIR/$d")" || return 1
+    fi
+    docs="$(jq -Sc --arg d "$key" --arg h "$h" '. + {($d):$h}' <<< "$docs")" || return 1
+  done
+  if [ "$mode" = approval ]; then
+    h=ABSENT
+    if [ -f "${CONVENTIONS_FILE:-}" ]; then h="$(sha256_stdin < "$CONVENTIONS_FILE")" || return 1; fi
+    docs="$(jq -Sc --arg h "$h" '. + {"conventions.md":$h}' <<< "$docs")" || return 1
+  fi
+  printf '%s' "$docs"
+}
+# 승인 체크포인트가 든 계약 문서 지문 == 현재 계약 문서 지문인가. 필드가 없는 옛 체크포인트는 같다고 증명할 수 없으므로 false 다.
+review_approval_docs_current() { # checkpoint-file
+  local cur; cur="$(review_contract_docs_json approval)" || return 1
+  [ "$(jq -Sc '.contract_docs_sha256 // null' "$1" 2>/dev/null)" = "$cur" ]
+}
+
+# ---------- 구현 리뷰 fix_ref 계약 (프롬프트·스키마 설명·루프 검사가 같은 문장을 쓴다) ----------
+# 이 문장은 prompts/reviewer.md 와 schemas/impl-review.schema.json 의 fix_ref 설명에 글자 그대로 들어 있고(install-smoke 가 대조),
+# impl-review-loop.sh 가 Round 2+ 지시문과 진단의 expected 에 그대로 쓴다. 문장을 바꾸면 세 곳을 함께 바꾸고 REVIEWER_CONTRACT_VERSION 을 올린다.
+REVIEW_FIX_REF_RULE='fix_ref = 수정자의 직전 라운드 수정으로 실제 변경된 저장소 상대 소스 파일 경로:L시작-L끝 — fix-diff-round-N.patch 같은 패치 파일 경로가 아니고, 줄 번호는 패치 파일의 행 번호가 아니라 수정 후 소스 파일의 행 번호이며, 그 범위는 수정이 바꾼 hunk 와 겹쳐야 한다(변경이 삭제뿐이면 수정 후 파일에서 삭제 지점에 맞닿은 줄을 가리킨다)'
+# fix_ref 파싱: "<path>\t<start>\t<end>" 출력. 반환 1 = 형식(^(.+):L([1-9][0-9]*)-L([1-9][0-9]*)$) 위반, 2 = start > end, 3 = 경로가 canonical 상대 경로가 아님
+# (feature-scope 와 같은 규칙: 절대 경로·선행 ./ ·후행 / ·빈/"."/".." 세그먼트 금지).
+review_fix_ref_parse() { # fix_ref
+  local path s e
+  [[ "$1" =~ ^(.+):L([1-9][0-9]*)-L([1-9][0-9]*)$ ]] || return 1
+  path="${BASH_REMATCH[1]}"; s="${BASH_REMATCH[2]}"; e="${BASH_REMATCH[3]}"
+  [ "$s" -le "$e" ] || return 2
+  case "$path" in /*|./*|*/) return 3;; esac
+  case "/$path/" in *//*|*/./*|*/../*) return 3;; esac
+  printf '%s\t%s\t%s' "$path" "$s" "$e"
+}
+# 두 tree 사이에서 path 의 **새 버전** hunk 범위를 "start end" 줄로 낸다(git tree 양쪽 버전 기준 — .patch 텍스트의 줄 번호가 아니다).
+#   추가·수정 hunk(+c,d  d≥1): [c, c+d-1].  삭제뿐인 hunk(+c,0): 삭제 지점에 맞닿은 새 파일의 줄 [max(c,1), c+1] 이 anchor 다.
+#   textual hunk 가 없는 변경(binary·mode 만)은 아무것도 내지 않는다 — 호출자(review_fix_ref_violation)가 "hunk 없음" 을 위반으로 다룬다.
+review_fix_hunk_ranges() { # prev-tree cur-tree path
+  git diff --no-renames -U0 "$1" "$2" -- ":(literal)$3" \
+    | sed -nE 's/^@@ -[0-9]+(,[0-9]+)? \+([0-9]+)(,([0-9]+))? @@.*/\2 \4/p' \
+    | while read -r c d; do
+        d="${d:-1}"
+        if [ "$d" -eq 0 ]; then printf '%s %s\n' "$(( c > 0 ? c : 1 ))" "$(( c + 1 ))"; else printf '%s %s\n' "$c" "$(( c + d - 1 ))"; fi
+      done
+}
+# fix_ref 하나를 실제 수정(prev-tree → cur-tree, changed-files-list = 범위 안에서 바뀐 경로 목록 파일)과 대조한다.
+# 위반이면 "<observed 설명>" 한 줄을 내고 1, 통과면 출력 없이 0. 증거를 보지 않는 자동 교정은 하지 않는다(fail-closed).
+review_fix_ref_violation() { # fix_ref prev-tree cur-tree changed-files-list
+  local parsed path s e rc=0 hs he hunks hit=0
+  parsed="$(review_fix_ref_parse "$1")" || rc=$?
+  case "$rc" in
+    1) echo "형식이 '<저장소 상대 경로>:L<시작>-L<끝>' 이 아님"; return 1;;
+    2) echo "줄 범위의 시작이 끝보다 큼"; return 1;;
+    3) echo "경로가 canonical 저장소 상대 경로가 아님(절대 경로·'./'·'..'·빈 세그먼트 금지)"; return 1;;
+  esac
+  IFS=$'\t' read -r path s e <<< "$parsed"
+  if ! grep -qxF -- "$path" "$4"; then
+    case "$path" in
+      *.patch|*.diff|"$WORK_DIR"/*) echo "경로가 패치·파이프라인 산출물 파일임 — 직전 수정으로 바뀐 소스 파일이 아님";;
+      *) echo "경로가 직전 수정(prev tree → 현재 tree)으로 바뀐 파일 목록에 없음";;
+    esac
+    return 1
+  fi
+  hunks="$(review_fix_hunk_ranges "$2" "$3" "$path")"
+  if [ -z "$hunks" ]; then
+    # binary·파일 mode 만 바뀐 변경: 줄 단위 hunk 가 없다. "범위는 수정이 바꾼 hunk 와 겹쳐야 한다" 를 만족하는 줄 범위가 존재하지 않으므로
+    # 변경 파일 일치만으로 임의의 줄 번호(L999999 등)를 통과시키지 않는다(fail-closed).
+    echo "'$path' 의 직전 수정에는 줄 단위 hunk 가 없음(binary 또는 파일 mode 만 변경) — 겹칠 hunk 가 없어 어떤 줄 범위도 이 파일의 fix_ref 가 될 수 없다"
+    return 1
+  fi
+  while read -r hs he; do
+    if [ "$s" -le "$he" ] && [ "$e" -ge "$hs" ]; then hit=1; break; fi
+  done <<< "$hunks"
+  [ "$hit" -eq 1 ] && return 0
+  echo "줄 범위 L$s-L$e 가 수정 후 '$path' 의 변경 hunk($(printf '%s' "$hunks" | awk '{printf "%sL%s-L%s", (NR>1?", ":""), $1, $2}'))와 겹치지 않음"
+  return 1
+}
+
 # 현재 작업 트리에 대해 유효한 구현 승인이 있는가: review-impl.json 이 APPROVE 이고 포맷·계약 버전이 맞고,
 # 작업 트리 지문이 같고, 리뷰 경로가 attempt/round 와 일치하며 실제 APPROVE 리뷰이고, approved.fingerprint 도 같은 값이어야 한다.
 # 러너가 verify stage 로 바로 들어가기 전에 쓴다 — approved.fingerprint 파일 존재만으로 리뷰 루프의 검사를 우회하지 않게.
+# 그 APPROVE 를 통과시킨 검사기 버전(checker_version)도 현재와 같아야 한다 — 다르면(검사기만 고친 경우 포함) 여기서는 무효로 보고 review stage 로 보낸다.
+# 리뷰 루프가 저장된 승인 출력을 현재 검사기로 로컬 재검증(모델 0회)해 통과하면 체크포인트의 checker_version 을 갱신하고, 무효면 새 attempt 로 리뷰한다.
+# 승인 당시 리뷰어가 읽은 계약 문서(contract_docs_sha256 — request/design/implementation/approach 본문 + decisions.md 의 사용자 결정 줄 + conventions.md 내용)도 현재와 같아야 한다 —
+# 코드(작업 트리 지문)가 그대로여도 계약이 바뀌었으면(재합의 포함) 그 APPROVE 는 다른 계약에 대한 승인이다. 다르면 무효 → 리뷰 루프가 새 attempt 로 리뷰한다.
 impl_approval_current() {
   local checkpoint="$WORK_DIR/review-impl.json" fp review attempt round
   [ -f "$checkpoint" ] && [ -f "$WORK_DIR/approved.fingerprint" ] || return 1
-  jq -e --argjson v "$REVIEWER_CONTRACT_VERSION" --argjson cv "$REVIEW_CHECKPOINT_VERSION" \
-    '.version==$cv and .contract_version==$v and .next_step=="APPROVE"' "$checkpoint" >/dev/null 2>&1 || return 1
+  jq -e --argjson v "$REVIEWER_CONTRACT_VERSION" --argjson cv "$REVIEW_CHECKPOINT_VERSION" --argjson kv "$REVIEW_CHECKER_VERSION" \
+    '.version==$cv and .contract_version==$v and .checker_version==$kv and .next_step=="APPROVE"' "$checkpoint" >/dev/null 2>&1 || return 1
   fp="$(jq -r '.worktree_fingerprint // ""' "$checkpoint")"
   [ -n "$fp" ] && [ "$fp" = "$(cat "$WORK_DIR/approved.fingerprint")" ] && [ "$fp" = "$(compute_approval_fingerprint)" ] || return 1
+  review_approval_docs_current "$checkpoint" || return 1
   review="$(jq -r '.review // ""' "$checkpoint")"
   attempt="$(jq -r '.attempt // 0' "$checkpoint")"; round="$(jq -r '.round // 0' "$checkpoint")"
   [ "$review" = "$WORK_DIR/reviews/impl-attempt-$(printf '%02d' "$attempt")/reviewer-round-$(printf '%02d' "$round").json" ] || return 1
@@ -1366,7 +1796,8 @@ _doc_gap_approach_hash() { if [ -f "$WORK_DIR/approach.md" ]; then sha256_stdin 
 _doc_gap_frozen_hash() { _fingerprint_files "$WORK_DIR/implementation.md" "$WORK_DIR/implementation-units.json" "$WORK_DIR/feature-scope.json" | sha256_stdin; }
 _doc_gap_decisions_lines() { if [ -f "$WORK_DIR/decisions.md" ]; then wc -l < "$WORK_DIR/decisions.md" | tr -d ' '; else echo 0; fi; }
 _doc_gap_decisions_prefix_hash() { # n → decisions.md 앞 n 줄의 해시
-  if [ -f "$WORK_DIR/decisions.md" ]; then head -n "$1" "$WORK_DIR/decisions.md" | sha256_stdin; else printf 'MISSING'; fi
+  # n=0(gap 기록 시점에 decisions.md 가 비어 있음)은 빈 prefix 다 — BSD head 는 -n 0 을 오류로 거부하므로 따로 다룬다(해시는 빈 입력의 것으로 같다)
+  if [ ! -f "$WORK_DIR/decisions.md" ]; then printf 'MISSING'; elif [ "$1" -eq 0 ]; then printf '' | sha256_stdin; else head -n "$1" "$WORK_DIR/decisions.md" | sha256_stdin; fi
 }
 # 해결 범위 검사: frozen 문서 불변 + decisions.md 는 기록 시점 내용을 prefix 로 유지(append-only). 0 = OK, 1 = 범위 밖 변경.
 doc_gap_resolution_scope_ok() {
@@ -1420,6 +1851,12 @@ doc_gap_next_step() { [ -f "$DOC_GAP_RESUME" ] && jq -r --argjson v "$DOC_GAP_RE
 doc_gap_pending() { case "$(doc_gap_next_step)" in WAITING_USER|WORKER_PENDING|REVIEW_PENDING) return 0;; *) return 1;; esac; }
 doc_gap_set_step() { # next_step [source_tree]
   jq --arg s "$1" --arg t "${2:-}" --arg now "$(date '+%FT%T%z')" '.next_step=$s | (if $t != "" then .source_tree=$t else . end) | .updated_at=$now' \
+    "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+# 상위 계약이 정상 재합의로 다시 확정되면(새 impl PASS / 새 사용자 수리) 그 전 문서 위에서 기록된 pending gap 은 더 이상 재개 대상이 아니다.
+# 지우지 않고 SUPERSEDED 로 남긴다(근거 보존) — doc_gap_pending·doc_gap_resolved_current 모두 false 가 되고, 그 unit 은 변경 계약(CHANGED CONTRACT)으로 다시 돈다.
+doc_gap_supersede() { # why
+  jq --arg why "$1" --arg now "$(date '+%FT%T%z')" '.superseded_from=.next_step | .next_step="SUPERSEDED" | .superseded_reason=$why | .updated_at=$now' \
     "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
 }
 _doc_gap_tag_regex() { printf '%s' "$1" | sed 's/[][\.*^$/]/\\&/g'; }

@@ -55,6 +55,7 @@ mkdir -p src && for u in 01 02 03; do echo "base $u" > "src/u$u.txt"; done; echo
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 mkdir -p .agent-work/reviews
 for doc in request design implementation approach; do printf '# %s\n' "$doc" > ".agent-work/$doc.md"; done
+printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' >> .agent-work/implementation.md   # unit references(implementation.md#NN)가 가리키는 절 — 러너가 그 절 본문으로 unit 별 계약 변경을 판정한다
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt","src/u02.txt","src/u03.txt","src/shared.txt"],"new_file_roots":["src/gen/"]}\n' > .agent-work/feature-scope.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"
@@ -232,7 +233,8 @@ grep -q 'UNIT-REVIEWER-CALLED\|^fixer ' "$MOCK_LOG" && fail "G: unit 사이에 �
 for u in 01-intake 02-drop 03-reassign; do
   d=".agent-work/units/$u"
   [ -f "$d/done.json" ] && [ -f "$d/before.tree" ] && [ -f "$d/worker-before.tree" ] && [ -f "$d/worker-after.tree" ] && [ -f "$d/worker-result.json" ] && [ -f "$d/targeted-test.log" ] || fail "A: $u 체크포인트 파일 누락"
-  jq -e '.version==1 and .worker_status=="DONE" and .targeted_test_status=="PASS" and (has("convention_status")|not)' "$d/done.json" >/dev/null || fail "A: $u done.json 계약 불일치"
+  jq -e '.version==2 and .worker_status=="DONE" and .targeted_test_status=="PASS" and (.unit_contract_fingerprint|length)>0 and (has("convention_status")|not)' "$d/done.json" >/dev/null || fail "A: $u done.json 계약 불일치"
+  [ "$(jq -r .unit_contract_fingerprint "$d/done.json")" = "$(jq -r .fingerprint "$d/contract/contract.json")" ] && [ -f "$d/contract/first/contract.txt" ] && [ -f "$d/worker-contract.json" ] || fail "A: $u 계약 스냅샷(contract/)·worker-contract.json 이 done.json 과 맞지 않음"
   ls "$d" | grep -q 'convention' && fail "G: $u 에 convention 산출물이 생김"
 done
 [ "$(tail -1 src/shared.txt)" = "shared by 02-drop" ] && grep -q 'shared by 01-intake' src/shared.txt || fail "A: 같은 파일의 순차 수정이 누적되지 않음"

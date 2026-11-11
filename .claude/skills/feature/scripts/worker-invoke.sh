@@ -351,10 +351,21 @@ run_worker() { # prompt-file [unit-dir]
   if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
   # REVIEW_FILE / GAP_CONTEXT 는 review-gap 호출(worker-review-gap.md)에서 호출자가 채운다. [Modified] unit 워커 턴(worker-unit.md)에서는
   # 이 unit 의 해결된 미결정(doc-gap-resume.json ↔ decisions.md, ID 연결)만 GAP_CONTEXT 로 들어가고 그 외(정상 최초 호출)는 빈 문자열이다.
-  local gap_context="${GAP_CONTEXT:-}" resolved_gaps=""
+  local gap_context="${GAP_CONTEXT:-}" resolved_gaps="" unit_turn="" changed_contract="" uc_rc=0
   if [ -n "$unit_dir" ]; then
     rm -f "$unit_dir/resolved-gaps.json"
     if [ "$tag" = worker ]; then
+      # [UNIT TURN]/[CHANGED CONTRACT]: 이 턴이 최초인지 재개인지, 기준 계약 대비 무엇이 바뀌었는지를 러너 상태(이전 CLI 시작 흔적·계약 스냅샷)와
+      # 실제 diff 로 준다 — 세션 기억이나 [RESOLVED GAPS] 의 비어 있음으로 추론하게 두지 않는다. doc-gap-resume.json 이 archive 된 뒤의 재개도 여기서 잡힌다.
+      unit_contract_prepare_turn "$unit_id" "$unit_dir" || uc_rc=$?
+      case "$uc_rc" in
+        0) ;;
+        1) stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "unit $unit_id: references 를 현재 문서에서 해석할 수 없다 — $UC_WHY. '영향 없음'으로 넘어가지 않고 워커를 부르지 않았다. heading 을 복구하거나 references 를 정확한 절로 고친 뒤 재실행";;
+        2) stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "unit $unit_id: 이전 워커 호출 흔적은 있는데 계약 스냅샷이 없다(이 기능 이전의 산출물) — 최초 실행으로 오판하지 않는다. 그대로 재실행하면 러너가 워커 호출 전(모델 0회)에 확정 대상 지문을 $WORK_DIR/unit-contract-impact.request.json 과 중단 사유로 내준다 — 그 값을 넣어 $UNIT_CONTRACT_IMPACT_FILE 에 {\"version\":2,\"target_fingerprint\":\"<내준 값>\",\"affected_units\":[…],\"unaffected_units\":[…]} 로 이 unit 을 확정(unaffected = 현재 문서가 첫 시도 당시와 같음 / affected = 달라졌을 수 있음 — 현재 계약 전체를 다시 대조)한 뒤 다시 실행";;
+        *) env_error "unit $unit_id: 계약 스냅샷·변경 diff 기록 실패";;
+      esac
+      unit_turn="$UNIT_TURN_BLOCK"; changed_contract="$UNIT_CHANGED_CONTRACT_BLOCK"
+      log "unit $unit_id: $(printf '%s' "$unit_turn" | head -1) / 변경 계약: $([ "$changed_contract" = none ] && echo none || echo "$unit_dir/changed-contract.diff ($(wc -l < "$unit_dir/changed-contract.diff" | tr -d ' ') 줄)")"
       resolved_gaps="$(unit_resolved_gaps_json "$unit_id")" || env_error "unit $unit_id: 해결된 미결정 컨텍스트 구성 실패"
       if [ -n "$resolved_gaps" ]; then
         # [Added] 재개 턴은 체크포인트가 기록한 source tree 에서만 시작한다 — 가드 파일(resolved-gap-repeated.json)의 존재와 무관하게,
@@ -370,7 +381,8 @@ run_worker() { # prompt-file [unit-dir]
   fi
   prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$reference_code" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
     UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" REVIEW_FILE="${REVIEW_FILE:-}" GAP_CONTEXT="$gap_context" \
-    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT}')" \
+    UNIT_TURN="$unit_turn" CHANGED_CONTRACT="$changed_contract" \
+    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT} ${UNIT_TURN} ${CHANGED_CONTRACT}')" \
     || env_error "워커 프롬프트 렌더링 실패"
   local stamp raw; stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
   mkdir -p "$out_dir"
@@ -509,7 +521,7 @@ run_worker() { # prompt-file [unit-dir]
     # 같은 워커(unit 이면 그 unit 부터, review-gap 이면 같은 리뷰로)가 바로 다시 돈다. 이 unit 은 완료 처리하지 않는다.
     doc_gap_record_worker "$result" "$unit_id" "${DOC_GAP_REVIEW:-}" "$after_tree" || env_error "doc-gap-resume.json 기록 실패"
     log "워커 미결정 항목 — 사용자 결정 필요:"; doc_gap_report
-    stop_need_user UNDECIDED "워커${unit_id:+ (unit $unit_id)} 의 undecided 항목을 사용자에게 질문 → 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][worker-gap=<key>] <질문> → <답>' 으로 기록 → approach.md 에 결정 반영 → 재실행(검증자·디자이너 없이 ${unit_id:+unit $unit_id 부터 }워커 재개). 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); tag: \(.tag))"] | join(" ; ")')"
+    stop_need_user UNDECIDED "워커${unit_id:+ (unit $unit_id)} 의 undecided 항목을 사용자에게 질문 → 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][worker-gap=<key>] <질문> → <답>' 으로 기록 → approach.md 에 결정 반영 → 재실행(검증자·디자이너 없이 ${unit_id:+unit $unit_id 부터 }워커 재개). 단, 답이 구현 수단이 아니라 요구·외부 동작·설계 자체를 바꾸면 gap 답이 아니라 새 제품 요구다 — request.md 에 '요구 변경/추가' 를 append 하고 design.md 를 고친 뒤 '[USER-QUESTION][scope=design]' 로 기록한다(정상 design → impl 재합의, 이 gap 우회 경로 아님). 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); tag: \(.tag))"] | join(" ; ")')"
   fi
 }
 

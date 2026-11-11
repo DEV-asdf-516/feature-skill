@@ -262,12 +262,14 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # ---------- 검증자 검토: 읽기 전용, 스키마 강제 JSON (CLI 는 VALIDATOR_MODEL 로 라우팅) ----------
   # 공통 계약(validator-review-*.md) 뒤에 프로필 오버레이를 붙인다. 오버레이는 envsubst 를 거치지 않는다(치환 변수 없음).
   # 검증자는 decisions.md 원본을 입력으로 받지 않는다 — 거기에는 디자이너의 [round N] ACCEPT/REJECT 사유가 섞여 있고, "읽되 무시하라" 는 격리가 아니다.
-  # 이 target 의 확정 사용자 결정([USER-QUESTION][scope=…]) 줄만 매 호출 직전에 결정적으로 다시 추린다(지문의 consensus_user_decisions_for 와 같은 범위).
+  # 이 target 의 확정 사용자 결정([USER-QUESTION][scope=…]) 줄만 매 호출 직전에 결정적으로 다시 추린다 — PASS/upstream 지문과 **같은 함수**
+  # (config.sh consensus_user_decision_lines)의 출력이다. 검증자가 보는 결정 집합과 지문에 들어가는 결정 집합이 어긋나면 관련 결정이 빠진 PASS 가 재사용된다.
+  # scope=design(요구·외부 동작·설계에 영향 — 발생 단계와 무관)은 design·impl 양쪽, scope=impl(구현 수단만)은 impl 만 본다.
   # 디자이너와 지문·체크포인트는 계속 decisions.md 원본을 쓴다.
   user_decisions="$WORK_DIR/reviews/user-decisions-$TARGET.md"
-  case "$TARGET" in design) user_decision_scopes='design';; impl) user_decision_scopes='design|impl';; esac
   { printf '# 확정 사용자 결정 (%s 단계 — 아래에 줄이 없으면 확정된 사용자 결정이 없다)\n' "$TARGET"
-    grep -E "^[[:space:]]*- \[USER-QUESTION\]\[scope=($user_decision_scopes)\]" "$WORK_DIR/decisions.md" || true; } > "$user_decisions"
+    consensus_user_decision_lines "$TARGET"; } > "$user_decisions" \
+    || { echo "[FAIL] 확정 사용자 결정 파일 생성 실패: $user_decisions" >&2; exit 1; }
   validator_prompt=$(PROJECT_CONVENTIONS="$PROJECT_CONVENTIONS" WORK_DIR="$WORK_DIR" PREV_CONTEXT="$prev_context" USER_DECISIONS_FILE="$user_decisions" \
     render_prompt "$VALIDATOR_PROMPT_FILE" '${PROJECT_CONVENTIONS} ${WORK_DIR} ${PREV_CONTEXT} ${USER_DECISIONS_FILE}')"$VALIDATOR_OVERLAY"
   # conventions 는 검증자 프롬프트 본문(validator-review-design.md / -impl.md 1행의 ${PROJECT_CONVENTIONS})에 이미 렌더링돼 있으므로 "" 를 넘긴다.
