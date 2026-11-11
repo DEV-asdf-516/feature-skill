@@ -133,7 +133,6 @@ overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFI
 echo "$overlay_sol" | grep -q '^\[VALIDATOR PROFILE: compact\]$' || fail "검증자 프로필: sol 기본값이 compact 가 아님"
 # 모델별 기본 매핑: gpt-6-astra 는 guided 여야 한다(매핑 누락으로 conservative 로 떨어지던 문제), 매핑에 없는 모델만 conservative
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
-[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-5.6-astra 기본값이 guided 가 아님"
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=some-unknown-model VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = conservative ] || fail "검증자 프로필: 매핑에 없는 모델의 기본값이 conservative 가 아님"
 # 배포 기본값: 명시 프로필 guided · effort medium, 그리고 명시 프로필과 그 모델의 매핑 기본값이 서로 모순되지 않는다
 src_validator_profile="$(sed -n 's/^VALIDATOR_PROFILE="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
@@ -357,7 +356,7 @@ impl_start_count="$(grep -c 'impl-review-loop 시작' "$LOG_TARGET/.agent-work/l
   || fail "중첩 tee: impl-review-loop 시작 로그가 ${impl_start_count}회 기록됨 (1회여야 함)"
 
 # 워커 원문 로그를 reviews/에 보존하면서 live.log에도 실시간 전달한다.
-printf '# implementation\n' > "$LOG_TARGET/.agent-work/implementation.md"
+printf '# implementation\n\n## all\n전체 계약\n' > "$LOG_TARGET/.agent-work/implementation.md"   # unit references(implementation.md#all)가 가리키는 절
 printf '# approach\n' > "$LOG_TARGET/.agent-work/approach.md"
 fake_scope "$LOG_TARGET" src/x.txt            # impl PASS 지문에 manifest 가 들어가므로 합의보다 먼저 둔다
 fake_consensus_pass "$LOG_TARGET" impl
@@ -592,18 +591,29 @@ printf 'user edit before feature\n' > "$REVIEW_TARGET/src/b.txt"
 printf 'changed\n' > "$REVIEW_TARGET/src/a.txt"
 printf 'new\n' > "$REVIEW_TARGET/src/new.txt"
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$REVIEW_TARGET/.agent-work/$doc.md"; done
+printf '\n## all\n전체 계약\n' >> "$REVIEW_TARGET/.agent-work/implementation.md"   # unit references(implementation.md#all)가 가리키는 절
 fake_scope "$REVIEW_TARGET" src/a.txt src/new.txt   # b.txt 는 범위 밖 — 리뷰 diff·승인 지문에서 제외된다 (impl PASS 지문에 포함되므로 합의보다 먼저)
 fake_consensus_pass "$REVIEW_TARGET" design
 fake_consensus_pass "$REVIEW_TARGET" impl
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}\n' > "$REVIEW_TARGET/.agent-work/worker-result.json"
-review_issue='{"id":"R-01","action":"FIX_CODE","category":"CONTRACT_VIOLATION","evidence_type":"DIRECT_MISMATCH","basis_refs":["approach.md:L1"],"code_refs":["src/a.txt:L1-L1"],"reachable_scenario":"","impact":"","why_blocks_now":"x","required_outcome":"y","origin":"ROUND_1","previous_issue_id":"","fix_ref":""}'
+review_issue='{"id":"R-01","action":"FIX_CODE","category":"CONTRACT_VIOLATION","evidence_type":"DIRECT_MISMATCH","basis_refs":["approach.md:L1"],"code_refs":["src/a.txt:L1-L1"],"reachable_scenario":"","impact":"","why_blocks_now":"x","required_outcome":"y","origin":"ROUND_1","previous_issue_id":"","fix_ref":"","user_question":"","options":[]}'
 run_review_loop() { # fake-review-json → exit code (stdout 은 run.log)
   printf '%s\n' "$1" > "$REVIEW_SIDE/review.json"
   # 각 사례는 새 리뷰어 호출을 전제한다 — 직전 사례의 APPROVE 체크포인트가 재사용되지 않게 포맷 버전 불일치로 무효화
   printf '{"version":0}\n' > "$REVIEW_TARGET/.agent-work/review-impl.json"
   local rc=0   # 함수 안에서 set ±e 를 토글하지 않는다 — 호출자의 errexit 상태를 바꾼다
-  (cd "$REVIEW_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review.json" FEATURE_LIVE_TEE=1 bash "$REVIEW_SKILL/scripts/impl-review-loop.sh") > "$REVIEW_SIDE/run.log" 2>&1 || rc=$?
+  # --new-attempt: 직전 사례가 REVIEW_OUTPUT_INVALID 기록을 남겼으면 명시적 새 리뷰 시도로 닫는다(없으면 WARN 뿐 — 일반 재실행은 리뷰어 0회로 같은 진단을 돌려준다)
+  (cd "$REVIEW_TARGET" && FAKE_REVIEW="$REVIEW_SIDE/review.json" FEATURE_LIVE_TEE=1 bash "$REVIEW_SKILL/scripts/impl-review-loop.sh" --new-attempt) > "$REVIEW_SIDE/run.log" 2>&1 || rc=$?
   return $rc
+}
+# 리뷰어 출력 계약 위반은 exit 4 / state.json REVIEW_OUTPUT_INVALID / 구조화 진단(rule_id) — ENV_ERROR(exit 1)로 뭉개지지 않는다
+expect_review_invalid() { # 사례-이름 rule_id
+  local rc=0; run_review_loop "$3" || rc=$?
+  [ "$rc" = 4 ] || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "리뷰 루프: $1 — 종료 코드가 4(REVIEW_OUTPUT_INVALID)가 아님 ($rc)"; }
+  [ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = REVIEW_OUTPUT_INVALID ] || fail "리뷰 루프: $1 — state.json 이 REVIEW_OUTPUT_INVALID 가 아님"
+  jq -e --arg r "$2" '.active==true and (.errors|length)>0 and any(.errors[]; .rule_id==$r and has("issue_id") and has("field") and has("observed") and has("expected")) and (.result_sha256|length)==64 and (.input_fingerprint|length)==64' \
+    "$REVIEW_TARGET/.agent-work/reviews/invalid-review.json" >/dev/null || fail "리뷰 루프: $1 — invalid-review.json 에 구조화 진단($2)이 없음: $(cat "$REVIEW_TARGET/.agent-work/reviews/invalid-review.json" 2>/dev/null)"
+  [ ! -f "$REVIEW_TARGET/.agent-work/approved.fingerprint" ] || fail "리뷰 루프: $1 — 무효 출력인데 승인 지문이 생김"
 }
 # (a) APPROVE → exit 0, 승인 지문 생성, diff 에 untracked 신규 파일 포함
 run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}" || fail "리뷰 루프: APPROVE 가 exit 0 이 아님"
@@ -614,17 +624,25 @@ grep -q '리뷰 기준선: 워커 진입 직전 tree' "$REVIEW_SIDE/run.log" || 
 # 세션은 stage/attempt 단위 — 리뷰어 세션 파일은 attempt 번호를 달고, 역할 전체를 잇는 옛 이름(.session-reviewer)은 생기지 않는다
 [ -f "$REVIEW_TARGET/.agent-work/.session-reviewer-a01" ] || fail "세션 범위: 리뷰어 세션이 attempt 단위(.session-reviewer-a01)가 아님"
 [ ! -e "$REVIEW_TARGET/.agent-work/.session-reviewer" ] || fail "세션 범위: 역할 전체를 잇는 .session-reviewer 가 생성됨"
-# (b) Round 1 인데 origin=FIX_REGRESSION → 연계 검사가 응답 오류로 거부 (exit 1)
-run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')" && fail "리뷰 루프: Round 1 의 FIX_REGRESSION origin 이 통과됨"
-grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: origin 위반 거부 사유가 기록되지 않음"
-# (c) schema_version 불일치 → exit 1
-run_review_loop '{"schema_version":1,"verdict":"APPROVE","issues":[]}' && fail "리뷰 루프: 구버전 schema_version 이 통과됨"
-# (d) FIX_CODE 인데 required_outcome 비어 있음 → exit 1
-run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')" && fail "리뷰 루프: required_outcome 없는 FIX_CODE 가 통과됨"
+mv "$REVIEW_TARGET/.agent-work/approved.fingerprint" "$REVIEW_SIDE/approved.fingerprint.a"   # (a) 의 승인 지문이 아래 무효 사례의 "승인 지문 없음" 단언에 섞이지 않게 (삭제 대신 이동)
+# (b) Round 1 인데 origin=FIX_REGRESSION → 출력 계약 위반(REVIEW_OUTPUT_INVALID, exit 4) — origin 과 fix_ref 위반이 따로 기록된다
+expect_review_invalid "Round 1 의 FIX_REGRESSION origin" INVALID_ORIGIN "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {origin:"FIX_REGRESSION",fix_ref:"src/a.txt:L1-L1"}]}')"
+jq -e '[.errors[].rule_id] | index("INVALID_FIX_REF") != null' "$REVIEW_TARGET/.agent-work/reviews/invalid-review.json" >/dev/null || fail "리뷰 루프: 여러 위반이 하나로 뭉쳐짐(INVALID_FIX_REF 누락)"
+# (c) schema_version 불일치 → REVIEW_OUTPUT_INVALID
+expect_review_invalid "구버전 schema_version" SCHEMA_VERSION_MISMATCH '{"schema_version":1,"verdict":"APPROVE","issues":[]}'
+# (c2) verdict 와 issues 모순 → REVIEW_OUTPUT_INVALID
+expect_review_invalid "APPROVE 인데 issue 있음" VERDICT_INCONSISTENT "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"APPROVE",issues:[.]}')"
+# (d) FIX_CODE 인데 required_outcome 비어 있음 → REVIEW_OUTPUT_INVALID
+expect_review_invalid "required_outcome 없는 FIX_CODE" SCHEMA_INVALID "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {required_outcome:""}]}')"
 # (e) DOC_GAP → user_question/options 계약 + exit 3 + doc-gap-resume.json(WAITING_USER), 러너는 NEED_USER(REVIEW_DOC_GAP) + stage=doc-gap (impl 재합의 아님)
-run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')" && fail "리뷰 루프: user_question/options 없는 DOC_GAP 이 통과됨"
-grep -q '근거·연계 필드' "$REVIEW_SIDE/run.log" || fail "리뷰 루프: DOC_GAP 질문 누락 거부 사유가 기록되지 않음"
-run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {user_question:"q?",options:["A","B"]}]}')" && fail "리뷰 루프: user_question/options 가 있는 FIX_CODE 가 통과됨"
+expect_review_invalid "user_question/options 없는 DOC_GAP" ACTION_FIELDS "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"
+expect_review_invalid "user_question/options 가 있는 FIX_CODE" ACTION_FIELDS "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {user_question:"q?",options:["A","B"]}]}')"
+# fix_ref 정의는 한 문장이다 — config.sh(REVIEW_FIX_REF_RULE) · 리뷰어 프롬프트 · 스키마 설명이 글자 그대로 같아야 한다
+fix_ref_rule="$(sed -n "s/^REVIEW_FIX_REF_RULE='\(.*\)'\$/\1/p" "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
+[ -n "$fix_ref_rule" ] || fail "fix_ref 계약: config.sh 에 REVIEW_FIX_REF_RULE 이 없음"
+grep -qF -- "$fix_ref_rule" "$SOURCE_ROOT/.claude/skills/feature/prompts/reviewer.md" || fail "fix_ref 계약: reviewer.md 의 문장이 REVIEW_FIX_REF_RULE 과 다름"
+[ "$(jq -r '.properties.issues.items.properties.fix_ref.description' "$SOURCE_ROOT/.claude/skills/feature/schemas/impl-review.schema.json" | grep -cF -- "$fix_ref_rule")" = 1 ] || fail "fix_ref 계약: 스키마 설명의 문장이 REVIEW_FIX_REF_RULE 과 다름"
+grep -qF '$REVIEW_FIX_REF_RULE' "$SOURCE_ROOT/.claude/skills/feature/scripts/impl-review-loop.sh" || fail "fix_ref 계약: 리뷰 루프가 REVIEW_FIX_REF_RULE 을 쓰지 않음"
 set +e; run_review_loop "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP",user_question:"Map 인가 선형 탐색인가",options:["Map","linear"]}]}')"; docgap_loop_rc=$?; set -e
 [ "$docgap_loop_rc" = 3 ] || fail "리뷰 루프: DOC_GAP 종료 코드가 3 이 아님 ($docgap_loop_rc)"
 [ "$(jq -r '.status' "$REVIEW_TARGET/.agent-work/state.json")" = DOC_GAP ] || fail "리뷰 루프: state.json 이 DOC_GAP 이 아님"
@@ -667,7 +685,7 @@ cp "$REVIEW_SIDE/config.before-routing.sh" "$REVIEW_SKILL/config.sh"   # 이후 
 # 이 사례의 APPROVE 산출물(승인 지문·체크포인트)이 다음 절에서 재사용되지 않게 치운다 (삭제 대신 이동)
 mv "$REVIEW_TARGET/.agent-work/approved.fingerprint" "$REVIEW_SIDE/approved.fingerprint.routing"
 printf '{"version":0}\n' > "$REVIEW_TARGET/.agent-work/review-impl.json"
-echo "[OK] 10. 구현 리뷰 루프 계약 연계 검사 (APPROVE / origin / schema_version / 필드 / DOC_GAP / 리뷰어 codex 라우팅)"
+echo "[OK] 10. 구현 리뷰 루프 계약 연계 검사 (APPROVE / REVIEW_OUTPUT_INVALID 구조화 진단: origin·schema_version·verdict·필드 / fix_ref 단일 문장 / DOC_GAP / 리뷰어 codex 라우팅)"
 
 # ---------- 11. 범위 밖 변경은 자동 원복하지 않는다 — FOREIGN_WORKTREE_CHANGE 로 보존 후 중단 ----------
 # b.txt: 기준선 이전 사용자 unstaged 변경 + 기준선 이후 (워커 또는 다른 세션의) 추가 변경. 리뷰어가 OUT_OF_SCOPE_CHANGE 를 내면
@@ -742,6 +760,7 @@ mkdir -p "$WIDX_TARGET/src" "$WIDX_TARGET/.agent-work/reviews"
 printf 'base\n' > "$WIDX_TARGET/src/w.txt"
 (cd "$WIDX_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$WIDX_TARGET/.agent-work/$doc.md"; done
+printf '\n## all\n전체 계약\n' >> "$WIDX_TARGET/.agent-work/implementation.md"   # unit references(implementation.md#all)가 가리키는 절
 sed -i.sedbak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"
 fake_scope "$WIDX_TARGET" src/w.txt
 fake_consensus_pass "$WIDX_TARGET" design
@@ -784,6 +803,7 @@ mkdir -p "$VFIX_TARGET/src" "$VFIX_TARGET/.agent-work/reviews"
 printf 'base\n' > "$VFIX_TARGET/src/w.txt"; printf 'other\n' > "$VFIX_TARGET/src/other.txt"
 (cd "$VFIX_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$VFIX_TARGET/.agent-work/$doc.md"; done
+printf '\n## all\n전체 계약\n' >> "$VFIX_TARGET/.agent-work/implementation.md"   # unit references(implementation.md#all)가 가리키는 절
 # 테스트 더블: 호출 횟수를 기록하고 flag 파일이 있을 때만 통과
 printf '%s\n' '#!/usr/bin/env bash' 'echo t >> "$VFIX_COUNT"' '[ -f "$VFIX_PASS_FLAG" ]' > "$VFIX_SIDE/test.sh"; chmod +x "$VFIX_SIDE/test.sh"
 # 가짜 codex(worker-fix): 기준선을 빈 tree 로 바꾸고 범위 밖 파일 수정, DONE

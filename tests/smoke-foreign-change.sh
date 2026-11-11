@@ -59,8 +59,8 @@ if [ "$is_reviewer" = 1 ]; then
   [ -n "$d" ] && cp "$d" "$MOCK_LOG.diff"
   case "${MOCK_REVIEW:-FOREIGN}" in
     APPROVE) printf '{"structured_output":{"schema_version":%s,"verdict":"APPROVE","issues":[]},"usage":{}}' "$MOCK_SCHEMA";;
-    FIX) printf '{"structured_output":{"schema_version":%s,"verdict":"REQUEST_CHANGES","issues":[{"id":"I-001","action":"FIX_CODE","category":"REACHABLE_BUG","evidence_type":"REACHABLE_FAILURE","basis_refs":[],"code_refs":["src/feature.txt:1"],"reachable_scenario":"s","impact":"i","why_blocks_now":"w","required_outcome":"r","origin":"ROUND_1","previous_issue_id":"","fix_ref":""}]},"usage":{}}' "$MOCK_SCHEMA";;
-    *) printf '{"structured_output":{"schema_version":%s,"verdict":"REQUEST_CHANGES","issues":[{"id":"I-001","action":"FIX_CODE","category":"OUT_OF_SCOPE_CHANGE","evidence_type":"DIRECT_MISMATCH","basis_refs":["implementation.md:1"],"code_refs":["src/foreign.txt:1"],"reachable_scenario":"","impact":"i","why_blocks_now":"w","required_outcome":"src/foreign.txt 의 변경이 범위 밖","origin":"ROUND_1","previous_issue_id":"","fix_ref":""}]},"usage":{}}' "$MOCK_SCHEMA";;
+    FIX) printf '{"structured_output":{"schema_version":%s,"verdict":"REQUEST_CHANGES","issues":[{"id":"I-001","action":"FIX_CODE","category":"REACHABLE_BUG","evidence_type":"REACHABLE_FAILURE","basis_refs":[],"code_refs":["src/feature.txt:1"],"reachable_scenario":"s","impact":"i","why_blocks_now":"w","required_outcome":"r","origin":"ROUND_1","previous_issue_id":"","fix_ref":"","user_question":"","options":[]}]},"usage":{}}' "$MOCK_SCHEMA";;
+    *) printf '{"structured_output":{"schema_version":%s,"verdict":"REQUEST_CHANGES","issues":[{"id":"I-001","action":"FIX_CODE","category":"OUT_OF_SCOPE_CHANGE","evidence_type":"DIRECT_MISMATCH","basis_refs":["implementation.md:1"],"code_refs":["src/foreign.txt:1"],"reachable_scenario":"","impact":"i","why_blocks_now":"w","required_outcome":"src/foreign.txt 의 변경이 범위 밖","origin":"ROUND_1","previous_issue_id":"","fix_ref":"","user_question":"","options":[]}]},"usage":{}}' "$MOCK_SCHEMA";;
   esac
 else
   echo fixer >> "$MOCK_LOG"

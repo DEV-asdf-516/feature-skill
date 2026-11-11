@@ -4,7 +4,7 @@
     "schema_version": {
       "type": "integer",
       "enum": [
-        15
+        16
       ]
     },
     "verdict": {
@@ -83,6 +83,7 @@
           },
           "origin": {
             "type": "string",
+            "description": "Round 1 은 ROUND_1 만. Round 2+ 는 UNRESOLVED_PREVIOUS(직전 리뷰의 같은 id 가 미해결) | FIX_REGRESSION(직전 수정이 만든 직접 회귀) | NEWLY_EXPOSED_BY_FIX(직전 수정으로 처음 드러난 문제) 만.",
             "enum": [
               "ROUND_1",
               "UNRESOLVED_PREVIOUS",
@@ -91,10 +92,12 @@
             ]
           },
           "previous_issue_id": {
-            "type": "string"
+            "type": "string",
+            "description": "origin=UNRESOLVED_PREVIOUS 일 때만 직전 리뷰의 같은 issue id(이 issue 의 id 와 같다). ROUND_1 · FIX_REGRESSION · NEWLY_EXPOSED_BY_FIX 는 빈 문자열."
           },
           "fix_ref": {
-            "type": "string"
+            "type": "string",
+            "description": "origin=FIX_REGRESSION 또는 NEWLY_EXPOSED_BY_FIX 일 때 필수, ROUND_1 · UNRESOLVED_PREVIOUS 는 빈 문자열. fix_ref = 수정자의 직전 라운드 수정으로 실제 변경된 저장소 상대 소스 파일 경로:L시작-L끝 — fix-diff-round-N.patch 같은 패치 파일 경로가 아니고, 줄 번호는 패치 파일의 행 번호가 아니라 수정 후 소스 파일의 행 번호이며, 그 범위는 수정이 바꾼 hunk 와 겹쳐야 한다(변경이 삭제뿐이면 수정 후 파일에서 삭제 지점에 맞닿은 줄을 가리킨다)"
           },
           "user_question": {
             "type": "string"
