@@ -38,6 +38,7 @@ mkdir -p src && echo "base 01" > src/u01.txt
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 mkdir -p .agent-work/reviews
 for doc in request design implementation approach; do printf '# %s\n' "$doc" > ".agent-work/$doc.md"; done
+printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' >> .agent-work/implementation.md   # unit references(implementation.md#NN)가 가리키는 절 — 러너가 그 절 본문으로 unit 별 계약 변경을 판정한다
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 printf '{"version":1,"units":[{"id":"01-intake","title":"접수","goal":"unit 01","requirements":["REQ-01"],"scope":{"files":["src/u01.txt"],"new_file_roots":[]},"references":["implementation.md#01"],"targeted_test":"true"}]}\n' > .agent-work/implementation-units.json

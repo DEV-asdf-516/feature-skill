@@ -42,6 +42,7 @@ mkdir -p src/gen && echo "base 01" > src/u01.txt && echo "outside base" > src/ou
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 mkdir -p .agent-work/reviews
 for doc in request design implementation approach; do printf '# %s\n' "$doc" > ".agent-work/$doc.md"; done
+printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' >> .agent-work/implementation.md   # unit references(implementation.md#NN)가 가리키는 절 — 러너가 그 절 본문으로 unit 별 계약 변경을 판정한다
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":["src/gen/"]}\n' > .agent-work/feature-scope.json
 cat > .agent-work/implementation-units.json <<EOF
@@ -373,7 +374,7 @@ git checkout -q -- src/u01.txt
 echo "worker edit" >> src/u01.txt
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > .agent-work/worker-result.json
-review_issue='{"id":"R-01","action":"FIX_CODE","category":"CONTRACT_VIOLATION","evidence_type":"DIRECT_MISMATCH","basis_refs":["approach.md:L1"],"code_refs":["src/u01.txt:L1-L1"],"reachable_scenario":"","impact":"","why_blocks_now":"x","required_outcome":"y","origin":"ROUND_1","previous_issue_id":"","fix_ref":""}'
+review_issue='{"id":"R-01","action":"FIX_CODE","category":"CONTRACT_VIOLATION","evidence_type":"DIRECT_MISMATCH","basis_refs":["approach.md:L1"],"code_refs":["src/u01.txt:L1-L1"],"reachable_scenario":"","impact":"","why_blocks_now":"x","required_outcome":"y","origin":"ROUND_1","previous_issue_id":"","fix_ref":"","user_question":"","options":[]}'
 export FAKE_REVIEW_DIR="$TMP/side"
 printf '%s' "$review_issue" | jq -c --argjson v "$REVIEW_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$TMP/side/review-1.json"
 printf 'CRASH' > "$TMP/side/review-2.json"
