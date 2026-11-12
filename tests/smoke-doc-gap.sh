@@ -17,6 +17,15 @@
 #   F. unit 워커 DOC_GAP(미완료 unit 02) → NEED_USER/UNDECIDED, unit 01 완료 유지, 답 후 validator/designer 없이 unit 02 부터 워커 → targeted test → 리뷰 → DONE
 #   H. impl_docs_accepted 우회 불가: approach 단독 변경 → 재합의 / 위조 체크포인트 무효 / frozen 문서 변경·답 삭제 → DOC_GAP_SCOPE_EXCEEDED(모델 0회)
 #   G. review-gap 워커가 새 DOC_GAP 을 내면 임의 결정 없이 다시 NEED_USER(무한 자동 루프 없음), 같은 리뷰 경로 보존
+#   I. (feature 061) 코드 변경 없이 끝난 Gap A 의 review-gap 워커 직후 다른 리뷰가 Gap B(같은 issue id R-01)를 냄 → Gap B 의 tag 는 @2 로 유일화되어
+#      Gap A 의 답이 Gap B 의 답으로 읽히지 않고, Gap A 의 해결 기록(원본 리뷰·이슈 ID·사용자 결정)은 prior_gaps 로 보존되며, 답 후 Gap B 의 review-gap 워커가 **반드시 1회** 돈다
+#      (tree·결과 파일이 Gap A 의 것과 전부 같아도 건너뛰지 않는다)
+#   J. review-gap 워커 결과 재사용은 같은 실행 식별자 + DONE 기록 + tree + 결과 파일 내용이 모두 맞을 때만(코드 변경 없는 실행 포함). 결과 파일·리뷰 내용이 달라졌거나
+#      시작만 기록된 채 결과 파일이 다른 내용으로 남아 있으면(유효한 JSON 이 아니어도) WORKER_OUTCOME_UNCERTAIN(모델 0회, 자동 재호출 없음)
+#   K. REVIEW_PENDING 재개도 같은 증명을 요구한다: 완료 기록 뒤 결과 파일·리뷰 내용이 바뀌었거나 worker_run 이 없으면 WORKER_OUTCOME_UNCERTAIN,
+#      리뷰 시작 전 tree 가 after tree 와 다르면 DOC_GAP_SOURCE_CHANGED(모델 0회). 리뷰 루프가 이미 진행됐으면(수정자) tree 는 리뷰 체크포인트가 판정한다
+#   M. 리뷰 해시가 없는 옛 체크포인트를 다음 gap 으로 넘길 때 현재 리뷰 내용으로 해시를 사후 생성하지 않는다(검증 근거 없는 기록으로 남는다)
+#   L. tag 중복 검사는 pipefail 아래 큰 문서에서도 이미 쓰인 tag 를 놓치지 않는다
 # =============================================================
 set -u
 PROJECT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -100,7 +109,7 @@ if printf '%s' "$prompt" | grep -q '^\[REVIEW GAP CONTEXT\]$'; then
   echo "review-gap-worker" >> "$MOCK_LOG"
   printf '%s' "$prompt" > "$MOCK_STATE/review-gap-prompt.txt"
   if [ -f "$MOCK_STATE/crash-review-gap" ]; then rm -f "$MOCK_STATE/crash-review-gap"; exit 7; fi
-  echo "review-gap fix" >> src/u01.txt; echo "review-gap fix" >> src/u02.txt
+  [ -f "$MOCK_STATE/gap-nochange" ] || { echo "review-gap fix" >> src/u01.txt; echo "review-gap fix" >> src/u02.txt; }   # gap-nochange: 코드 변경 없이 DONE 으로 끝나는 정상 실행
   if [ -f "$MOCK_STATE/gap-again" ]; then
     rm -f "$MOCK_STATE/gap-again"
     emit '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u02.txt","decision_needed":"정렬 기준","options":["이름","날짜"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'; exit 0
@@ -296,6 +305,8 @@ rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "G: 답 후 exit 0/DONE 기대, 실제 $rc/$(status)"; }
 [ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer APPROVE|full-test|full-lint" ] || fail "G: 답 후 같은 review-gap 워커 → 리뷰어가 아님: $(paste -sd'|' "$MOCK_LOG")"
 grep -q 'worker-gap=review-gap#1' "$MOCK_STATE/review-gap-prompt.txt" || fail "G: 재개된 워커 프롬프트에 두 번째 결정이 없음"
+grep -q '같은 리뷰에서 앞서 결정된 항목' "$MOCK_STATE/review-gap-prompt.txt" && grep -q '\[review-issue=R-01\].*→ Map 사전 인덱스$' "$MOCK_STATE/review-gap-prompt.txt" || fail "G: 재개된 워커 프롬프트에 같은 리뷰의 앞선 결정(R-01)이 없음"
+jq -e '(.prior_gaps|length)==1 and .prior_gaps[0].tag=="review-issue=R-01" and .prior_gaps[0].review==.review' .agent-work/doc-gap-resume.json >/dev/null || fail "G: 워커 미결정 체크포인트가 앞선 리뷰 gap 의 해결 기록을 보존하지 않음"
 no_reconsensus G
 pass "G: review-gap 워커의 새 DOC_GAP → 다시 NEED_USER(자동 루프 없음), 답 후 같은 워커 → 리뷰어 → DONE"
 
@@ -335,6 +346,174 @@ rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SCOPE_EXCEEDED ] && [ ! -s "$MOCK_LOG" ] || { tail -5 "$TMP/run.log"; fail "H-4: 답 줄 삭제 뒤에도 워커가 진행됨 ($rc/$(reason))"; }
 ( source "$CFG"; impl_docs_accepted ) && fail "H-4: 답이 없는데 impl_docs_accepted 가 true"
 pass "H: impl_docs_accepted 는 활성 체크포인트 + 실제 consensus PASS + 답 존재 + 해결 범위 안 변경 + 고정 지문 일치일 때만 true — approach 단독 변경·위조·범위 밖 문서 변경·답 삭제는 전부 재합의/중단"
+
+# ===== 사례 I: 코드 변경 없는 Gap A 직후 Gap B — Gap B 의 review-gap 워커를 건너뛰지 않는다 (feature 061 재현) =====
+tree_now() { bash -c "source $CFG; snapshot_worktree_tree"; }
+sha_of() { shasum -a 256 "$1" | cut -c1-64; }
+reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] || fail "I: 전제(Gap A) 실패"
+REVIEW_I1="$(gap .review)"; TREE_I="$(tree_now)"
+answer_review_gap; touch "$MOCK_STATE/gap-nochange"; printf 'DOCGAP' > "$MOCK_STATE/review-next"   # Gap A 워커는 코드 변경 없이 DONE, 이어진 리뷰가 Gap B 를 낸다
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] || { tail -20 "$TMP/run.log"; fail "I: Gap B 가 exit 2/REVIEW_DOC_GAP 이 아님 ($rc/$(reason))"; }
+[ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer DOCGAP" ] || fail "I: Gap A 워커 → 리뷰어(Gap B) 순서가 아님: $(paste -sd'|' "$MOCK_LOG")"
+[ "$(tree_now)" = "$TREE_I" ] || fail "I: 전제 — Gap A 워커가 코드를 바꿈(코드 변경 없는 사례가 아님)"
+REVIEW_I2="$(gap .review)"; [ "$REVIEW_I2" != "$REVIEW_I1" ] && [ -f "$REVIEW_I2" ] || fail "I: Gap B 가 다른 리뷰 파일이 아님 ($REVIEW_I1 / $REVIEW_I2)"
+jq -e --arg r1 "$REVIEW_I1" --arg s1 "$(sha_of "$REVIEW_I1")" --arg s2 "$(sha_of "$REVIEW_I2")" --arg t "$TREE_I" '
+  .next_step=="WAITING_USER" and .origin=="review" and .source_tree==$t and (has("worker_run")|not) and .review_sha256==$s2
+  and .gaps[0].key=="R-01" and .gaps[0].tag=="review-issue=R-01@2"
+  and (.prior_gaps|length)==1 and .prior_gaps[0].key=="R-01" and .prior_gaps[0].tag=="review-issue=R-01" and .prior_gaps[0].origin=="review"
+  and .prior_gaps[0].review==$r1 and .prior_gaps[0].review_sha256==$s1 and (.prior_gaps[0].answer|test("\\[review-issue=R-01\\].*→ Map 사전 인덱스$"))
+  and (.prior_gaps[0].resolved_impl_fingerprint|length)==64 and .prior_gaps[0].location=="src/u01.txt:L1-L1"' .agent-work/doc-gap-resume.json >/dev/null \
+  || fail "I: Gap B 체크포인트(유일 tag·prior_gaps 의 원본 리뷰/이슈 ID/사용자 결정) 불일치: $(cat .agent-work/doc-gap-resume.json)"
+grep -q 'tag: review-issue=R-01@2' .agent-work/run-state.json || fail "I: detail 에 Gap B 의 답 tag 가 없음"
+( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "I: 앞선 해결(Gap A)의 연결이 유효로 확인되지 않음"
+# 답 없이 재실행: Gap A 의 답 줄([review-issue=R-01])이 Gap B 의 답으로 읽히면 안 된다 — 모델 0회로 대기
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] && [ ! -s "$MOCK_LOG" ] && grep -q '답 없는 gap: review-issue=R-01@2' .agent-work/run-state.json \
+  || { tail -5 "$TMP/run.log"; fail "I: 다른 리뷰의 같은 issue id 답이 Gap B 의 답으로 인정됨 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+printf -- '- [USER-QUESTION][scope=impl][review-issue=R-01@2] Map 사전 인덱스와 항목별 선형 탐색 중 무엇인가(두 번째 위치) → 항목별 선형 탐색\n' >> .agent-work/decisions.md
+printf '\n## 결정 R-01@2 (REQUIRED)\n두 번째 위치는 항목별 선형 탐색.\n' >> .agent-work/approach.md
+# Gap A 워커가 남긴 산출물은 Gap B 의 source tree 와 전부 같다(before == after == 현재) — tree 비교만으로는 Gap B 워커를 건너뛰게 되는 상태다
+[ "$(cat .agent-work/review-gap-before.tree)" = "$TREE_I" ] && [ "$(cat .agent-work/review-gap-after.tree)" = "$TREE_I" ] && jq -e '.status=="DONE"' .agent-work/review-gap-result.json >/dev/null \
+  || fail "I: 전제 — Gap A 워커 산출물(before/after tree·DONE 결과)이 재사용 오판 조건을 만들지 않음"
+mv "$MOCK_STATE/gap-nochange" "$MOCK_STATE/gap-nochange.used"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "I: Gap B 답 후 exit 0/DONE 기대, 실제 $rc/$(status)/$(reason)"; }
+[ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer APPROVE|full-test|full-lint" ] || fail "I: Gap B 의 review-gap 워커가 정확히 1회 돌지 않음(Gap A 결과 재사용 금지): $(paste -sd'|' "$MOCK_LOG")"
+grep -q 'review-issue=R-01@2' "$MOCK_STATE/review-gap-prompt.txt" && grep -q '항목별 선형 탐색$' "$MOCK_STATE/review-gap-prompt.txt" && grep -q "$REVIEW_I2" "$MOCK_STATE/review-gap-prompt.txt" \
+  || fail "I: Gap B 워커 프롬프트에 Gap B 의 리뷰·결정이 없음"
+no_reconsensus I
+jq -e '.next_step=="RESOLVED" and .worker_run.state=="DONE" and (.worker_run.identity|length)==64 and (.worker_run.result_sha256|length)==64 and (.prior_gaps|length)==1' .agent-work/doc-gap-resume.json >/dev/null \
+  || fail "I: 완료 뒤 체크포인트(worker_run·prior_gaps) 불일치: $(cat .agent-work/doc-gap-resume.json)"
+pass "I: 코드 변경 없는 Gap A 직후 Gap B — tag 유일화(@2)로 Gap A 의 답을 재사용하지 않고, prior_gaps 가 Gap A 의 원본 리뷰·이슈 ID·결정을 보존하며, Gap B 워커가 정확히 1회 돈다"
+
+# ===== 사례 J: review-gap 워커 결과 재사용 조건 =====
+# 픽스처: 코드 변경 없는 워커가 DONE 으로 끝나 완료 기록(worker_run DONE)까지 남긴 뒤, 단계 전환(REVIEW_PENDING) 직전에 프로세스가 죽은 상태
+reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "J: 전제 실패"
+answer_review_gap; touch "$MOCK_STATE/gap-nochange"; printf 'CRASH' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 1 ] && [ "$(gap .next_step)" = REVIEW_PENDING ] && [ "$(gap .worker_run.state)" = DONE ] && [ "$(gap .worker_run.before_tree)" = "$(gap .worker_run.after_tree)" ] \
+  || { tail -20 "$TMP/run.log"; fail "J: 전제(코드 변경 없는 워커 DONE 기록 + REVIEW_PENDING) 실패: $(cat .agent-work/doc-gap-resume.json)"; }
+jq '.next_step="WORKER_PENDING" | .source_tree=.worker_run.before_tree' .agent-work/doc-gap-resume.json > "$TMP/j.ck" && cp "$TMP/j.ck" .agent-work/doc-gap-resume.json
+cp .agent-work/review-gap-result.json "$TMP/j.result"; REVIEW_J="$(gap .review)"; cp "$REVIEW_J" "$TMP/j.review"
+# J-1 결과 파일이 완료 기록 당시와 다름(해시 불일치) → 재사용도 재호출도 하지 않는다
+printf '\n' >> .agent-work/review-gap-result.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] && [ "$(gap .next_step)" = WORKER_PENDING ] \
+  || { tail -5 "$TMP/run.log"; fail "J-1: 결과 파일이 달라졌는데 WORKER_OUTCOME_UNCERTAIN(모델 0회)이 아님 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+cp "$TMP/j.result" .agent-work/review-gap-result.json
+# J-2 리뷰 내용이 달라짐(경로는 같음) → 식별자 불일치 → 재사용도 재호출도 하지 않는다
+printf '\n' >> "$REVIEW_J"
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] && grep -q '식별자' .agent-work/run-state.json \
+  || { tail -5 "$TMP/run.log"; fail "J-2: 리뷰 내용이 달라졌는데(경로 동일) 결과를 재사용하거나 워커를 다시 부름 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+cp "$TMP/j.review" "$REVIEW_J"
+# J-3 source tree 가 기록된 after tree 와 다름 → DOC_GAP_SOURCE_CHANGED(자동 원복 없음), 되돌리면 J-4 로
+cp src/u01.txt "$TMP/j.u01"; echo "external edit" >> src/u01.txt
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SOURCE_CHANGED ] && [ ! -s "$MOCK_LOG" ] && [ "$(tail -1 src/u01.txt)" = "external edit" ] \
+  || { tail -5 "$TMP/run.log"; fail "J-3: tree 가 달라졌는데 DOC_GAP_SOURCE_CHANGED(모델 0회·원복 없음)가 아님 ($rc/$(reason))"; }
+cp "$TMP/j.u01" src/u01.txt
+# J-4 같은 식별자 + DONE 기록 + tree 일치 + 결과 파일 그대로 → 워커 재호출 없이 리뷰로(코드 변경 없는 실행도 재사용된다)
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "J-4: 재사용 조건이 모두 맞는데 DONE 이 아님 ($rc/$(status)/$(reason))"; }
+[ "$(paste -sd'|' "$MOCK_LOG")" = "reviewer APPROVE|full-test|full-lint" ] && grep -q 'review-gap 워커 결과 재사용' "$TMP/run.log" || fail "J-4: 워커가 재호출됐거나 재사용 로그가 없음: $(paste -sd'|' "$MOCK_LOG")"
+no_reconsensus J-4
+# J-5 시작만 기록됨(STARTED) + tree 그대로 + 이번 호출의 유효한 DONE 결과가 남음(게이트·세션 수용 완료 여부 불명) → 자동 재호출하지 않는다
+reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "J-5: 전제 실패"
+answer_review_gap; touch "$MOCK_STATE/crash-review-gap"
+rc="$(run_runner)"; [ "$rc" -eq 1 ] && [ "$(gap .next_step)" = WORKER_PENDING ] && [ "$(gap .worker_run.state)" = STARTED ] || fail "J-5: 전제(STARTED 기록) 실패: $(cat .agent-work/doc-gap-resume.json)"
+cp "$TMP/j.result" .agent-work/review-gap-result.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] \
+  || { tail -5 "$TMP/run.log"; fail "J-5: 완료 기록 없는 결과를 재사용하거나 워커를 자동 재호출함 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+# 결과 파일이 유효한 JSON 이 아니어도 시작 기록 당시와 다른 내용이 남아 있으면 CLI 가 돌았다는 뜻이다 → 자동 재호출하지 않는다
+printf '{"status":"DONE","undecided":[' > .agent-work/review-gap-result.json
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] && [ "$(gap .worker_run.state)" = STARTED ] \
+  || { tail -5 "$TMP/run.log"; fail "J-5: 깨진 결과가 남은 STARTED 에서 워커를 자동 재호출함 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+# 결과가 없으면(호출이 결과 없이 실패 — 사례 D-1 과 같은 상태) 기존 정책대로 워커부터 다시 돈다
+mv .agent-work/review-gap-result.json "$TMP/j.result.spent"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer APPROVE|full-test|full-lint" ] || { tail -20 "$TMP/run.log"; fail "J-5: 결과 없는 STARTED 에서 워커부터 재개되지 않음 ($rc): $(paste -sd'|' "$MOCK_LOG")"; }
+pass "J: 재사용은 같은 식별자·DONE 기록·tree·결과 파일 내용이 모두 맞을 때만(코드 변경 없는 실행 포함) — 결과/리뷰 내용 변경·완료 기록 없는 결과는 WORKER_OUTCOME_UNCERTAIN, tree 변경은 DOC_GAP_SOURCE_CHANGED"
+
+# ===== 사례 K: REVIEW_PENDING 재개 — 체크포인트를 되돌리지 않은 정상 경로에서 완료 증명을 다시 확인한다 =====
+reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "K: 전제 실패"
+answer_review_gap; printf 'CRASH' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"; [ "$rc" -eq 1 ] && [ "$(gap .next_step)" = REVIEW_PENDING ] && [ "$(gap .worker_run.state)" = DONE ] && [ "$(gap .worker_run.before_tree)" != "$(gap .worker_run.after_tree)" ] \
+  || { tail -20 "$TMP/run.log"; fail "K: 전제(워커 DONE 기록 + 리뷰어 crash → REVIEW_PENDING) 실패: $(cat .agent-work/doc-gap-resume.json)"; }
+cp .agent-work/doc-gap-resume.json "$TMP/k.ck"; cp .agent-work/review-gap-result.json "$TMP/k.result"; REVIEW_K="$(gap .review)"; cp "$REVIEW_K" "$TMP/k.review"
+k_uncertain() { # label grep-pattern
+  rc="$(run_runner)"
+  [ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] && [ "$(gap .next_step)" = REVIEW_PENDING ] && grep -q "$2" .agent-work/run-state.json \
+    || { tail -5 "$TMP/run.log"; fail "$1: REVIEW_PENDING 에서 WORKER_OUTCOME_UNCERTAIN(모델 0회)이 아님 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+}
+# K-1 완료 기록 뒤 결과 파일이 바뀜 → 리뷰로 들어가지 않는다
+printf '\n' >> .agent-work/review-gap-result.json; k_uncertain K-1 '완료 기록 당시와 다르'; cp "$TMP/k.result" .agent-work/review-gap-result.json
+# K-2 리뷰 내용이 바뀜(식별자 불일치)
+printf '\n' >> "$REVIEW_K"; k_uncertain K-2 '식별자'; cp "$TMP/k.review" "$REVIEW_K"
+# K-3 실행 기록이 없는 REVIEW_PENDING(이 검증 이전의 체크포인트·손으로 고친 체크포인트) → 완료를 증명할 수 없다
+jq 'del(.worker_run)' "$TMP/k.ck" > .agent-work/doc-gap-resume.json; k_uncertain K-3 'worker_run'
+# K-4 완료가 아닌 실행 기록(STARTED)인 REVIEW_PENDING
+jq '.worker_run.state="STARTED"' "$TMP/k.ck" > .agent-work/doc-gap-resume.json; k_uncertain K-4 'DONE'
+# K-4b 체크포인트 source tree 가 완료 기록의 after tree 와 다름(체크포인트와 실행 기록이 같은 실행을 가리키지 않는다)
+jq '.source_tree=.worker_run.before_tree' "$TMP/k.ck" > .agent-work/doc-gap-resume.json; k_uncertain K-4b 'after tree'
+cp "$TMP/k.ck" .agent-work/doc-gap-resume.json
+# K-5 리뷰가 시작되기 전에 tree 가 after tree 와 달라짐 → DOC_GAP_SOURCE_CHANGED(자동 원복 없음)
+cp src/u01.txt "$TMP/k.u01"; echo "external edit" >> src/u01.txt
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SOURCE_CHANGED ] && [ ! -s "$MOCK_LOG" ] && [ "$(tail -1 src/u01.txt)" = "external edit" ] \
+  || { tail -5 "$TMP/run.log"; fail "K-5: 리뷰 전 tree 변경인데 DOC_GAP_SOURCE_CHANGED(모델 0회·원복 없음)가 아님 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+# K-6 리뷰 루프가 이미 진행됐으면(수정자 대기 체크포인트 / 러너가 남긴 진행 표시) tree 차이는 리뷰 체크포인트의 몫이다 — 이 판정은 tree 로 막지 않는다
+k_verdict() { ( source "$CFG"; doc_gap_review_entry_verdict "$(doc_gap_worker_identity)" "$(snapshot_worktree_tree)" >/dev/null; echo $? ); }
+[ "$(k_verdict)" -eq 11 ] || fail "K-6: 전제 — 리뷰 진행 전 tree 변경이 11 이 아님"
+cp .agent-work/review-impl.json "$TMP/k.review-impl" 2>/dev/null || true
+printf '{"next_step":"FIXER_PENDING"}\n' > .agent-work/review-impl.json
+[ "$(k_verdict)" -eq 0 ] || fail "K-6: 리뷰 루프가 진행 중(FIXER_PENDING)인데 tree 차이로 막음"
+printf '{"next_step":"NONE"}\n' > .agent-work/review-impl.json
+[ "$(k_verdict)" -eq 11 ] || fail "K-6: 리뷰 체크포인트가 초기화 상태인데 tree 차이를 통과시킴"
+( source "$CFG"; doc_gap_mark_review_progressed ) && [ "$(k_verdict)" -eq 0 ] || fail "K-6: 러너의 진행 표시(review_progressed) 뒤에도 tree 차이로 막음"
+printf '\n' >> .agent-work/review-gap-result.json
+[ "$(k_verdict)" -eq 12 ] || fail "K-6: 리뷰가 진행됐어도 결과 파일 변경은 불확실(12)이어야 함"
+cp "$TMP/k.result" .agent-work/review-gap-result.json; cp "$TMP/k.ck" .agent-work/doc-gap-resume.json; cp "$TMP/k.u01" src/u01.txt
+if [ -f "$TMP/k.review-impl" ]; then cp "$TMP/k.review-impl" .agent-work/review-impl.json; else printf '{"next_step":"NONE"}\n' > .agent-work/review-impl.json; fi
+# K-7 모든 조건이 맞으면 워커 재호출 없이 리뷰어부터
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] && [ "$(paste -sd'|' "$MOCK_LOG")" = "reviewer APPROVE|full-test|full-lint" ] && [ "$(gap .next_step)" = RESOLVED ] \
+  || { tail -30 "$TMP/run.log"; fail "K-7: 조건이 모두 맞는 REVIEW_PENDING 재개가 리뷰어 → DONE 이 아님 ($rc/$(status)/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+no_reconsensus K-7
+pass "K: REVIEW_PENDING 재개도 완료 기록·식별자·결과 파일 해시를 확인한다 — 결과/리뷰 변경·실행 기록 없음은 WORKER_OUTCOME_UNCERTAIN, 리뷰 전 tree 변경은 DOC_GAP_SOURCE_CHANGED, 리뷰가 진행된 뒤의 tree 는 리뷰 체크포인트가 판정"
+
+# ===== 사례 M: 리뷰 해시 없는 옛 활성 체크포인트를 다음 gap 으로 넘길 때 해시를 사후 생성하지 않는다 =====
+# 픽스처: K-7 뒤의 해결된 체크포인트(RESOLVED, 유효)에서 review_sha256 만 없앤다 = 이 필드가 생기기 전에 기록된 체크포인트
+cp .agent-work/doc-gap-resume.json "$TMP/m.ck"
+( source "$CFG"; doc_gap_resolved_current ) || fail "M: 전제 — K-7 뒤 체크포인트가 유효한 해결 상태가 아님"
+[ -f "$(gap .review)" ] || fail "M: 전제 — 원본 리뷰 파일이 없음(사후 해시가 만들어질 조건이 아님)"
+( source "$CFG"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256|length==64' >/dev/null ) || fail "M: 전제 — 해시가 있는 체크포인트의 carry 가 해시를 넘기지 않음"
+for strip in 'del(.review_sha256)' '.review_sha256=""'; do
+  jq "$strip" "$TMP/m.ck" > .agent-work/doc-gap-resume.json
+  ( source "$CFG"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256=="" and .[-1].origin=="review" and (.[-1].answer|length)>0' >/dev/null ) \
+    || fail "M: 해시 없는 체크포인트($strip)를 넘기면서 현재 리뷰 내용으로 해시를 만들어 넣음: $( ( source "$CFG"; _doc_gap_carry_prior ) )"
+  # 넘어간 기록은 검증 근거가 없으므로 다음 체크포인트에서 유효한 앞선 해결로 인정되지 않는다
+  ( source "$CFG"; jq --argjson p "$(_doc_gap_carry_prior)" '.prior_gaps=$p' "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.m" && cp "$DOC_GAP_RESUME.m" "$DOC_GAP_RESUME"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) \
+    || fail "M: 해시 없이 넘어간 앞선 해결 기록($strip)이 유효로 인정됨"
+done
+cp "$TMP/m.ck" .agent-work/doc-gap-resume.json
+pass "M: 리뷰 해시 없는 옛 체크포인트는 다음 gap 으로 넘어가도 해시가 사후 생성되지 않고, 검증 근거 없는 기록으로 남아 인정되지 않는다"
+
+# ===== 사례 L: tag 중복 검사 — pipefail + 큰 문서 =====
+cp .agent-work/decisions.md "$TMP/l.decisions"
+{ printf -- '- [USER-QUESTION][scope=impl][review-issue=R-77] 질문 → 답\n'; i=0; while [ "$i" -lt 6000 ]; do printf -- '- [round %s] 합의 이력 줄 — 파이프 버퍼를 넘기기 위한 채움 문장이다 0123456789 0123456789 0123456789\n' "$i"; i=$((i + 1)); done; } > .agent-work/decisions.md
+[ "$(wc -c < .agent-work/decisions.md)" -gt 300000 ] || fail "L: 전제 — 문서가 파이프 버퍼보다 크지 않음"
+( set -o pipefail; source "$CFG"; _doc_gap_tag_taken 'review-issue=R-77' '[]' ) || fail "L: pipefail 아래 큰 decisions.md 의 첫 줄에 있는 tag 를 '쓰이지 않음'으로 판정"
+( set -o pipefail; source "$CFG"; _doc_gap_tag_taken 'review-issue=R-78' '[]' ) && fail "L: 쓰이지 않은 tag 를 '쓰임'으로 판정"
+( set -o pipefail; source "$CFG"; [ "$(_doc_gap_unique_tags '[{"tag":"review-issue=R-77"}]' '[]' | jq -r '.[0].tag')" = 'review-issue=R-77@2' ] ) || fail "L: 이미 쓰인 tag 가 @2 로 유일화되지 않음"
+cp "$TMP/l.decisions" .agent-work/decisions.md
+pass "L: tag 중복 검사는 pipefail 아래 큰 문서에서도 이미 쓰인 tag 를 찾는다(SIGPIPE 오판 없음)"
 
 rm -rf "$TMP"
 echo "smoke-doc-gap: 전부 통과"
