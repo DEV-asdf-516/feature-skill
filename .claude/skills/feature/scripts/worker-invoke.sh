@@ -43,7 +43,7 @@ WORKER_SESSION_VERSION=1
 # 이 중 하나라도 피처 도중 바뀌면 같은 세션을 이어 쓰지 않는다(WORKER_SESSION_MISMATCH — 사용자가 재시작 방식을 명시).
 worker_contract_fingerprint() {
   local rules p
-  rules="$(load_worker_rules)" || return 1
+  rules="$(load_worker_rules contract)" || return 1   # conventions 는 계약 내용(범위 안 산출물이면 워커 기준선) — 피처가 고친 conventions 로 세션이 끊기지 않는다
   {
     printf 'worker-session-v%s\0%s\0' "$WORKER_SESSION_VERSION" "$rules"
     for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
@@ -340,6 +340,14 @@ run_worker() { # prompt-file [unit-dir]
   if [ "$resumed_turn" -eq 1 ]; then
     worker_rules="[CORE RULES]
 (이 Feature Worker 세션의 최초 턴에 전달된 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 블록이 이 턴에도 그대로 계약이다. 필수 제약 재명시: 현재 unit scope 밖 편집 금지 · 이후 unit 선행 구현 금지 · 범위 밖 리팩터링·cleanup 금지 · git commit/push 금지 · git index 조작 금지 · 파일 삭제 금지 · 전체 테스트 스위트 실행 금지 · 최종 출력은 결과 JSON 스키마로만. 세션 기억이 문서·현재 코드와 충돌하면 합의 문서 → 현재 코드 → 세션 기억 순서로 판단하고, 컨텍스트가 압축·재개됐으면 $WORK_DIR/implementation-context.json 과 합의 문서를 다시 읽는다.)"
+    # 범위 안 conventions.md 를 이 피처가 바꿨으면 최초 턴의 [PROJECT CONVENTIONS] 블록은 옛 내용이다 — 현재 파일 전문을 다시 싣는다(세션 지문은 기준선 내용이라 그대로)
+    if conventions_drifted_from_contract; then
+      worker_rules="$worker_rules
+
+[PROJECT CONVENTIONS — 현재 파일 전문]
+(이 피처가 conventions.md 를 변경했다. 최초 턴의 [PROJECT CONVENTIONS] 블록이 아니라 아래 현재 내용이 이 턴의 계약이다.)
+$(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현재 conventions.md 없음)'; fi)"
+    fi
     reference_code="[REFERENCE CODE 생략 — 이 세션 최초 턴에 전달됨. 앞선 구현으로 인용 줄 범위가 바뀌었을 수 있으니 approach.md 가 인용한 참조가 필요하면 현재 파일에서 다시 읽는다.]"
   else
     # 환경 변수 대입 안의 command substitution 실패는 뒤의 render_prompt 가 성공하면 묻힌다 — 먼저 별도 변수로 받아 실패를 확정한다

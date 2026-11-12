@@ -809,24 +809,48 @@ while :; do
             stale_units=""; for unit_id in $(unit_ids); do unit_done_valid "$unit_id" || stale_units="$stale_units$unit_id "; done
             [ -z "$stale_units" ] || stop_need_user DOC_GAP_SCOPE_EXCEEDED "리뷰 DOC_GAP($(doc_gap_field '[.gaps[].key] | join(",")')) 해결 과정에서 그 gap 과 연결되지 않은 unit(${stale_units% })의 계약이 바뀌었다 — 사용자 해결 예외는 ⓐ gap 의 코드 위치가 scope 에 속한 unit 의 ⓑ approach.md 절 변경 가운데 ⓒ 그 절 본문에 gap tag($(doc_gap_field '[.gaps[] | "[" + .tag + "]"] | join(" / ")'))가 적힌 절에만 적용된다 — 표시 없는 절 변경(같은 unit 의 다른 절 포함)과 그 밖의 unit 은 gap 해결로 확정할 수 없어 완료 체크포인트를 재사용하지 않는다(모델 호출 0회). ① 의도하지 않은 변경이면 그 절을 gap 발생 시점으로 되돌리고 재실행 ② gap 해결로 고친 절인데 표시만 빠졌으면 그 절에 해당 tag 를 적고 재실행 ③ gap 과 무관하게 의도한 변경이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의 → 그 unit 부터 변경 계약으로 다시 돈다). 자동 원복·자동 재실행 없음"
           fi
-          # 리뷰 DOC_GAP: review-gap 워커 1회. 재시작 안전성 — 워커가 이미 끝났으면(after tree == 현재, 유효 DONE 결과) 재호출 없이 리뷰로,
-          # source tree 가 기록과 다르면(외부 변경) fail closed. 모델 호출 없이 판정.
+          # 리뷰 DOC_GAP: review-gap 워커 1회. 재시작 안전성 — 이 gap 의 워커가 이미 끝났다고 **증명될 때만** 재호출 없이 리뷰로 간다.
+          # 증명 = 체크포인트의 worker_run(DONE) 이 지금의 실행 식별자(리뷰 내용·미결정 ID·사용자 결정·계약)와 같고, 호출 전 tree == source tree,
+          # 현재 tree == 기록된 after tree, 결과 파일이 기록 당시 내용의 유효한 DONE 이다. review-gap-*.tree / review-gap-result.json 만으로는 판정하지 않는다 —
+          # 그 파일들은 앞 gap 의 워커가 남긴 것일 수 있고, 그 워커가 코드를 바꾸지 않았으면 tree 가 전부 같다(feature 061: Gap A 직후 Gap B 의 워커를 건너뜀).
+          # source tree 가 기록과 다르면(외부 변경) fail closed, 완료 여부가 불확실하면 자동 재호출 없이 멈춘다. 모델 호출 없이 판정.
           cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
-          if [ -f "$WORK_DIR/review-gap-after.tree" ] && [ "$(cat "$WORK_DIR/review-gap-after.tree")" = "$cur_tree" ] \
-             && worker_result_valid "$WORK_DIR/review-gap-result.json" && jq -e '.status=="DONE"' "$WORK_DIR/review-gap-result.json" >/dev/null 2>&1; then
-            log "review-gap 워커 결과가 이미 현재 작업 트리와 일치 — 재호출 없이 리뷰로"
-            doc_gap_set_step REVIEW_PENDING "$cur_tree" || env_error "doc-gap-resume.json 갱신 실패"; STAGE=review; continue
-          fi
-          [ "$cur_tree" = "$(doc_gap_field '.source_tree')" ] \
-            || stop_need_user DOC_GAP_SOURCE_CHANGED "review-gap 워커 호출 전 source worktree 가 기록된 tree($(doc_gap_field '.source_tree'))와 다르다 — 조용히 진행하지 않는다. 그 tree 로 되돌리고 재실행하거나 doc-gap-resume.json 을 치우고 새 리뷰. 자동 원복 없음"
+          gap_identity="$(doc_gap_worker_identity)" || env_error "review-gap 워커 실행 식별자 계산 실패"
+          gap_why="$(doc_gap_worker_run_verdict "$gap_identity" "$cur_tree")" && gap_verdict=0 || gap_verdict=$?
+          case "$gap_verdict" in
+            0) ;;
+            10)
+              log "review-gap 워커 결과 재사용 — 같은 실행 식별자(${gap_identity:0:12}…)의 DONE 기록·결과 파일·after tree 가 현재와 일치 — 재호출 없이 리뷰로"
+              doc_gap_set_step REVIEW_PENDING "$cur_tree" || env_error "doc-gap-resume.json 갱신 실패"; STAGE=review; continue;;
+            11) stop_need_user DOC_GAP_SOURCE_CHANGED "review-gap 워커 단계의 source worktree 가 기록된 tree($gap_why)와 다르다(현재 $cur_tree) — 조용히 진행하지 않는다. 그 tree 로 되돌리고 재실행하거나 doc-gap-resume.json 을 치우고 새 리뷰. 자동 원복 없음";;
+            12) stop_need_user WORKER_OUTCOME_UNCERTAIN "review-gap 워커($(basename "$gap_review"))의 기존 결과를 이 gap 의 완료로 확정할 수 없다 — $gap_why. 같은 워커를 자동 재호출하지 않고 결과도 재사용하지 않는다(모델 호출 0회, 체크포인트를 손으로 고치지 않는다). 작업 트리와 $WORK_DIR/review-gap-result.json 을 확인한 뒤, 그 호출을 버리고 새 리뷰부터 다시 하려면 doc-gap-resume.json 을 치우고 재실행(impl 지문이 stale 이면 impl 재합의를 거친다). 자동 원복 없음";;
+            *) env_error "review-gap 워커 실행 기록 판정 실패 (verdict $gap_verdict)";;
+          esac
+          # 호출 직전에 식별자와 호출 전 tree 를 체크포인트에 남긴다 — 이 뒤에 남는 결과 파일은 이 식별자의 것으로만 해석된다
+          doc_gap_worker_run_start "$gap_identity" "$cur_tree" "$WORK_DIR/review-gap-result.json" || env_error "doc-gap-resume.json 갱신 실패(review-gap 워커 시작 기록)"
           write_state doc-gap RUNNING "" "review-gap worker ($(basename "$gap_review"))"
           log "=== review-gap 워커: DOC_GAP 사용자 결정 + 같은 리뷰의 FIX_CODE 를 함께 구현 ($(basename "$gap_review")) ==="
           RUN_TAG=review-gap REVIEW_FILE="$gap_review" DOC_GAP_REVIEW="$gap_review" \
             GAP_CONTEXT="$(printf '리뷰 JSON: %s\n리뷰 당시 diff: %s\n\n미결정 항목과 사용자 결정:\n%s' "$gap_review" "$(dirname "$gap_review")/diff-round-$(printf '%02d' "$(doc_gap_field '.round')").patch" "$(doc_gap_prompt_block)")" \
             run_worker worker-review-gap.md
+          # run_worker 가 돌아왔다 = 모든 게이트·세션 수용을 지난 유효한 DONE 이다(UNDECIDED 는 새 체크포인트를 쓰고 거기서 멈춘다).
+          # 결과 파일 해시·after tree 를 식별자와 함께 고정한 뒤에 단계를 넘긴다 — 두 기록 사이에서 죽어도 다음 실행이 위 판정으로 재사용한다.
+          doc_gap_worker_run_done "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패(review-gap 워커 완료 기록)"
           doc_gap_set_step REVIEW_PENDING "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패"
           STAGE=review; continue;;
-        REVIEW_PENDING) STAGE=review; continue;;
+        REVIEW_PENDING)
+          # 단계가 넘어갔다고 증명을 생략하지 않는다 — 완료 기록(worker_run DONE)·식별자·결과 파일 해시를 다시 확인하고, 리뷰가 아직 진행되지 않았으면 tree 도 본다.
+          # (WORKER_PENDING 의 재사용 판정만 검사하면, 완료 기록 뒤 결과 파일·리뷰·결정이 바뀌어도 재개가 그대로 리뷰로 들어간다.) 모델 호출 없이 판정.
+          cur_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패"
+          gap_identity="$(doc_gap_worker_identity)" || env_error "review-gap 워커 실행 식별자 계산 실패"
+          gap_why="$(doc_gap_review_entry_verdict "$gap_identity" "$cur_tree")" && gap_verdict=0 || gap_verdict=$?
+          case "$gap_verdict" in
+            0) ;;
+            11) stop_need_user DOC_GAP_SOURCE_CHANGED "review-gap 워커 완료 뒤 리뷰가 시작되기 전에 source worktree 가 기록된 after tree($gap_why)와 달라졌다(현재 $cur_tree) — 워커 결과를 그 위의 리뷰로 조용히 잇지 않는다. 그 tree 로 되돌리고 재실행하거나 doc-gap-resume.json 을 치우고 새 리뷰. 자동 원복 없음";;
+            12) stop_need_user WORKER_OUTCOME_UNCERTAIN "리뷰 대기(REVIEW_PENDING) 중인 review-gap 워커($(basename "$gap_review"))의 완료를 확정할 수 없다 — $gap_why. 리뷰로 진행하지 않고 워커도 자동 재호출하지 않는다(모델 호출 0회, 체크포인트를 손으로 고치지 않는다). 작업 트리와 $WORK_DIR/review-gap-result.json 을 확인한 뒤, 그 호출을 버리고 새 리뷰부터 다시 하려면 doc-gap-resume.json 을 치우고 재실행(impl 지문이 stale 이면 impl 재합의를 거친다). 자동 원복 없음";;
+            *) env_error "review-gap 워커 완료 기록 판정 실패 (verdict $gap_verdict)";;
+          esac
+          STAGE=review; continue;;
         *) STAGE=worker; continue;;
       esac;;
 
@@ -838,13 +862,17 @@ while :; do
         0)
           [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"
           STAGE=verify;;
-        2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 리뷰 중단 — state.json.review 의 남은 이슈를 사용자에게 보고";;
+        2)
+          # 리뷰 루프가 수정자까지 돌린 뒤 사용자에게 돌아온다(리뷰 체크포인트는 초기화됨) — tree 가 review-gap 워커의 after tree 와 달라진 것은 정상이므로 진행 사실을 남긴다
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
+          stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "구현 리뷰 중단 — state.json.review 의 남은 이슈를 사용자에게 보고";;
         3)
           # 리뷰어 DOC_GAP: 사용자 결정. 루프가 doc-gap-resume.json(WAITING_USER, 리뷰·source tree 포함)을 남겼다 — impl 재합의 없음.
           log "리뷰어 DOC_GAP — 사용자 결정 필요:"; doc_gap_report
-          stop_need_user REVIEW_DOC_GAP "리뷰어가 구현 중 미결정 solution shape 를 보고함($(jq -r '.issues' "$WORK_DIR/state.json")) — 사용자 결정이 최종이며 검증자·디자이너·impl 재합의 없이 review-gap 워커 1회(DOC_GAP 결정 + 같은 리뷰의 FIX_CODE $(jq -r '[.issues[] | select(.action=="FIX_CODE") | .id] | join(",")' "$(jq -r '.review' "$WORK_DIR/state.json")")) → 리뷰로 간다. 각 issue 의 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행. 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); refs: \(.refs|join(", ")); impact: \(.impact))"] | join(" ; ")')";;
+          stop_need_user REVIEW_DOC_GAP "리뷰어가 구현 중 미결정 solution shape 를 보고함($(jq -r '.issues' "$WORK_DIR/state.json")) — 사용자 결정이 최종이며 검증자·디자이너·impl 재합의 없이 review-gap 워커 1회(DOC_GAP 결정 + 같은 리뷰의 FIX_CODE $(jq -r '[.issues[] | select(.action=="FIX_CODE") | .id] | join(",")' "$(jq -r '.review' "$WORK_DIR/state.json")")) → 리뷰로 간다. 각 issue 의 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행(tag 는 항목에 표기된 값 그대로 — 보통 review-issue=<id>, 앞선 gap 과 id 가 겹치면 @N 이 붙는다). 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); refs: \(.refs|join(", ")); impact: \(.impact); tag: \(.tag))"] | join(" ; ")')";;
         4)
           # 리뷰어 출력 계약 위반: 승인도 수정 요청도 아니다. 루프가 원본·진단·입력 지문을 reviews/invalid-review.json 에 남겼고 재실행은 리뷰어 0회다.
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
           stop_need_user REVIEW_OUTPUT_INVALID "리뷰어 출력이 계약에 어긋나 수용하지 않음(attempt $(jq -r '.attempt' "$WORK_DIR/state.json") round $(jq -r '.round' "$WORK_DIR/state.json"), invocation $(jq -r '.invocation_id' "$WORK_DIR/state.json")) — $(jq -r '.why' "$WORK_DIR/state.json"). 위반: $(jq -r '[.errors[] | "[\(.rule_id)] issue=\(if .issue_id=="" then "-" else .issue_id end) field=\(.field) observed=\(.observed)"] | join(" ; ")' "$WORK_DIR/state.json"). 같은 프롬프트를 같은 세션에 재전송하지 않는다 — 그대로 재실행하면 모델 호출 0회로 같은 진단이 나온다. 복구: ① 검사기 버그였으면 고친 뒤 재실행(저장된 출력을 로컬 재검증) ② 새 리뷰가 필요하면 '--new-review-attempt' 를 붙여 재실행(새 attempt Round 1, 새 세션 — 이전 미수용 세션·resume marker 는 건드리지 않는다). 기록: $WORK_DIR/reviews/invalid-review.json, 원본: $(jq -r '.review' "$WORK_DIR/state.json")";;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
