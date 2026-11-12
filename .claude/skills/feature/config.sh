@@ -185,10 +185,17 @@ load_project_conventions() {
 }
 
 # core_rules.md는 워커에게만 전달한다. 선택 conventions가 있으면 뒤에 덧붙인다.
-load_worker_rules() {
+# contract: 워커 세션 계약 지문용 — conventions 는 conventions_contract_content(피처 범위 안 산출물이면 워커 기준선 내용)를 쓴다.
+#           프롬프트에 싣는 본문(인자 없음)은 항상 작업 트리의 현재 파일이다.
+load_worker_rules() { # [contract]
   printf '[CORE RULES]\n'
   cat "$CORE_RULES_FILE"
-  if [ -f "$CONVENTIONS_FILE" ]; then
+  if [ "${1:-}" = contract ]; then
+    if conventions_contract_content >/dev/null; then
+      printf '\n\n[PROJECT CONVENTIONS]\n'
+      conventions_contract_content
+    fi
+  elif [ -f "$CONVENTIONS_FILE" ]; then
     printf '\n\n[PROJECT CONVENTIONS]\n'
     cat "$CONVENTIONS_FILE"
   fi
@@ -1078,11 +1085,11 @@ unit_contract_render() { # unit-id out-dir
       fi
     done < <(jq -r '.references[]' <<< "$uj")
     printf '\n=== user decisions bound to this unit (decisions.md [worker-gap=%s#N]) ===\n' "$id"
-    if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "^[[:space:]]*- \[USER-QUESTION\](\[[^]]*\])*\[worker-gap=$id#[0-9]+\]" "$WORK_DIR/decisions.md" || true; fi
+    if [ -f "$WORK_DIR/decisions.md" ]; then grep -E "^[[:space:]]*- \[USER-QUESTION\](\[[^]]*\])*\[worker-gap=$id#[0-9]+(@[0-9]+)?\]" "$WORK_DIR/decisions.md" || true; fi
   } > "$out/contract.txt"
   {
     printf '=== request.md ===\n'; if [ -f "$WORK_DIR/request.md" ]; then cat "$WORK_DIR/request.md"; else printf '(absent)\n'; fi
-    printf '\n=== conventions.md ===\n'; if [ -f "${CONVENTIONS_FILE:-}" ]; then cat "$CONVENTIONS_FILE"; else printf '(absent)\n'; fi
+    printf '\n=== conventions.md ===\n'; conventions_contract_content || printf '(absent)\n'
     if [ "$has_design" -eq 0 ]; then
       printf '\n=== design.md (전체 — 이 unit 의 references 에 design.md#… 절이 없어 영향 절을 특정할 수 없다) ===\n'
       if [ -f "$WORK_DIR/design.md" ]; then cat "$WORK_DIR/design.md"; else printf '(absent)\n'; fi
@@ -1218,6 +1225,7 @@ unit_worker_contract_current() { # unit-id unit-dir
 # 기준 계약과 달라진 **이 unit 의** 차이가 '구현 후 gap 의 사용자 해결'로 설명되는가. 유효한 해결 기록이 있다는 것만으로는 부족하다 —
 # 그 해결이 이 unit 의 이 계약 변경을 낳은 것이어야 한다. 네 조건을 모두 만족할 때만 true:
 #   ① 해결 provenance 가 현재 입력에 유효(doc_gap_resolved_current)하고 리뷰 DOC_GAP(또는 verify 의 worker-fix 미결정)이다. unit 워커 gap(unit_id 있음)은 그 unit 을 다시 돌리므로 해당하지 않는다.
+#      앞서 해결된 gap(prior_gaps)도 같은 조건으로 센다 — 대상 선별은 _unit_gap_linked_tags 가 한다.
 #   ② 전역 입력(global.txt)은 기준 그대로다 — gap 해결은 request·conventions·design·묶이지 않은 결정을 바꾸지 않는다([review-issue=…]/[worker-gap=…] 줄은 전역 계약에 들어가지 않는다).
 #   ③ local 계약의 차이가 approach.md 를 가리키는 reference 블록 안에만 있다(해결 범위 = approach.md 반영 + decisions.md 추가). implementation·design 절이나 unit JSON 이 달라졌으면 gap 해결이 아니다.
 #   ④ 이 unit 이 그 gap 과 연결돼 있다: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 이 unit 의 scope(files / new_file_roots) 안이다.
@@ -1226,10 +1234,15 @@ unit_worker_contract_current() { # unit-id unit-dir
 # 그 해결의 구현자는 unit 워커가 아니라 review-gap 워커(→ 전체 리뷰)다. gap 과 무관한 unit 의 approach 절까지 같이 고쳤으면 그 unit 은 정상 stale 이다(변경 계약으로 다시 돈다).
 # gap 과 연결된 unit 인가: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 unit scope(files / new_file_roots) 안인 gap 의 tag 목록(JSON 배열).
 # new_file_roots 는 manifest 가 'src/gen/' 처럼 끝 슬래시를 달 수 있으므로 정규화한 뒤 접두 비교한다('src/gen//' 와 비교해 정상 경로를 놓치지 않게).
+# 대상 gap: ① 현재 체크포인트의 gap(리뷰 DOC_GAP 이거나 unit_id 가 없는 워커 미결정일 때만 — unit 워커 gap 은 그 unit 을 다시 돌린다)
+#           ② 앞서 해결된 gap(prior_gaps) 가운데 원본 리뷰·이슈 ID·사용자 결정의 연결이 지금도 확인되는 것(doc_gap_prior_valid_tags).
+#   리뷰 DOC_GAP 이 연달아 나오면 체크포인트는 새 gap 으로 바뀌지만 unit 의 기준 계약은 그대로라, 앞 해결로 바뀐 절도 계속 '기준과 다른 절'이다 —
+#   앞 해결을 잊으면 그 unit 이 stale 로 멈춘다(feature 061). 허용 범위는 gap 마다 같다: 그 gap 의 코드 위치가 scope 안인 unit 의, 그 gap 의 tag 가 적힌 approach 절.
 _unit_gap_linked_tags() { # unit-json
-  jq -c --argjson u "$1" '
+  local prior; prior="$(doc_gap_prior_valid_tags)" || return 1
+  jq -c --argjson u "$1" --argjson pv "$prior" '
     ($u.scope.files // []) as $f | [($u.scope.new_file_roots // [])[] | sub("/+$"; "")] as $r
-    | [.gaps[]
+    | [((if .origin=="review" or (.unit_id // "")=="" then .gaps else [] end)[], ((.prior_gaps // [])[] | select(.tag as $t | $pv | index($t) != null)))
         | select([((.refs // []) + [.location // ""])[] | select(type=="string") | split(", ")[] | sub(":L?[0-9]+(-L?[0-9]+)?$"; "") | select(length>0)]
                  | any(.[]; . as $p | any($f[]; . == $p) or any($r[]; . as $root | $p | startswith($root + "/"))))
         | .tag]' "$DOC_GAP_RESUME"
@@ -1237,7 +1250,6 @@ _unit_gap_linked_tags() { # unit-json
 unit_contract_drift_covered() { # unit-id
   local id="$1" dir uj tags
   doc_gap_resolved_current || return 1
-  [ "$(doc_gap_field '.origin')" = review ] || [ -z "$(doc_gap_field '.unit_id')" ] || return 1
   dir="$(unit_contract_dir "$id")"
   [ -f "$dir/baseline/contract.txt" ] && [ -f "$dir/contract.json" ] || return 1
   unit_contract_current "$id" || return 1
@@ -1434,10 +1446,40 @@ consensus_user_decisions_for() { # design | impl
   consensus_user_decision_lines "$1" || return 1
   printf '\0'
 }
-# 프로젝트 conventions(해당 worktree 의 CONVENTIONS_FILE) → NUL 구분 스트림 (지문 입력). 경로가 아니라 고정 라벨을 쓴다(내용만 지문에 들어간다).
-# 파일이 없으면 고정 부재 표지만 낸다 — conventions 없는 프로젝트의 지문은 실행마다 같고, 파일이 생기거나(빈 파일 포함) 사라지면 달라진다.
+# 지문(합의 PASS·unit 전역 계약·승인 계약 문서·워커 세션 계약)에 넣는 conventions 내용 → stdout. 반환 1 = 없음.
+# 자기 무효화 예외: conventions.md 가 이 피처의 범위(feature-scope 의 files — lock 이 있으면 lock)에 **정확히** 들어 있으면 이 피처의 산출물이다.
+#   워커가 고친 규칙으로 합의·unit 계약·승인·세션 지문이 바뀌면 피처가 자기 입력을 무효로 만들어 끝까지 갈 수 없다(feature 061).
+#   그래서 워커 기준선(worker-baseline.tree — 처음 워커 진입 때 한 번 기록)이 있으면 작업 트리 파일 대신 기준선 tree 의 내용을 쓴다.
+#   기준선 기록 직전까지는 작업 트리 파일로 판정하므로(합의 PASS 가 현재 파일에 유효해야 워커에 진입한다) 고정되는 내용은 합의가 본 내용과 같다.
+# 예외는 범위 안일 때만이다 — 범위 밖이면(new_file_roots 아래도 해당 없음: 기존 파일 수정은 위반) 기준선이 있어도 작업 트리 파일 그대로라
+#   conventions 변경은 종전처럼 합의·unit 계약·승인·세션을 무효로 만든다. 기준선이 유효한 tree 가 아니면 '없음'으로 떨어져 지문이 달라진다(fail closed).
+# 역할 프롬프트에 싣는 본문은 이 함수가 아니라 작업 트리 파일이다(load_project_conventions / load_worker_rules) — 뒤 unit 워커·리뷰어·수정자는 바뀐 규칙을 본다.
+conventions_contract_content() {
+  local rel="${CONVENTIONS_FILE#"$PROJECT_ROOT"/}" tree
+  if [ -n "${CONVENTIONS_FILE:-}" ] && [ "$rel" != "$CONVENTIONS_FILE" ] && [ -f "$WORK_DIR/worker-baseline.tree" ] \
+     && SCOPE_MANIFEST_OVERRIDE="" path_in_exact_feature_files "$rel" \
+     && ! git -C "$PROJECT_ROOT" check-ignore -q -- "$rel" 2>/dev/null; then   # gitignore 된 파일은 기준선 tree 에 담기지 않는다 — '기준선에 없음'과 구별할 수 없으므로 예외를 적용하지 않는다
+    tree="$(cat "$WORK_DIR/worker-baseline.tree")"
+    git -C "$PROJECT_ROOT" cat-file -e "$tree:$rel" 2>/dev/null || return 1
+    git -C "$PROJECT_ROOT" cat-file blob "$tree:$rel"
+    return
+  fi
+  [ -f "${CONVENTIONS_FILE:-}" ] || return 1
+  cat "$CONVENTIONS_FILE"
+}
+# 작업 트리의 conventions.md 가 계약 지문에 고정된 내용과 다른가 — 범위 안 conventions 를 이 피처가 바꾼 경우에만 참이다(범위 밖이면 두 내용이 같은 파일이다).
+# 같은 세션을 잇는 워커 재개 턴이 최초 턴의 옛 [PROJECT CONVENTIONS] 블록 대신 현재 파일을 받게 하는 데 쓴다.
+conventions_drifted_from_contract() {
+  local a=ABSENT b=ABSENT
+  if conventions_contract_content >/dev/null; then a="$(conventions_contract_content | sha256_stdin)" || return 1; fi
+  if [ -f "${CONVENTIONS_FILE:-}" ]; then b="$(sha256_stdin < "$CONVENTIONS_FILE")" || return 1; fi
+  [ "$a" != "$b" ]
+}
+# 프로젝트 conventions → NUL 구분 스트림 (지문 입력). 경로가 아니라 고정 라벨을 쓴다(내용만 지문에 들어간다).
+# 없으면 고정 부재 표지만 낸다 — conventions 없는 프로젝트의 지문은 실행마다 같고, 파일이 생기거나(빈 파일 포함) 사라지면 달라진다.
 consensus_conventions_stream() {
-  if [ -f "${CONVENTIONS_FILE:-}" ]; then printf 'conventions:present\0'; cat "$CONVENTIONS_FILE"; printf '\0'
+  if conventions_contract_content >/dev/null; then
+    printf 'conventions:present\0'; conventions_contract_content; printf '\0'
   else printf 'conventions:absent\0'; fi
 }
 consensus_editable_fingerprint() { # design | impl
@@ -1540,7 +1582,7 @@ review_contract_docs_json() { # [approval]
   done
   if [ "$mode" = approval ]; then
     h=ABSENT
-    if [ -f "${CONVENTIONS_FILE:-}" ]; then h="$(sha256_stdin < "$CONVENTIONS_FILE")" || return 1; fi
+    if conventions_contract_content >/dev/null; then h="$(conventions_contract_content | sha256_stdin)" || return 1; fi
     docs="$(jq -Sc --arg h "$h" '. + {"conventions.md":$h}' <<< "$docs")" || return 1
   fi
   printf '%s' "$docs"
@@ -1785,6 +1827,10 @@ consensus_stage_accepted() { consensus_pass_current "$1" || user_escalation_reso
 #   next_step: WAITING_USER(사용자 답 전 — 모델 호출 0회) → WORKER_PENDING(답·동기화·source tree 확인됨) → REVIEW_PENDING(review-gap 워커 완료) → RESOLVED.
 #   gaps[].tag 는 decisions.md 의 답 줄이 달아야 하는 태그다: `- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>`
 #     리뷰어 issue  → review-issue=<issue id>          워커 undecided → worker-gap=<unit id | review-gap>#<n>
+#     기록 시점에 그 tag 가 이미 쓰였으면 "@2", "@3" … 이 붙는다(_doc_gap_unique_tags) — 다른 리뷰의 같은 issue id·다시 1 부터인 워커 번호가 앞 gap 과 섞이지 않는다.
+#   prior_gaps[] 는 이 체크포인트 이전에 해결된 gap 의 기록이다(원본 origin/review/review_sha256/attempt/round/unit_id, key·tag·질문·위치, 사용자 답 줄, 그 해결의 입력 지문).
+#     해결 사슬이 유효한 동안(doc_gap_resolved_current) 새 gap 기록이 앞 기록을 이어 붙인다. 필드는 덧붙이기만 했으므로 포맷 버전은 그대로다(없는 필드는 빈 값으로 읽는다).
+#   review_sha256 은 기록 시점 리뷰 JSON 의 내용 해시, worker_run 은 review-gap 워커 실행 기록이다(아래 doc_gap_worker_identity).
 #   기존 [USER-QUESTION][scope=impl] 의미는 그대로다(impl 지문에 들어가고 design PASS 를 깨지 않는다). 태그가 붙은 줄만 pending gap 의 답으로 인정한다.
 # =============================================================
 DOC_GAP_RESUME="$WORK_DIR/doc-gap-resume.json"
@@ -1805,6 +1851,76 @@ doc_gap_resolution_scope_ok() {
   local n; n="$(doc_gap_field '.decisions_lines')"
   [ "$(_doc_gap_decisions_lines)" -ge "$n" ] && [ "$(_doc_gap_decisions_prefix_hash "$n")" = "$(doc_gap_field '.decisions_prefix_hash')" ]
 }
+# tag 유일화: 리뷰어 issue id(R-01 …)는 리뷰마다, 워커 미결정 번호(#1 …)는 호출마다 다시 1 부터라 서로 다른 gap 이 같은 tag 를 가질 수 있다.
+#   그러면 앞 gap 의 답 줄이 새 gap 의 답으로 읽히고(사용자에게 묻지 않고 진행), 앞 gap 의 approach 절 표시가 새 gap 의 해결로 인정된다.
+#   기록 시점에 그 tag 가 이미 쓰였으면(decisions.md·approach.md 에 "[tag]" 가 있거나 앞선 해결 기록·같은 묶음의 앞 항목이 같은 tag) "@2", "@3" … 을 붙인다.
+#   key(리뷰어 issue id / <unit|review-gap>#<n>)는 그대로다 — 사용자가 적을 tag 는 항상 체크포인트·중단 사유에 표기된 값이다.
+_doc_gap_tag_taken() { # tag taken-json
+  jq -e --arg t "$1" 'index($t) != null' <<< "$2" >/dev/null 2>&1 && return 0
+  # 파이프를 쓰지 않는다: 러너는 pipefail 이라 `cat … | grep -q` 는 grep 이 첫 일치에서 끝날 때 cat 이 SIGPIPE(141)로 죽어 '쓰이지 않음'으로 뒤집힌다(큰 문서에서 tag 중복).
+  local f
+  for f in "$WORK_DIR/decisions.md" "$WORK_DIR/approach.md"; do
+    [ -f "$f" ] || continue
+    if grep -qF -- "[$1]" "$f"; then return 0; fi
+  done
+  return 1
+}
+_doc_gap_unique_tags() { # gaps-json prior-json → gaps-json
+  local gaps="$1" taken n i=0 tag cand k
+  taken="$(jq -c '[.[].tag]' <<< "$2")" || return 1
+  n="$(jq 'length' <<< "$gaps")" || return 1
+  while [ "$i" -lt "$n" ]; do
+    tag="$(jq -r --argjson i "$i" '.[$i].tag' <<< "$gaps")" || return 1
+    cand="$tag"; k=1
+    while _doc_gap_tag_taken "$cand" "$taken"; do k=$((k + 1)); cand="$tag@$k"; done
+    gaps="$(jq -c --argjson i "$i" --arg t "$cand" '.[$i].tag=$t' <<< "$gaps")" || return 1
+    taken="$(jq -c --arg t "$cand" '. + [$t]' <<< "$taken")" || return 1
+    i=$((i + 1))
+  done
+  printf '%s' "$gaps"
+}
+# 지금 체크포인트(해결된 상태로 유효함을 호출자가 확인)의 gap 을 해결 기록으로 바꿔 기존 prior_gaps 뒤에 붙인다 → JSON 배열.
+#   항목마다 원본(origin·review 경로·review 내용 해시·attempt·round·unit_id·워커 결과 경로), 이슈 ID(key·tag), 질문·선택지·근거·코드 위치,
+#   사용자 결정(그 시점 decisions.md 의 답 줄 원문), 그 해결을 고정한 impl 입력 지문을 함께 든다 — 여러 번의 미결정이 이어져도 앞 기록을 덮지 않는다.
+_doc_gap_carry_prior() {
+  local answers='{}' tag rsha
+  while IFS= read -r tag; do
+    answers="$(jq -c --arg t "$tag" --arg a "$(doc_gap_answer_line "$tag")" '. + {($t):$a}' <<< "$answers")" || return 1
+  done < <(doc_gap_field '.gaps[].tag')
+  # review_sha256 은 gap 기록 시점에 고정된 값만 넘긴다. 해시가 없던 옛 체크포인트의 리뷰를 지금 내용으로 해시하지 않는다 —
+  # 사후에 만든 해시는 리뷰 발생 시점의 내용을 증명하지 못하므로, 그 기록은 검증 근거 없는 상태로 남아 doc_gap_prior_valid_tags 가 인정하지 않는다.
+  rsha="$(doc_gap_field '.review_sha256 // ""')"
+  jq -c --argjson ans "$answers" --arg rsha "$rsha" '
+    . as $c | [(.prior_gaps // [])[], (.gaps[] | {key, tag, question, options, refs, location, impact,
+      origin:$c.origin, review:$c.review, review_sha256:$rsha, attempt:$c.attempt, round:$c.round, unit_id:$c.unit_id, result:$c.result,
+      answer:($ans[.tag] // ""), resolved_impl_fingerprint:$c.resolved_impl_fingerprint, resolved_at:$c.updated_at})]' "$DOC_GAP_RESUME"
+}
+# 앞선 해결(prior_gaps) 가운데 지금도 연결이 확인되는 것의 tag → JSON 배열. 하나라도 어긋난 항목은 조용히 빠진다(그 해결로는 계약 변경을 덮지 않는다 — fail closed).
+#   · unit 워커 gap(unit_id 있음)이 아니다(그 unit 은 다시 돌았다 — 해결 예외의 근거가 아니라 이력이다)
+#   · 사용자 결정: 기록된 답 줄 원문(answer)이 있고, 그 tag 의 답 줄이 지금도 decisions.md 에 그 원문 그대로 있다
+#   · 원본 리뷰(리뷰 DOC_GAP): 기록된 내용 해시(review_sha256)가 있고, 기록된 경로의 리뷰 JSON 이 그 내용 그대로이며 그 리뷰에 그 이슈 ID 의 DOC_GAP 이 있다
+#   검증 근거(answer·review_sha256)가 없는 기록은 인정하지 않는다 — 확인할 수 없는 이력이 계약 변경을 정당화하지 않는다. origin 이 review/worker 가 아닌 기록도 같다.
+doc_gap_prior_valid_tags() {
+  local out='[]' row tag cur answer review rsha
+  [ -f "$DOC_GAP_RESUME" ] || { printf '[]'; return 0; }
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    [ -z "$(jq -r '.unit_id // ""' <<< "$row")" ] || continue
+    tag="$(jq -r '.tag // ""' <<< "$row")"; [ -n "$tag" ] || continue
+    cur="$(doc_gap_answer_line "$tag")"; [ -n "$cur" ] || continue
+    answer="$(jq -r '.answer // ""' <<< "$row")"; [ -n "$answer" ] && [ "$answer" = "$cur" ] || continue
+    review="$(jq -r '.review // ""' <<< "$row")"; rsha="$(jq -r '.review_sha256 // ""' <<< "$row")"
+    case "$(jq -r '.origin // ""' <<< "$row")" in
+      review)
+        [ -n "$rsha" ] && [ -f "$review" ] && [ "$(sha256_stdin < "$review")" = "$rsha" ] || continue
+        jq -e --arg k "$(jq -r '.key // ""' <<< "$row")" 'any(.issues[]?; .id==$k and .action=="DOC_GAP")' "$review" >/dev/null 2>&1 || continue;;
+      worker) ;;   # verify 의 worker-fix·review-gap 워커 미결정: 원본은 리뷰가 아니다 — 사용자 결정 원문 일치가 근거다
+      *) continue;;
+    esac
+    out="$(jq -c --arg t "$tag" '. + [$t]' <<< "$out")" || return 1
+  done < <(jq -c '(.prior_gaps // [])[]' "$DOC_GAP_RESUME" 2>/dev/null)
+  printf '%s' "$out"
+}
 _doc_gap_write() { # gaps-json origin review attempt round unit_id result source_tree
   # 전제: 지금 impl 문서가 승인된 상태(최초 validator PASS 유효 또는 직전 gap 의 사용자 해결 지문 유효)여야 gap 을 기록할 수 있다 —
   # 승인되지 않은 문서 위의 gap 은 존재할 수 없고, 이 전제가 provenance 체인(PASS → 해결 → 해결 …)의 귀납 조건이다.
@@ -1820,13 +1936,19 @@ _doc_gap_write() { # gaps-json origin review attempt round unit_id result source
     base_review="$(jq -r '.review // ""' "$WORK_DIR/consensus-impl.json")"; base_round="$(jq -r '.round // 0' "$WORK_DIR/consensus-impl.json")"
     base_fp="$(jq -r '.input_fingerprint // ""' "$WORK_DIR/consensus-impl.json")"
   fi
+  # 지금 체크포인트가 해결된 상태로 유효하면(해결 사슬이 이어진다) 그 gap 들을 prior_gaps 로 넘긴다 — 새 gap 이 앞 해결 기록을 덮어쓰지 않는다.
+  # 유효하지 않은 체크포인트(SUPERSEDED·지문 불일치)의 gap 은 넘기지 않는다: 그 위의 문서는 정상 재합의로 다시 확정됐다.
+  local prior='[]' gaps review_sha=""
+  if doc_gap_resolved_current; then prior="$(_doc_gap_carry_prior)" || return 1; fi
+  gaps="$(_doc_gap_unique_tags "$1" "$prior")" || return 1
+  if [ -n "$3" ] && [ -f "$3" ]; then review_sha="$(sha256_stdin < "$3")" || return 1; fi
   local n; n="$(_doc_gap_decisions_lines)"
-  jq -n --argjson v "$DOC_GAP_RESUME_VERSION" --argjson gaps "$1" --arg origin "$2" --arg review "$3" --arg attempt "${4:-0}" --arg round "${5:-0}" \
+  jq -n --argjson v "$DOC_GAP_RESUME_VERSION" --argjson gaps "$gaps" --argjson prior "$prior" --arg review_sha "$review_sha" --arg origin "$2" --arg review "$3" --arg attempt "${4:-0}" --arg round "${5:-0}" \
     --arg unit "$6" --arg result "$7" --arg tree "$8" --arg docs "$(_doc_gap_docs_hash)" --arg approach "$(_doc_gap_approach_hash)" \
     --arg base "$base_review" --arg base_round "$base_round" --arg base_fp "$base_fp" --arg base_kind "$base_kind" --arg gap_fp "$(consensus_pass_fingerprint impl)" \
     --arg frozen "$(_doc_gap_frozen_hash)" --arg dl "$n" --arg dh "$(_doc_gap_decisions_prefix_hash "$n")" --arg now "$(date '+%FT%T%z')" \
-    '{version:$v, origin:$origin, next_step:"WAITING_USER", review:$review, attempt:($attempt|tonumber), round:($round|tonumber), unit_id:$unit, result:$result,
-      gaps:$gaps, source_tree:$tree, docs_fingerprint:$docs, approach_hash:$approach,
+    '{version:$v, origin:$origin, next_step:"WAITING_USER", review:$review, review_sha256:$review_sha, attempt:($attempt|tonumber), round:($round|tonumber), unit_id:$unit, result:$result,
+      gaps:$gaps, prior_gaps:$prior, source_tree:$tree, docs_fingerprint:$docs, approach_hash:$approach,
       base_kind:$base_kind, base_consensus_review:$base, base_consensus_round:($base_round|tonumber), base_pass_fingerprint:$base_fp, gap_impl_fingerprint:$gap_fp,
       frozen_docs_hash:$frozen, decisions_lines:($dl|tonumber), decisions_prefix_hash:$dh,
       resolved_impl_fingerprint:"", recorded_at:$now, updated_at:$now}' > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
@@ -1928,6 +2050,128 @@ doc_gap_prompt_block() {
   jq -r '.gaps[] | "- gap \(.key) (\(.location)): \(.question)\n  options: \(.options | join(" | "))"' "$DOC_GAP_RESUME"
   printf '\n사용자 결정(decisions.md):\n'
   while IFS= read -r tag; do printf '%s\n' "$(doc_gap_answer_line "$tag")"; done < <(doc_gap_field '.gaps[].tag')
+  # 같은 리뷰에서 앞서 해결된 미결정(review-gap 워커가 새 미결정을 내 다시 도는 경우): 이번 체크포인트의 gap 은 워커 미결정뿐이므로 리뷰 DOC_GAP 의 결정을 함께 싣는다
+  jq -r --arg r "$(doc_gap_field '.review // ""')" '
+    [(.prior_gaps // [])[] | select($r != "" and (.review // "") == $r and (.answer // "") != "")]
+    | if length > 0 then "\n같은 리뷰에서 앞서 결정된 항목(그대로 유효 — decisions.md):", (.[] | "- gap \(.key) (\(.location)): \(.question)\n  \(.answer)") else empty end' "$DOC_GAP_RESUME"
+}
+# ---------- review-gap 워커 실행 식별자·실행 기록 (doc-gap-resume.json 의 worker_run) ----------
+# review-gap 워커 결과를 다시 쓰려면 "그 결과가 바로 이 gap 의 것"임이 증명돼야 한다. tree 비교만으로는 부족하다 — 앞 gap 의 워커가 코드를 바꾸지 않고
+# DONE 으로 끝났으면 before/after tree 가 다음 gap 의 source tree 와 모두 같아, 다음 gap 의 워커를 부르지 않고 리뷰로 넘어간다(feature 061).
+# 식별자 = 리뷰 경로 + 리뷰 **내용** + origin·attempt·round + 미결정 ID(key·tag·질문·선택지·위치) + 앞선 해결 기록 + 사용자 결정(답 줄 원문)
+#          + 관련 계약(수리 시점에 고정한 impl 입력 지문 — implementation/approach/범위/units/scope=impl 결정/conventions)의 해시.
+#   시각·tree 는 넣지 않는다(재실행해도 같은 값). 새 gap 이 기록되면 체크포인트가 새로 쓰여 worker_run 이 없으므로 앞 gap 의 결과는 구조적으로 재사용될 수 없다.
+# worker_run = {identity, state:STARTED|DONE, before_tree, result, prior_result_sha256, after_tree, result_sha256} — 체크포인트와 같은 tmp+mv 로 쓴다.
+#   STARTED: 호출 직전(그 시점에 남아 있던 결과 파일의 해시 = prior_result_sha256 — 앞 gap 의 결과와 이번 호출의 결과를 구별한다)
+#   DONE   : run_worker 가 모든 게이트·세션 수용을 지나 유효한 DONE 으로 돌아온 뒤(결과 파일 해시·after tree 를 식별자와 함께 고정)
+doc_gap_worker_identity() {
+  local review tag
+  review="$(doc_gap_field '.review // ""')"
+  {
+    printf 'review-gap-worker-v1\0%s\0' "$review"
+    if [ -n "$review" ] && [ -f "$review" ]; then sha256_stdin < "$review"; else printf 'ABSENT'; fi; printf '\0'
+    jq -Sc '{origin, attempt, round, unit_id, gaps:[.gaps[] | {key, tag, question, options, location}],
+             prior:[(.prior_gaps // [])[] | {tag, review:(.review // ""), answer:(.answer // "")}], resolved_impl_fingerprint}' "$DOC_GAP_RESUME" || return 1
+    printf '\0'
+    while IFS= read -r tag; do printf '%s\0%s\0' "$tag" "$(doc_gap_answer_line "$tag")"; done < <(doc_gap_field '.gaps[].tag')
+  } | sha256_stdin
+}
+doc_gap_worker_run_start() { # identity before_tree result_path
+  local prior_sha=""
+  if [ -f "$3" ]; then prior_sha="$(sha256_stdin < "$3")" || return 1; fi
+  jq --arg id "$1" --arg b "$2" --arg r "$3" --arg p "$prior_sha" --arg now "$(date '+%FT%T%z')" \
+    '.worker_run={identity:$id, state:"STARTED", before_tree:$b, result:$r, prior_result_sha256:$p, started_at:$now} | .updated_at=$now' \
+    "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+doc_gap_worker_run_done() { # after_tree
+  local result sha
+  result="$(doc_gap_field '.worker_run.result // ""')"
+  worker_result_valid "$result" && jq -e '.status=="DONE"' "$result" >/dev/null 2>&1 || return 1
+  sha="$(sha256_stdin < "$result")" || return 1
+  jq --arg a "$1" --arg s "$sha" --arg now "$(date '+%FT%T%z')" \
+    '.worker_run += {state:"DONE", after_tree:$a, result_sha256:$s, finished_at:$now} | .updated_at=$now' \
+    "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+# WORKER_PENDING 에서 review-gap 워커를 부를지 판정한다(모델 호출 없음). stdout 은 사유/기대 tree, 반환값이 판정이다:
+#   0  호출   — 이 gap 의 실행 기록이 없고 현재 tree == 체크포인트 source tree, 또는 시작만 기록됐고(STARTED) tree 가 호출 전 그대로이며
+#               결과 파일이 없거나(run_worker 가 호출 직전에 지운다) 비었거나 시작 기록 당시 내용 그대로다(= CLI 가 결과를 쓰지 않았다)
+#               (기존 정책: 결과 없이 tree 도 그대로면 재실행해도 같은 편집이 중복될 위험이 없다)
+#   10 재사용 — 같은 식별자 + DONE 기록 + 호출 전 tree == 체크포인트 source tree + 현재 tree == 기록된 after tree + 결과 파일이 기록 당시 내용 그대로인 유효한 DONE.
+#               코드 변경이 없던 실행(before == after)도 같은 조건으로 재사용된다
+#   11 source tree 불일치 — stdout 은 기대 tree. 조용히 진행하지 않는다(DOC_GAP_SOURCE_CHANGED)
+#   12 불확실 — 식별자가 다르거나, 시작만 기록됐는데 결과 파일이 시작 기록 당시와 다른 내용으로 남아 있거나(유효한 JSON 인지와 무관 — CLI 가 실제로 돌아 무언가를 썼다,
+#               게이트·세션 수용 완료 여부 불명), 결과 파일이 완료 기록과 다르다. 자동 재호출하지 않는다
+doc_gap_worker_run_verdict() { # identity cur_tree
+  local identity="$1" cur_tree="$2" state before after result cur_sha=""
+  if ! jq -e '.worker_run | type=="object"' "$DOC_GAP_RESUME" >/dev/null 2>&1; then
+    [ "$cur_tree" = "$(doc_gap_field '.source_tree')" ] && return 0
+    doc_gap_field '.source_tree'; return 11
+  fi
+  state="$(doc_gap_field '.worker_run.state // ""')"; before="$(doc_gap_field '.worker_run.before_tree // ""')"
+  after="$(doc_gap_field '.worker_run.after_tree // ""')"; result="$(doc_gap_field '.worker_run.result // ""')"
+  if [ "$(doc_gap_field '.worker_run.identity // ""')" != "$identity" ]; then
+    printf '기록된 review-gap 워커 실행(%s)의 식별자가 지금의 리뷰 내용·미결정·사용자 결정·계약과 다르다' "$state"; return 12
+  fi
+  if [ -n "$result" ] && [ -f "$result" ]; then cur_sha="$(sha256_stdin < "$result")" || { printf '결과 파일 해시 계산 실패'; return 12; }; fi
+  case "$state" in
+    DONE)
+      [ "$before" = "$(doc_gap_field '.source_tree')" ] || { printf '기록된 호출 전 tree(%s)가 체크포인트 source tree 와 다르다' "$before"; return 12; }
+      [ "$cur_tree" = "$after" ] || { printf '%s' "$after"; return 11; }
+      worker_result_valid "$result" && jq -e '.status=="DONE"' "$result" >/dev/null 2>&1 && [ "$cur_sha" = "$(doc_gap_field '.worker_run.result_sha256 // ""')" ] \
+        || { printf '결과 파일(%s)이 완료 기록 당시와 다르거나 유효한 DONE 이 아니다' "$result"; return 12; }
+      return 10;;
+    STARTED)
+      [ "$cur_tree" = "$before" ] || { printf '%s' "$before"; return 11; }
+      # 결과 파일이 시작 기록 당시와 다른 내용으로 남아 있으면 CLI 가 실제로 돌았다 — 그 내용이 유효한 결과인지와 무관하게 자동 재호출하지 않는다
+      # (깨진 결과를 남긴 호출도 세션에는 턴이 들어갔을 수 있다 — 같은 프롬프트의 중복 전송 금지). 빈 파일은 결과가 아니다(run_worker 의 WORKER_RESULT_MISSING 과 같은 기준).
+      if [ -n "$cur_sha" ] && [ -s "$result" ] && [ "$cur_sha" != "$(doc_gap_field '.worker_run.prior_result_sha256 // ""')" ]; then
+        if worker_result_valid "$result"; then
+          printf '호출은 시작됐고 이번 호출의 유효한 결과(%s, status %s)가 남아 있지만 완료 기록(게이트·세션 수용 통과)이 없다' "$result" "$(jq -r '.status' "$result")"
+        else
+          printf '호출은 시작됐고 결과 파일(%s)이 시작 기록 당시와 다른 내용으로 남아 있지만 유효한 결과가 아니고 완료 기록도 없다 — CLI 가 실제로 수행됐을 수 있다(원본 로그·세션 기록으로 호출이 수행되지 않았음을 확인했다면 그 결과 파일을 치우고 재실행하면 워커부터 다시 돈다)' "$result"
+        fi
+        return 12
+      fi
+      return 0;;
+    *) printf '알 수 없는 worker_run.state: %s' "$state"; return 12;;
+  esac
+}
+# REVIEW_PENDING 에서 리뷰로 들어가도 되는지 판정한다(모델 호출 없음) — WORKER_PENDING 의 재사용 판정(10)과 같은 증명을 단계가 넘어간 뒤에도 요구한다.
+#   REVIEW_PENDING 은 "review-gap 워커가 끝났다"는 주장일 뿐이다: 완료 기록 뒤에 결과 파일·리뷰·결정이 바뀌었거나 체크포인트에 실행 기록이 없으면 그 주장을 믿지 않는다.
+#   0  진입 — worker_run 이 DONE 이고 체크포인트 source tree == 기록된 after tree 이고 식별자가 지금과 같고 결과 파일이 완료 기록 당시 내용의 유효한 DONE 이며, (리뷰가 아직 진행되지 않았으면) 현재 tree == 기록된 after tree
+#   11 source tree 불일치(stdout = 기대 tree)   12 불확실(stdout = 사유)
+# tree 는 리뷰 루프가 이 워커 뒤로 아직 아무것도 진행하지 않았을 때만 본다: 리뷰어가 REQUEST_CHANGES 를 내면 수정자가 tree 를 바꾸는 것이 정상이고,
+#   그 뒤의 tree 귀속은 리뷰 루프의 체크포인트(review-impl.json 의 작업 트리 지문)가 판정한다. '진행됨' = review-impl.json 이 초기화 상태(NONE)가 아니거나,
+#   러너가 리뷰 루프의 사용자 반환(DEADLOCK/MAX_ROUNDS/REVIEW_OUTPUT_INVALID — 체크포인트가 초기화될 수 있다)을 worker_run.review_progressed 로 남겼다.
+doc_gap_review_progressed() {
+  jq -e '.worker_run.review_progressed == true' "$DOC_GAP_RESUME" >/dev/null 2>&1 && return 0
+  [ -f "$WORK_DIR/review-impl.json" ] && jq -e '(.next_step // "NONE") != "NONE"' "$WORK_DIR/review-impl.json" >/dev/null 2>&1
+}
+doc_gap_mark_review_progressed() {
+  jq -e '.worker_run | type=="object"' "$DOC_GAP_RESUME" >/dev/null 2>&1 || return 0
+  jq --arg now "$(date '+%FT%T%z')" '.worker_run.review_progressed=true | .updated_at=$now' "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+doc_gap_review_entry_verdict() { # identity cur_tree
+  local identity="$1" cur_tree="$2" state after result cur_sha=""
+  if ! jq -e '.worker_run | type=="object"' "$DOC_GAP_RESUME" >/dev/null 2>&1; then
+    printf 'REVIEW_PENDING 체크포인트에 review-gap 워커 실행 기록(worker_run)이 없다 — 워커 완료를 증명할 수 없다'; return 12
+  fi
+  state="$(doc_gap_field '.worker_run.state // ""')"; after="$(doc_gap_field '.worker_run.after_tree // ""')"; result="$(doc_gap_field '.worker_run.result // ""')"
+  [ "$state" = DONE ] || { printf 'REVIEW_PENDING 인데 review-gap 워커 실행 기록이 완료(DONE)가 아니다(%s)' "${state:-없음}"; return 12; }
+  # WORKER_PENDING 의 '호출 전 tree == source tree' 에 대응하는 검사: REVIEW_PENDING 으로 넘어갈 때 source_tree 는 워커의 after tree 로 갱신된다
+  # (doc_gap_set_step REVIEW_PENDING <after>). 둘이 다르면 체크포인트와 실행 기록이 같은 실행을 가리키지 않는다.
+  [ -n "$after" ] && [ "$after" = "$(doc_gap_field '.source_tree')" ] \
+    || { printf '완료 기록의 after tree(%s)가 REVIEW_PENDING 체크포인트의 source tree 와 다르다' "${after:-없음}"; return 12; }
+  if [ "$(doc_gap_field '.worker_run.identity // ""')" != "$identity" ]; then
+    printf '완료 기록된 review-gap 워커 실행의 식별자가 지금의 리뷰 내용·미결정·사용자 결정·계약과 다르다'; return 12
+  fi
+  if [ -n "$result" ] && [ -f "$result" ]; then cur_sha="$(sha256_stdin < "$result")" || { printf '결과 파일 해시 계산 실패'; return 12; }; fi
+  worker_result_valid "$result" && jq -e '.status=="DONE"' "$result" >/dev/null 2>&1 && [ "$cur_sha" = "$(doc_gap_field '.worker_run.result_sha256 // ""')" ] \
+    || { printf '결과 파일(%s)이 완료 기록 당시와 다르거나 유효한 DONE 이 아니다' "$result"; return 12; }
+  if ! doc_gap_review_progressed; then
+    [ "$cur_tree" = "$after" ] || { printf '%s' "$after"; return 11; }
+  fi
+  return 0
 }
 
 # 마지막 APPROVE 시점 지문과 현재 작업 트리를 비교. 다르면 승인 무효(APPROVAL_STALE).

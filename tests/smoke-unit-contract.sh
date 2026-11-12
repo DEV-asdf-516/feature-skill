@@ -19,6 +19,10 @@
 #   R10e.   확정 파일은 판단 당시의 계약 지문(target_fingerprint)을 든다 — 확정 뒤 계약이 또 바뀌면 대상 집합이 같아도 적용하지 않고 모델 0회로 재확정 요구. 지문 없는 version 1 거부
 #   R17.    리뷰 DOC_GAP 사용자 해결 예외는 그 gap 과 연결된 unit(코드 위치가 scope 안)의 approach 절 가운데 gap tag 가 적힌 절의 변경에만 — 무관한 unit 의 절,
 #           같은 unit 의 다른 절(B04), 표시 없는 절 변경은 stale(DOC_GAP_SCOPE_EXCEEDED, 모델 0회). new_file_roots 의 끝 슬래시는 정규화해 대조
+#   R17g.   (feature 061) 리뷰 DOC_GAP 이 연달아 나와도 앞 gap 의 해결 기록(prior_gaps: 원본 리뷰·이슈 ID·사용자 결정)이 보존돼 앞 해결로 바뀐 절이 계속 인정된다.
+#           같은 issue id 는 tag 가 @2 로 유일화된다. 원본 리뷰가 달라졌거나 prior 기록이 없으면 인정하지 않는다(stale)
+#   R18.    (feature 061) conventions.md 가 피처 범위(files) 안이면 워커가 고쳐도 합의·unit 계약·세션·승인 지문이 워커 기준선 내용에 고정돼 끝까지 간다.
+#           뒤 unit 워커(같은 세션 재개 턴)와 리뷰어는 현재 conventions.md 를 받는다. 범위 밖이거나 기준선 전이면 종전대로 무효
 #   R16.    done.json v1(스냅샷 없음)·검증/리뷰 계약 버전 변경 → 이전 DONE·PASS·APPROVE 를 재사용하지 않음
 #   RV.     러너: 리뷰어 출력 계약 위반 → NEED_USER/REVIEW_OUTPUT_INVALID(ENV_ERROR 아님), 재실행 리뷰어 0회, --new-review-attempt 로만 새 리뷰
 #   R13.    design PASS 뒤 scope=impl 순수 구현 결정 추가 → design 검증자 0회, impl 만 재검증
@@ -78,12 +82,13 @@ printf '%s\n' '#!/usr/bin/env bash' 'echo "test-$1" >> "$MOCK_LOG"' '[ ! -f "$MO
 # --- mock claude: 역할은 스키마 내용으로 판별(검증자 = blocking_issues, 리뷰어 = issues, 워커 = context_updates, 스키마 없는 편집 = 수정자) ---
 cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
-schema=""; prompt=""; editing=0
+schema=""; prompt=""; editing=0; sysprompt=""
 while [ "$#" -gt 0 ]; do case "$1" in
   -p|--verbose) shift;;
   --json-schema) schema="$2"; shift 2;;
   --permission-mode) editing=1; shift 2;;
-  --session-id|--resume|--output-format|--model|--effort|--tools|--allowedTools|--disallowedTools|--append-system-prompt) shift 2;;
+  --append-system-prompt) sysprompt="$2"; shift 2;;
+  --session-id|--resume|--output-format|--model|--effort|--tools|--allowedTools|--disallowedTools) shift 2;;
   *) prompt="$1"; shift;;
 esac; done
 usage='"session_id":"fake","total_cost_usd":0,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}'
@@ -94,7 +99,7 @@ case "$schema" in
     echo "validator $target" >> "$MOCK_LOG"; printf '%s' "$prompt" > "$MOCK_STATE/validator-prompt-$target.txt"
     emit "{\"schema_version\":$MOCK_VC,\"verdict\":\"PASS\",\"blocking_issues\":[]}"; exit 0;;
   *'"issues"'*)
-    echo "reviewer" >> "$MOCK_LOG"
+    echo "reviewer" >> "$MOCK_LOG"; printf '%s' "$sysprompt" > "$MOCK_STATE/reviewer-system.txt"
     if [ -f "$MOCK_STATE/review-docgap" ]; then
       mv "$MOCK_STATE/review-docgap" "$MOCK_STATE/review-docgap.used"
       emit "{\"schema_version\":$MOCK_RC,\"verdict\":\"REQUEST_CHANGES\",\"issues\":[{\"id\":\"R-01\",\"action\":\"DOC_GAP\",\"category\":\"UNDECIDED_APPROACH\",\"evidence_type\":\"DIRECT_MISMATCH\",\"basis_refs\":[\"approach.md:L1-L1\"],\"code_refs\":[\"src/u04.txt:L1-L1\"],\"reachable_scenario\":\"\",\"impact\":\"\",\"why_blocks_now\":\"x\",\"required_outcome\":\"y\",\"origin\":\"ROUND_1\",\"previous_issue_id\":\"\",\"fix_ref\":\"\",\"user_question\":\"어느 방식인가\",\"options\":[\"a\",\"b\"]}]}"; exit 0
@@ -117,6 +122,7 @@ fi
 echo "worker $unit" >> "$MOCK_LOG"
 printf '%s' "$prompt" > "$MOCK_STATE/prompt-$n.txt"
 echo "worker $unit" >> "src/u$n.txt"
+[ ! -f "$MOCK_STATE/conv-edit-$n" ] || echo "- CONV-V2 unit $n 이 추가한 규칙" >> conventions.md   # 범위 안 conventions.md 를 워커가 고친다(R18)
 if [ -f "$MOCK_STATE/undecided-$n" ]; then
   rm -f "$MOCK_STATE/undecided-$n"
   emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u%s.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n")"; exit 0
@@ -427,6 +433,76 @@ for root in 'src/gen/' 'src/gen'; do
     || fail "R17f: new_file_roots '$root' 아래 파일의 gap 이 연결되지 않거나 다른 디렉터리의 gap 이 연결됨"
 done
 pass "R17: 리뷰 DOC_GAP 예외는 gap 의 코드 위치가 속한 unit 의, gap tag 가 적힌 approach 절 변경에만 — 무관한 unit·같은 unit 의 다른 절·표시 없는 절·전역 변경은 stale(모델 0회로 중단)"
+
+# ===== R17g: 연속 리뷰 DOC_GAP — 앞 gap 의 해결 기록이 다음 gap 체크포인트에 보존된다 (feature 061) =====
+restore_r17; touch "$MOCK_STATE/review-docgap"   # Gap A(R-01, A04 절에 표시) 의 review-gap 워커 뒤 리뷰가 Gap B(다른 리뷰의 같은 id R-01, 같은 unit 04)를 낸다
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] && [ "$(calls review-gap-worker)" -eq 1 ] || { tail -30 "$TMP/run.log"; fail "R17g: 전제(Gap A 워커 → Gap B) 실패 (rc $rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+REVIEW_GA="$(jq -r '.prior_gaps[0].review' .agent-work/doc-gap-resume.json)"
+jq -e '.gaps[0].key=="R-01" and .gaps[0].tag=="review-issue=R-01@2" and (.prior_gaps|length)==1 and .prior_gaps[0].tag=="review-issue=R-01" and .prior_gaps[0].key=="R-01"
+       and .prior_gaps[0].origin=="review" and (.prior_gaps[0].review_sha256|length)==64 and (.prior_gaps[0].answer|endswith("→ a")) and .review != .prior_gaps[0].review' .agent-work/doc-gap-resume.json >/dev/null \
+  && [ -f "$REVIEW_GA" ] || fail "R17g: Gap B 체크포인트에 Gap A 의 해결 기록이 없거나 tag 가 유일하지 않음: $(cat .agent-work/doc-gap-resume.json)"
+echo '- [USER-QUESTION][scope=impl][review-issue=R-01@2] 어느 방식인가(두 번째) → b' >> .agent-work/decisions.md
+set_section approach.md B04 'second approach rule of the last unit — [review-issue=R-01@2] 결정: b'
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R17g: 앞 gap(A04)·이번 gap(B04) 해결만 있는데 DONE 이 아님 — 앞 해결을 잊음 (rc $rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }
+[ -z "$(workers)" ] && [ "$(calls review-gap-worker)" -eq 1 ] && [ "$(calls validator)" -eq 0 ] || fail "R17g: Gap B 의 review-gap 워커 1회(검증자·unit 워커 0회)가 아님: $(paste -sd'|' "$MOCK_LOG")"
+( source "$CFG"; unit_done_valid 04-unit && [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "R17g: 완료 뒤 unit 04 의 계약 변경(A04 = Gap A, B04 = Gap B)이 해결로 인정되지 않음"
+# 원본 리뷰와의 연결이 깨지면(리뷰 내용이 기록 당시와 다름) 그 해결로는 덮지 않는다
+cp "$REVIEW_GA" "$TMP/side/review-ga.json"; printf '\n' >> "$REVIEW_GA"
+( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 원본 리뷰 내용이 달라졌는데 앞선 해결이 유효로 남음"
+( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: 원본 리뷰와 연결이 깨진 앞선 해결로 unit 04 의 A04 변경이 덮임"
+cp "$TMP/side/review-ga.json" "$REVIEW_GA"
+cp .agent-work/doc-gap-resume.json "$TMP/side/gap-b.json"
+# 검증 근거가 없는 기록(원본 리뷰 해시·답 줄 원문이 없는 옛 형식)은 인정하지 않는다 — 확인할 수 없는 이력이 계약 변경을 덮지 않는다
+for strip in 'del(.prior_gaps[0].review_sha256)' '.prior_gaps[0].review_sha256=""' 'del(.prior_gaps[0].answer)' 'del(.prior_gaps[0].origin)'; do
+  jq "$strip" "$TMP/side/gap-b.json" > .agent-work/doc-gap-resume.json
+  ( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)이 유효로 인정됨"
+  ( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)으로 unit 04 의 A04 변경이 덮임"
+done
+# 앞 해결 기록이 없으면(이 수정 이전의 동작) A04 변경은 설명되지 않는다 — 재현 대조군
+jq 'del(.prior_gaps)' "$TMP/side/gap-b.json" > .agent-work/doc-gap-resume.json
+( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: prior_gaps 없이도 앞 gap 의 절 변경이 인정됨(대조군이 결함을 재현하지 못함)"
+cp "$TMP/side/gap-b.json" .agent-work/doc-gap-resume.json
+( source "$CFG"; unit_done_valid 04-unit ) || fail "R17g: 체크포인트 복원 뒤 unit 04 가 유효하지 않음"
+pass "R17g: 연속 리뷰 DOC_GAP — 앞 gap 의 원본 리뷰·이슈 ID·사용자 결정이 prior_gaps 로 보존돼 앞 해결의 절 변경이 계속 인정되고, 같은 id 는 @2 로 구분되며, 연결이 깨지면 인정하지 않는다"
+
+# ===== R18: 피처 범위 안 conventions.md 의 자기 무효화 예외 (feature 061) =====
+conv_fp() { ( source "$CFG"; printf '%s %s' "$(consensus_pass_fingerprint design)" "$(consensus_pass_fingerprint impl)" ); }
+conv_in_scope() { # conventions.md 를 전체 범위와 unit 01 의 scope 에 넣는다
+  jq '.files += ["conventions.md"]' .agent-work/feature-scope.json > "$TMP/doc.tmp" && cp "$TMP/doc.tmp" .agent-work/feature-scope.json
+  jq '.units[0].scope.files += ["conventions.md"]' .agent-work/implementation-units.json > "$TMP/doc.tmp" && cp "$TMP/doc.tmp" .agent-work/implementation-units.json
+}
+[ ! -e conventions.md ] || fail "R18: 전제 — 픽스처 저장소에 conventions.md 가 이미 있음"
+# (a) 범위 안 + 워커가 수정 → 재합의·IMPACT·세션 불일치 없이 DONE, 뒤 워커·리뷰어는 최신 conventions 를 받는다
+fresh; printf '# conventions\n- CONV-V1 기존 규칙\n' > conventions.md; conv_in_scope; touch "$MOCK_STATE/conv-edit-01"
+fp_before="$(conv_fp)"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R18a: 범위 안 conventions.md 를 워커가 고쳤는데 DONE 이 아님 (rc $rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }
+[ "$(workers)" = "worker 01-unit worker 02-unit worker 03-unit worker 04-unit" ] && [ "$(calls validator)" -eq 2 ] && [ "$(calls reviewer)" -eq 1 ] \
+  || fail "R18a: unit 워커 각 1회·검증자 2회(design·impl 최초 합의)·리뷰어 1회가 아님: $(paste -sd'|' "$MOCK_LOG")"
+grep -q 'CONV-V2 unit 01' conventions.md || fail "R18a: 전제 — 워커가 conventions.md 를 고치지 않음"
+[ "$(conv_fp)" = "$fp_before" ] && ( source "$CFG"; consensus_pass_current design && consensus_pass_current impl ) || fail "R18a: 워커의 conventions 변경이 design·impl PASS 지문을 바꿈"
+( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V1' && ! ( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V2' || fail "R18a: 계약 지문용 conventions 가 워커 기준선 내용이 아님"
+grep -q 'CONV-V1' "$MOCK_STATE/prompt-01.txt" && ! grep -q 'CONV-V2' "$MOCK_STATE/prompt-01.txt" || fail "R18a: 최초 워커 턴의 conventions 가 기준 내용이 아님"
+grep -q 'PROJECT CONVENTIONS — 현재 파일 전문' "$MOCK_STATE/prompt-02.txt" && grep -q 'CONV-V2 unit 01' "$MOCK_STATE/prompt-02.txt" || fail "R18a: 뒤 unit 워커(재개 턴)가 바뀐 conventions.md 를 받지 못함"
+grep -q 'CONV-V2 unit 01' "$MOCK_STATE/reviewer-system.txt" || fail "R18a: 리뷰어가 바뀐 conventions.md 를 받지 못함"
+for u in 01 02 03 04; do ( source "$CFG"; unit_done_valid "$u-unit" ) || fail "R18a: unit $u 완료가 conventions 변경으로 무효가 됨"; done
+rc="$(run_runner)"; [ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] || fail "R18a: DONE 뒤 재실행에서 모델이 호출됨(승인·합의가 conventions 변경으로 무효): $(paste -sd'|' "$MOCK_LOG")"
+# (b) 범위 안이어도 워커 기준선이 생기기 전에는 예외가 없다 — 합의는 현재 파일을 본다
+mv "$MOCK_STATE/conv-edit-01" "$MOCK_STATE/conv-edit-01.used"   # 이후 사례의 워커는 conventions.md 를 고치지 않는다
+fresh;printf '# conventions\n- CONV-V1 기존 규칙\n' > conventions.md; conv_in_scope
+fp_before="$(conv_fp)"; echo '- CONV-V3 합의 전 사용자 변경' >> conventions.md
+[ "$(conv_fp)" != "$fp_before" ] || fail "R18b: 워커 기준선이 없는데 conventions 변경이 지문에 반영되지 않음"
+# (c) 범위 밖 conventions.md 는 기준선이 있어도 예외가 없다 — 변경은 종전대로 합의·unit 계약을 무효로 만든다
+fresh; printf '# conventions\n- CONV-V1 기존 규칙\n' > conventions.md
+rc="$(run_runner)"; [ "$rc" -eq 0 ] && [ -f .agent-work/worker-baseline.tree ] || { tail -20 "$TMP/run.log"; fail "R18c: 전제(범위 밖 conventions 로 DONE) 실패 (rc $rc)"; }
+echo '- CONV-V4 피처와 무관한 변경' >> conventions.md
+( source "$CFG"; consensus_pass_current design ) && fail "R18c: 범위 밖 conventions.md 변경인데 design PASS 가 유효로 남음(예외가 범위 밖까지 적용됨)"
+( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V4' || fail "R18c: 범위 밖인데 계약 지문용 conventions 가 현재 파일이 아님"
+[ "$( ( source "$CFG"; unit_contract_status 01-unit ) )" != CURRENT ] || fail "R18c: 범위 밖 conventions.md 변경인데 unit 계약이 CURRENT"
+mv conventions.md "$TMP/side/conventions.r18.md"   # 테스트 환경 정리
+pass "R18: 범위 안 conventions.md 는 워커가 고쳐도 지문이 기준선 내용에 고정돼 DONE 까지 가고 뒤 워커·리뷰어는 최신본을 받는다 — 기준선 전·범위 밖 변경은 종전대로 무효"
 
 grep -q 'CODEX-CALLED' "$MOCK_LOG" && fail "역할 CLI 고정 위반: codex 가 호출됨"
 echo "[SMOKE OK] unit 계약·결정 scope 스모크 전체 통과"

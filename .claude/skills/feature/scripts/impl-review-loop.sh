@@ -529,7 +529,7 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   doc_ids=$(jq -r '[.issues[] | select(.action=="DOC_GAP") | .id] | join(",")' "$review")
   if [ -n "$doc_ids" ]; then
     doc_gap_record_review "$review" "$attempt" "$round" "$cur_tree" || { echo "[FAIL] doc-gap-resume.json 기록 실패" >&2; exit 1; }
-    echo "[STOP] 리뷰어 DOC_GAP($doc_ids) — 사용자 결정 필요. 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>' 으로 기록하고 approach.md 에 반영한 뒤 재실행(검증자·디자이너 없이 review-gap 워커 → 리뷰)." >&2
+    echo "[STOP] 리뷰어 DOC_GAP($doc_ids) — 사용자 결정 필요. 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>'(tag: $(doc_gap_field '[.gaps[].tag] | join(", ")')) 으로 기록하고 approach.md 에 반영한 뒤 재실행(검증자·디자이너 없이 review-gap 워커 → 리뷰)." >&2
     jq -r '.issues[] | select(.action=="DOC_GAP") | "  [\(.id)] \(.user_question)\n      선택지: \(.options | join(" | "))"' "$review" >&2
     stop_with 3 DOC_GAP --arg issues "$doc_ids" --arg review "$review"
   fi
