@@ -56,6 +56,22 @@ if [ -f "$TARGET_CONFIG" ] && ! cmp -s "$SOURCE_CONFIG" "$TARGET_CONFIG"; then
     echo "       $TARGET_CONFIG.new 를 참고해 먼저 병합한 뒤 다시 실행하세요. (활성 코드는 변경하지 않았음)" >&2
     exit 1
   fi
+  # 헬퍼 '이름'이 전부 있어도 본문이 옛 버전이면 새 scripts/·schemas/·prompts/ 와 옛 config.sh 본문이 섞인다(혼합 버전).
+  # config.sh 의 버전 상수(런타임 계약 표식 FEATURE_RUNTIME_CONTRACT_VERSION, 검증자·리뷰어 계약 버전, 체크포인트 포맷 버전 …)는 사용자 설정이 아니라
+  # 코드와 한 몸인 값이다 — 소스와 하나라도 다르면(대상에 없음 포함) 활성 코드를 바꾸기 전에 중단한다. 모델·effort·TEST_CMD 같은 사용자 설정은 비교하지 않는다.
+  version_mismatch=""
+  while IFS='=' read -r version_name version_value; do
+    [ -n "$version_name" ] || continue
+    target_value="$(sed -n "s/^${version_name}=\([0-9][0-9]*\).*/\1/p" "$TARGET_CONFIG" | tail -1)"
+    [ "$target_value" = "$version_value" ] || version_mismatch="$version_mismatch $version_name(대상 ${target_value:-없음} / 새 버전 $version_value)"
+  done < <(sed -n 's/^\([A-Z][A-Z_]*_VERSION\)=\([0-9][0-9]*\).*/\1=\2/p' "$SOURCE_CONFIG")
+  if [ -n "$version_mismatch" ]; then
+    cp "$SOURCE_CONFIG" "$TARGET_CONFIG.new"
+    echo "[FAIL] 기존 $TARGET_CONFIG 의 본문이 새 스킬 코드와 다른 버전임(혼합 설치 방지):$version_mismatch" >&2
+    echo "       $TARGET_CONFIG.new 의 버전 상수와 '헬퍼' 구분선 아래 본문으로 교체하고, 그 위의 사용자 설정(모델·effort·CLI·TEST_CMD/LINT_CMD 등)은 기존 값을 유지해 병합한 뒤 다시 실행하세요." >&2
+    echo "       (활성 코드는 변경하지 않았음. 진행 중인 피처가 있으면 그 세션이 끝난 뒤에 병합·설치하세요 — 계약 버전이 바뀌면 진행 중인 합의·리뷰·워커 세션의 전제가 달라집니다)" >&2
+    exit 1
+  fi
 fi
 
 # ---------- 1. 스킬 본체 (config.sh 는 사용자 편집 파일로 별도 처리) ----------

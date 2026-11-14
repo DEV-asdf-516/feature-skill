@@ -55,6 +55,7 @@
 # 종료 코드 / run-state.json status:
 #   0 DONE        완료
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED(워커 DOC_GAP/USER_DECISION) | REVIEW_DOC_GAP | DOC_GAP_SOURCE_CHANGED | DOC_GAP_SCOPE_EXCEEDED |
+#                 DOC_GAP_LOCATION_UNRESOLVED(gap 위치를 파일 경로로 확정할 수 없음 — 범위 위반과 구분, 체크포인트는 WAITING_USER 유지) |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | REVIEW_OUTPUT_INVALID |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
 #                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | UNIT_CONTRACT_IMPACT_REQUIRED | UNIT_CONTRACT_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
@@ -377,6 +378,11 @@ require_units_contract_current() { # 다음-단계
 
 # ---------- preflight ----------
 STAGE=preflight
+# 런타임 계약 표식: 이 스크립트가 전제하는 config.sh 본문(헬퍼) 세대. config.sh 는 사용자 편집 파일이라 설치가 덮어쓰지 않으므로, 옛 본문이 남은 혼합 설치를
+# 헬퍼 이름이 아니라 이 값으로 가려 모델 호출 전에 멈춘다(install.sh 도 설치 전에 같은 값을 대조한다). config.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION 과 함께 올린다.
+REQUIRED_RUNTIME_CONTRACT_VERSION=1
+[ "${FEATURE_RUNTIME_CONTRACT_VERSION:-}" = "$REQUIRED_RUNTIME_CONTRACT_VERSION" ] \
+  || env_error "config.sh 의 런타임 계약 표식(FEATURE_RUNTIME_CONTRACT_VERSION=${FEATURE_RUNTIME_CONTRACT_VERSION:-없음})이 이 스크립트가 요구하는 값($REQUIRED_RUNTIME_CONTRACT_VERSION)과 다르다 — scripts/·schemas/ 와 config.sh 본문이 서로 다른 버전이다(혼합 설치). 새 config.sh(설치 시 만들어진 config.sh.new)의 '헬퍼' 이하 본문을 병합하고 모델·명령 설정은 유지한 뒤 재실행"
 require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
 for f in consensus-loop.sh impl-review-loop.sh; do
   [ -x "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음/실행권한 없음: $f"
@@ -772,7 +778,7 @@ while :; do
       gap_reason=UNDECIDED; [ "$(doc_gap_field '.origin')" != review ] || gap_reason=REVIEW_DOC_GAP
       # 수리된 단계(WORKER_PENDING/REVIEW_PENDING)라도 provenance 다섯 조건이 지금 깨져 있으면(답 삭제·frozen 문서 변경·밑바탕 PASS 무효) 모델 0회로 멈춘다
       if [ "$gap_step" != WAITING_USER ] && ! doc_gap_resolved_current; then
-        stop_need_user DOC_GAP_SCOPE_EXCEEDED "사용자 해결 체크포인트($gap_step)의 provenance 가 현재 상태와 맞지 않는다 — 답 줄 삭제, implementation.md/units/scope 변경, decisions.md 기존 줄 수정, 또는 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED) 무효. 해당 변경을 되돌리고 재실행하거나, 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의). 자동 복구 없음"
+        stop_need_user DOC_GAP_SCOPE_EXCEEDED "사용자 해결 체크포인트($gap_step)의 provenance 가 현재 상태와 맞지 않는다 — 수리 뒤 approach.md/decisions.md 를 다시 고침(수리 시점에 고정한 지문과 불일치), 답 줄 삭제, implementation.md/units/scope 변경, decisions.md 기존 줄 수정, 또는 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED) 무효. 이미 고정된 체크포인트에는 새 승인 지문을 묵시적으로 발급하지 않는다 — 해당 변경을 수리 시점 상태로 되돌리고 재실행하거나, 새 구현 제안이면 사용자 확인 뒤 doc-gap-resume.json 을 치우고 재실행(impl 재합의). 자동 복구 없음"
       fi
       case "$gap_step" in
         WAITING_USER)
@@ -785,11 +791,35 @@ while :; do
             || stop_need_user "$gap_reason" "모든 gap 에 답은 있지만 approach.md 가 DOC_GAP 발생 시점과 같다 — 사용자 결정을 approach.md 에 반영(동기화)한 뒤 재실행. 러너·디자이너가 대신 쓰지 않는다"
           doc_gap_source_unchanged \
             || stop_need_user DOC_GAP_SOURCE_CHANGED "사용자 결정을 기다리는 동안 source worktree 가 DOC_GAP 발생 시점 tree($(doc_gap_field '.source_tree'))와 달라졌다 — 기존 리뷰·워커 결과를 조용히 재사용하지 않는다. 변경을 확인한 뒤 ① 그 tree 로 명시적으로 되돌리고 재실행하거나 ② 변경을 유지하려면 doc-gap-resume.json 을 치우고 재실행(새 리뷰가 필요). 자동 원복 없음"
-          # 해결 범위 밖 변경(implementation.md/units/scope 변경, decisions.md 기존 줄 삭제·수정)은 gap 해결이 아니라 새 제안 — 사용자 해결 경로로 우회하지 않는다
-          if doc_gap_accept; then :; else
+          # 해결 범위 밖 변경(implementation.md/units/scope 변경, decisions.md 기존 줄 삭제·수정)은 gap 해결이 아니라 새 제안 — 사용자 해결 경로로 우회하지 않는다.
+          # 여기부터 확정(doc_gap_accept) 전까지는 체크포인트를 바꾸지 않는다: 어느 검사에서 멈추든 WAITING_USER 그대로라 사용자가 고친 뒤 같은 체크포인트로 재실행할 수 있다.
+          if doc_gap_accept_precheck; then :; else
             case $? in
               2) stop_need_user DOC_GAP_SCOPE_EXCEEDED "gap 해결 범위(approach.md 반영 + decisions.md 추가) 밖의 impl 입력이 바뀌었다(implementation.md/implementation-units.json/feature-scope.json 변경 또는 decisions.md 기존 줄 삭제·수정). 사용자 해결 경로로는 impl 재합의를 우회할 수 없다 — 의도한 새 구현 제안이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의), 아니면 그 문서를 gap 발생 시점으로 되돌리고 재실행";;
-              *) env_error "doc-gap-resume.json 의 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED)이 유효하지 않거나 수리 기록 실패 — 체크포인트·consensus-impl.json·user-escalation-resume-impl.json 을 손으로 고치지 않는다";;
+              *) env_error "doc-gap-resume.json 의 밑바탕(impl consensus PASS 또는 impl 사용자 수리 USER_RESOLVED)이 유효하지 않음 — 체크포인트·consensus-impl.json·user-escalation-resume-impl.json 을 손으로 고치지 않는다";;
+            esac
+          fi
+          # 리뷰 gap(review-gap 워커 경로): 지문을 고정하기 **전에** 완료 unit 을 후보 상태로 검사한다(doc_gap_repair_preflight — 체크포인트는 읽기만).
+          # gap 해결(approach.md 반영)이 그 gap 과 연결되지 않은 unit 의 계약까지 바꿨으면 그 unit 의 완료는 유효하지 않고 review-gap 워커는 그 unit 을 다시 구현하지 않는다.
+          # 먼저 고정하고 검사하면 안내대로 절을 되돌리거나 tag 를 보완해도 고정된 지문과 달라 재시도가 막힌다(feature 073) — 실패는 WAITING_USER 인 채 모델 0회로 돌려준다.
+          gap_fp=""
+          if [ -z "$gap_unit" ] && [ -n "$gap_review" ] && [ -f "$UNITS_MANIFEST_LOCK" ]; then
+            if doc_gap_repair_preflight; then gap_fp="$DOC_GAP_PREFLIGHT_FP"; else
+              case $? in
+                2)
+                  if [ "$DOC_GAP_PREFLIGHT_KIND" = DOC_GAP_LOCATION_UNRESOLVED ]; then
+                    stop_need_user DOC_GAP_LOCATION_UNRESOLVED "이 체크포인트의 gap(현재 gap, 또는 gap 해결로 바뀐 approach.md 절에 적힌 tag 의 gap) 위치를 파일 경로로 확정할 수 없다 — 유효하지 않은 완료 unit 이 없어도 위치를 모르는 gap 의 해결은 승인하지 않는다. '무관한 unit 의 계약 변경'으로 단정하지 않고, 경로를 추정하거나 저장소를 검색하지도 않는다(모델 호출 0회, 체크포인트는 WAITING_USER 그대로 — 지문을 고정하지 않았다). $DOC_GAP_PREFLIGHT_DETAIL. ① 그 절 변경이 이 gap 의 해결이 아니면 절을 gap 발생 시점으로 되돌리고 재실행 ② 위치가 확정된 다른 gap 의 해결이면 그 gap 의 tag 를 절에 적고 재실행 — 둘 다 같은 체크포인트에서 다시 평가된다 ③ 위치를 확정할 수 없는 gap 의 해결로만 설명되는 절이거나 유효하지 않은 unit 없이 현재 gap 의 위치만 미확정이면 러너가 연결을 정할 수 없다: 사용자 확인 뒤 명시적으로 재시작(doc-gap-resume.json 을 옮기고 재실행 → impl 재합의). 자동 원복·자동 재합의 없음"
+                  fi
+                  stop_need_user DOC_GAP_SCOPE_EXCEEDED "DOC_GAP($(doc_gap_field '[.gaps[].key] | join(",")')) 해결 과정에서 그 gap 으로 설명되지 않는 완료 unit 의 계약 변경이 있다(모델 호출 0회, 체크포인트는 WAITING_USER 그대로 — 지문을 고정하지 않았다). $DOC_GAP_PREFLIGHT_DETAIL. 사용자 해결 예외는 ⓐ gap 의 경로가 scope 에 속한 unit 의 ⓑ approach.md 절 변경 가운데 ⓒ 그 절 본문에 gap tag($(doc_gap_field '[.gaps[] | "[" + .tag + "]"] | join(" / ")'))가 적힌 절에만 적용된다. ① 의도하지 않은 변경이면 그 절을 gap 발생 시점으로 되돌리고 재실행 ② gap 해결로 고친 절인데 표시만 빠졌으면 그 절에 해당 tag 를 적고 재실행 — 둘 다 같은 체크포인트에서 다시 평가된다(체크포인트를 치울 필요 없음) ③ gap 과 무관하게 의도한 변경이면 새 구현 제안이다: doc-gap-resume.json 을 옮기고 재실행(impl 재합의 → 그 unit 부터 변경 계약으로 다시 돈다). 자동 원복·자동 재실행 없음";;
+                *) env_error "DOC_GAP 수리 사전 검사 실패(후보 상태 구성·unit 계약 진단) — 체크포인트는 바뀌지 않았다";;
+              esac
+            fi
+          fi
+          if doc_gap_accept "$gap_fp"; then :; else
+            case $? in
+              2) stop_need_user DOC_GAP_SCOPE_EXCEEDED "사전 검사 뒤 gap 해결 범위 밖의 impl 입력이 바뀌었다(implementation.md/implementation-units.json/feature-scope.json 변경 또는 decisions.md 기존 줄 삭제·수정·답 삭제) — 체크포인트는 WAITING_USER 그대로다. 되돌리고 재실행";;
+              3) stop_need_user DOC_GAP_SCOPE_EXCEEDED "사전 검사와 확정 사이에 impl 입력(approach.md/decisions.md)이 바뀌었다 — 검사하지 않은 문서의 지문을 고정하지 않는다(체크포인트는 WAITING_USER 그대로). 편집을 마친 뒤 재실행";;
+              *) env_error "doc-gap-resume.json 수리 기록 실패 — 체크포인트·consensus-impl.json·user-escalation-resume-impl.json 을 손으로 고치지 않는다";;
             esac
           fi
           log "DOC_GAP 사용자 결정 확인 ($(doc_gap_field '[.gaps[].key] | join(",")')) — approach 동기화·source tree 불변 — 검증자·디자이너 없이 워커로"
@@ -805,9 +835,14 @@ while :; do
           fi
           # gap 해결(approach.md 반영)이 그 gap 과 연결되지 않은 unit 의 계약까지 바꿨으면 그 unit 의 완료는 더 이상 유효하지 않다(unit_contract_drift_covered) —
           # review-gap 워커는 그 unit 을 다시 구현하지 않으므로 워커·리뷰어를 부르기 전에 모델 0회로 멈춘다.
+          # 새로 수리되는 체크포인트는 WAITING_USER 의 사전 검사를 통과해야만 여기 온다. 이 검사는 이미 WORKER_PENDING 으로 고정된 체크포인트(이 수정 이전에 고정된 것,
+          # 고정 뒤 unit 산출물이 바뀐 것)를 같은 기준으로 다시 본다 — 지문은 이미 고정돼 있으므로 여기서 문서를 고치는 복구는 없다(묵시적으로 새 지문을 발급하지 않는다).
           if [ -f "$UNITS_MANIFEST_LOCK" ]; then
-            stale_units=""; for unit_id in $(unit_ids); do unit_done_valid "$unit_id" || stale_units="$stale_units$unit_id "; done
-            [ -z "$stale_units" ] || stop_need_user DOC_GAP_SCOPE_EXCEEDED "리뷰 DOC_GAP($(doc_gap_field '[.gaps[].key] | join(",")')) 해결 과정에서 그 gap 과 연결되지 않은 unit(${stale_units% })의 계약이 바뀌었다 — 사용자 해결 예외는 ⓐ gap 의 코드 위치가 scope 에 속한 unit 의 ⓑ approach.md 절 변경 가운데 ⓒ 그 절 본문에 gap tag($(doc_gap_field '[.gaps[] | "[" + .tag + "]"] | join(" / ")'))가 적힌 절에만 적용된다 — 표시 없는 절 변경(같은 unit 의 다른 절 포함)과 그 밖의 unit 은 gap 해결로 확정할 수 없어 완료 체크포인트를 재사용하지 않는다(모델 호출 0회). ① 의도하지 않은 변경이면 그 절을 gap 발생 시점으로 되돌리고 재실행 ② gap 해결로 고친 절인데 표시만 빠졌으면 그 절에 해당 tag 를 적고 재실행 ③ gap 과 무관하게 의도한 변경이면 doc-gap-resume.json 을 치우고 재실행(impl 재합의 → 그 unit 부터 변경 계약으로 다시 돈다). 자동 원복·자동 재실행 없음"
+            gap_diag="$(doc_gap_units_diagnosis)" || env_error "완료 unit 진단 실패"
+            if doc_gap_diagnosis_classify "$gap_diag"; then :; else
+              [ "$?" -eq 2 ] || env_error "완료 unit 진단 분류 실패"
+              stop_need_user "$DOC_GAP_PREFLIGHT_KIND" "이미 수리된(WORKER_PENDING — 지문 고정) DOC_GAP 체크포인트($(doc_gap_field '[.gaps[].key] | join(",")'))에서 gap 으로 설명되지 않는 완료 unit 이 있다(모델 호출 0회). $DOC_GAP_PREFLIGHT_DETAIL. 사용자 해결 예외는 ⓐ gap 의 경로가 scope 에 속한 unit 의 ⓑ approach.md 절 변경 가운데 ⓒ 그 절 본문에 gap tag($(doc_gap_field '[.gaps[] | "[" + .tag + "]"] | join(" / ")'))가 적힌 절에만 적용된다. 이 체크포인트의 지문은 수리 시점 문서에 고정돼 있다 — 문서를 더 고치면 고정된 지문과 달라져 provenance 불일치로 멈춘다(새 지문을 묵시적으로 발급하지 않는다). ① unit 산출물(units/<id>/)이 수리 뒤 바뀌었으면 원 상태로 되돌리고 재실행 ② 문서를 고쳐야 하면 사용자 확인 뒤 명시적으로 재시작(doc-gap-resume.json 을 옮기고 재실행 → impl 재합의 → 그 unit 부터 변경 계약으로 다시 돈다). 자동 원복·자동 재실행 없음"
+            fi
           fi
           # 리뷰 DOC_GAP: review-gap 워커 1회. 재시작 안전성 — 이 gap 의 워커가 이미 끝났다고 **증명될 때만** 재호출 없이 리뷰로 간다.
           # 증명 = 체크포인트의 worker_run(DONE) 이 지금의 실행 식별자(리뷰 내용·미결정 ID·사용자 결정·계약)와 같고, 호출 전 tree == source tree,

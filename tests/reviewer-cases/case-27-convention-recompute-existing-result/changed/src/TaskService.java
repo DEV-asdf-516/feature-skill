@@ -1,0 +1,16 @@
+public class TaskService {
+  private final TaskRepository tasks;
+  private final TaskChangeLogService changeLog;
+  private final Notifier notifier;
+  public TaskService(TaskRepository tasks, TaskChangeLogService changeLog, Notifier notifier) { this.tasks = tasks; this.changeLog = changeLog; this.notifier = notifier; }
+
+  public Task update(long id, TaskUpdate update) {
+    Task before = tasks.findById(id).orElseThrow(() -> new NotFoundException("task " + id));
+    changeLog.logUpdated(before, update);
+    TaskEditNotification notification = TaskEditNotification.of(before, update);
+    if (!notification.changedFields().isEmpty()) notifier.send(notification);
+    Task after = before.applied(update);
+    tasks.save(after);
+    return after;
+  }
+}

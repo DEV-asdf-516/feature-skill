@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. case-31 과 같은 request·design·src·conventions 이고 approach.md 결정 2 가 `logUpdated` 의 반환값 재사용을 REQUIRED 로 정했다 — conventions 5.1 을 지킨다. 순회 형태(for/stream)를 DELEGATED 로 둔 것, `ChangeLogEntry` 를 알림 factory 가 직접 받는 것, changedFields 를 만드는 지역 변수·helper 유무는 어느 것도 blocker 가 아니다 — 이 중 하나나 "더 깔끔한 구조" 를 이유로 BLOCK 하면 과잉 BLOCK 회귀
