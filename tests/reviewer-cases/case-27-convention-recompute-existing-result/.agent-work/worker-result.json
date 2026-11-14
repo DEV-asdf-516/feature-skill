@@ -1,0 +1,25 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/QuoteEditNotification.java of",
+      "technique": "before/update 를 받아 필드별로 비교해 바뀐 필드 이름을 모음",
+      "basis": "결정 4(지역 구조) DELEGATED"
+    }
+  ],
+  "tests": [
+    {
+      "name": "update_notifiesChangedFields",
+      "result": "PASS"
+    },
+    {
+      "name": "update_noChange_doesNotNotify",
+      "result": "PASS"
+    }
+  ],
+  "context_updates": {
+    "upsert": [],
+    "remove": []
+  }
+}

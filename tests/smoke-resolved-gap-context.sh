@@ -120,7 +120,7 @@ reset_tree() {
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 }
 Q1='drop 시 상태 전이 위치'
-undecided_q1='[{"kind":"DOC_GAP","location":"src/u02.txt","decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}]'
+undecided_q1='[{"kind":"DOC_GAP","location":"src/u02.txt","paths":["src/u02.txt"],"decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}]'
 answer_q1() {
   printf -- '- [USER-QUESTION][scope=impl][worker-gap=02-drop#1] %s → 도메인 객체\n' "$Q1" >> .agent-work/decisions.md
   printf '\n## 결정 02-drop (REQUIRED)\n상태 전이는 도메인 객체가 한다.\n' >> .agent-work/approach.md
@@ -199,7 +199,7 @@ pass "C: 같은 ID·질문·위치 재반환 → RESOLVED_GAP_REPEATED(세션 �
 reset_tree; printf '%s' "$undecided_q1" > "$MOCK_STATE/undecided-02"
 rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "D: 전제 실패"
 answer_q1
-printf '[{"kind":"USER_DECISION","location":"src/u02.txt","decision_needed":"drop 시 상태 전이 위치를 어느 모듈이 호출하는가","options":["컨트롤러","서비스"]}]' > "$MOCK_STATE/undecided-02"
+printf '[{"kind":"USER_DECISION","location":"src/u02.txt","paths":["src/u02.txt"],"decision_needed":"drop 시 상태 전이 위치를 어느 모듈이 호출하는가","options":["컨트롤러","서비스"]}]' > "$MOCK_STATE/undecided-02"
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || { tail -20 "$TMP/run.log"; fail "D: 새 질문이 UNDECIDED 로 가지 않음 ($rc/$(reason))"; }
 [ ! -f .agent-work/units/02-drop/resolved-gap-repeated.json ] || fail "D: 표현이 비슷한 새 질문이 RESOLVED_GAP_REPEATED 로 오탐됨"
@@ -210,7 +210,7 @@ pass "D: 유사하지만 다른 새 질문 → 정상 UNDECIDED(새 체크포인
 reset_tree; printf '%s' "$undecided_q1" > "$MOCK_STATE/undecided-02"
 rc="$(run_runner)"; [ "$rc" -eq 2 ] || fail "D2: 전제 실패"
 answer_q1
-printf '[{"kind":"DOC_GAP","location":"src/u02.txt#L40 (drop 재시도 경로)","decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}]' > "$MOCK_STATE/undecided-02"
+printf '[{"kind":"DOC_GAP","location":"src/u02.txt#L40 (drop 재시도 경로)","paths":["src/u02.txt"],"decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}]' > "$MOCK_STATE/undecided-02"
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || { tail -20 "$TMP/run.log"; fail "D2: 다른 위치의 같은 질문이 UNDECIDED 로 가지 않음 ($rc/$(reason))"; }
 [ ! -f .agent-work/units/02-drop/resolved-gap-repeated.json ] || fail "D2: 다른 위치에서 새로 생긴 같은 문구의 미결정이 RESOLVED_GAP_REPEATED 로 오탐됨"
@@ -219,7 +219,7 @@ pass "D2: 같은 질문 문구·다른 위치 → 정상 UNDECIDED(새 체크포
 
 # ===== 사례 E: 일부만 해결 → 해결로 추정하지 않음 =====
 reset_tree
-printf '[{"kind":"DOC_GAP","location":"src/u02.txt","decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]},{"kind":"DOC_GAP","location":"src/u02.txt","decision_needed":"정렬 기준","options":["이름","날짜"]}]' > "$MOCK_STATE/undecided-02"
+printf '[{"kind":"DOC_GAP","location":"src/u02.txt","paths":["src/u02.txt"],"decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]},{"kind":"DOC_GAP","location":"src/u02.txt","paths":["src/u02.txt"],"decision_needed":"정렬 기준","options":["이름","날짜"]}]' > "$MOCK_STATE/undecided-02"
 rc="$(run_runner)"; [ "$rc" -eq 2 ] && [ "$(gap '.gaps|length')" = 2 ] || fail "E: 전제(gap 2개) 실패"
 answer_q1   # 1개만 답
 rc="$(run_runner)"

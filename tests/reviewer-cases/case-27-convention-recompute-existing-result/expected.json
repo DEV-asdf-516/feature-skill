@@ -1,0 +1,14 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "FIX_CODE",
+      "category_any_of": [
+        "CONTRACT_VIOLATION",
+        "REDUNDANT_CODE"
+      ]
+    }
+  ],
+  "note": "conventions.md 규칙 2(Memoization — 이미 계산한 결과는 반환한 쪽의 값을 전달받아 쓴다)를 구현 문서는 반복하지 않는다. `QuoteChangeLogService.logUpdated` 가 같은 세 필드 비교를 수행해 `List<ChangeLogEntry>` 를 반환하는데 `QuoteService.update` 가 그 반환값을 버리고 `QuoteEditNotification.of(before, update)` 가 같은 비교를 다시 한다. 동작·테스트는 문서대로 — 동작이 같거나 문서에 규칙이 없다는 이유로 APPROVE 하면 v17 회귀. issue 는 정확히 1개(재계산 위치와 생산 위치를 code_refs 로). 대조군은 case-28."
+}

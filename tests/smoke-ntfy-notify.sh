@@ -80,7 +80,7 @@ case "$schema" in
   *'"context_updates"'*)
     echo "worker" >> "$MOCK_LOG"
     if [ -f "$MOCK_STATE/undecided-01" ]; then
-      emit '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u01.txt","decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'
+      emit '{"status":"UNDECIDED","undecided":[{"kind":"USER_DECISION","location":"src/u01.txt","paths":["src/u01.txt"],"decision_needed":"policy","options":["a","b"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'
       exit 0
     fi
     echo "worker 01" >> src/u01.txt

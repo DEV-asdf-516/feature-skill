@@ -1,0 +1,25 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/QuoteEditNotification.java of",
+      "technique": "문서 결정 2 대로 before/update 를 비교",
+      "basis": "결정 2 REQUIRED"
+    }
+  ],
+  "tests": [
+    {
+      "name": "update_notifiesChangedFields",
+      "result": "PASS"
+    },
+    {
+      "name": "update_noChange_doesNotNotify",
+      "result": "PASS"
+    }
+  ],
+  "context_updates": {
+    "upsert": [],
+    "remove": []
+  }
+}

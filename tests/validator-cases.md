@@ -6,7 +6,7 @@
 python3 tests/validator-fixture-smoke.py              # 유료 호출 없는 fixture/비교 검사
 # 사용자 지시 후에만 1회용 승인 파일 생성:
 touch .claude/ALLOW_REAL_LLM_REGRESSION
-bash tests/validator-regression.sh                   # 35개, 최대 실제 검증자 35회
+bash tests/validator-regression.sh                   # 39개, 최대 실제 검증자 39회
 bash tests/validator-regression.sh case-08b-round2-new-issue # 08a 먼저 + 08b, 최대 2회
 bash tests/validator-regression.sh compare review.json expected.json [full|gate]
 ```
@@ -73,6 +73,19 @@ v16 부터 종결 검증자는 fresh 세션이고 입력은 `prev-blockers-*.jso
 - **24b — evidence seed 는 anchoring 이 아니다.** 직전 주장의 실행 경로·영향은 재확인의 출발점이다. design 이 그 경로를 끊도록 바뀌었으면(코드는 아직 구현 전) 제외해야 한다.
 
 a 쪽은 08a 와 같은 역할의 Round 1 대조군이다(실패하면 b 의 유료 호출 생략). 23 쌍은 "같은 blocker 가 다시 성립하는가" 를 보는 사례라 category 는 06 보다 넓게 허용한다(REQUIREMENT_MISSING 포함 — v16 실모델에서 관측). category 분류 감도는 06 이 본다.
+
+## 31~34: 기존 계산·판단 결과의 재사용(v21)
+
+v21 은 문서가 기존 코드의 반환값을 두고 같은 판단을 다시 계산하도록 REQUIRED 로 고정해도 구현 문서 검증자가 통과시키던 문제를 다룬다(교차 검증 ⑤). 새 category·스키마 필드·라운드는 없고 기존 `REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH` 로 낸다. 네 사례는 같은 피처(견적 수정 알림 — `QuoteChangeLogService.logUpdated` 가 이미 변경 항목을 계산·반환하고 `QuoteService.update` 가 그 직접 호출부)이며 31·32·33 은 request·design·src 가 바이트 단위로 같다(`validator-fixture-smoke.py` 가 검사).
+
+| 사례 | 차이 | 기대 |
+|---|---|---|
+| 31 recompute-existing-result-block | `conventions.md` 5.1(Memoization — 이미 계산한 결과는 반환한 쪽의 값을 전달받아 쓴다). approach.md 결정 2 가 `QuoteEditNotification.of(before, update)` 의 필드 재비교를 REQUIRED 로 고정하고 `logUpdated` 의 `List<ChangeLogEntry>` 반환값은 버린다 | impl BLOCK / REVISE_DOC / REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH **정확히 1건**(basis_refs = conventions 5.1, conflict_refs = 결정 2, code_refs = 기존 생산·반환 경로) |
+| 32 reuse-existing-result-pass | 31 과 같은 request·design·src·conventions. 결정 2 가 `logUpdated` 의 반환값을 알림 factory 에 넘기도록 REQUIRED | impl PASS (순회 형태·지역 변수·"더 깔끔한 구조" 를 이유로 BLOCK 이면 과잉 BLOCK 회귀) |
+| 33 recompute-no-convention-pass | 31 과 같은 request·design·src·approach.md 이지만 `conventions.md` 가 없다 | impl PASS (적용 규칙·재사용 계약 없이 bounded 재비교를 막으면 오탐) |
+| 34 reuse-impossible-pass | 31 과 같은 request·design·conventions 이지만 `logUpdated` 가 저장 건수(`int`)만 반환하고 `QuoteChangeLogService` 는 변경 제외 범위 | impl PASS (기존 반환값으로 필요한 결과를 만들 수 없는데 5.1 을 이유로 막으면 오탐) |
+
+**v21 실모델 회귀는 실행하지 않았다**(유료, 사용자 승인 필요 — 1회용 승인 파일 정책 그대로). 기대값은 fixture 구조 검사(`validator-fixture-smoke.py`)만 통과한 상태다.
 
 ## 25~30: 문서 주장의 교차 검증(v19)
 

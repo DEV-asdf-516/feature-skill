@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. case-31 과 같은 request·design·src·approach.md 이지만 이 프로젝트에는 conventions.md 가 없다([PROJECT CONVENTIONS] 블록 없음). request·design 어디에도 재사용·비용 계약이 없고, 세 필드의 bounded 비교를 한 번 더 하는 것은 material 한 비용·책임 차이가 아니다 — 적용 규칙 없이 "기존 반환값을 쓰는 편이 낫다" 는 이유로 BLOCK 하면 오탐(v21 교차 검증 ⑤ 의 "내지 않는 경우"). 없는 컨벤션을 지어내거나 스타일 선호를 근거로 삼으면 실패

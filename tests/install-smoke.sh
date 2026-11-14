@@ -192,6 +192,30 @@ fi
 ls "$TARGET_SKILL"/.install-stage-* >/dev/null 2>&1 && fail "비호환 config: 스테이징 잔여물 남음"
 echo "[OK] 4. 비호환 config 사전 중단 (활성 코드 무손상)"
 
+# ---------- 4a. 헬퍼 이름은 전부 있지만 본문이 옛 버전인 config → 혼합 설치 차단, 사용자 모델 설정 보존 ----------
+# (a) 런타임 계약 표식이 없는 옛 본문 (b) 계약 버전 상수가 옛 값 — 둘 다 활성 코드 교체 전에 중단하고 config.sh.new 를 준다
+for stale_edit in '/^FEATURE_RUNTIME_CONTRACT_VERSION=/d' "s/^VALIDATOR_CONTRACT_VERSION=.*/VALIDATOR_CONTRACT_VERSION=$((VALIDATOR_CONTRACT - 1))/"; do
+  sed -e "$stale_edit" -e 's/^WORKER_MODEL=.*/WORKER_MODEL="my-custom-worker-model"/' -e 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$SOURCE_ROOT/.claude/skills/feature/config.sh" > "$TARGET_SKILL/config.sh"
+  rm -f "$TARGET_SKILL/config.sh.new"
+  printf 'sentinel\n' > "$TARGET_SKILL/scripts/.pre-update-sentinel"
+  if bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/mixed.log" 2>&1; then fail "혼합 버전($stale_edit): 옛 본문 config 인데 중단 없이 설치됨"; fi
+  grep -q '혼합 설치 방지' "$SCRATCH/mixed.log" || fail "혼합 버전($stale_edit): 중단 사유가 버전 불일치가 아님: $(cat "$SCRATCH/mixed.log")"
+  [ -f "$TARGET_SKILL/scripts/.pre-update-sentinel" ] || fail "혼합 버전($stale_edit): 중단 전에 활성 코드가 교체됨"
+  ls "$TARGET_SKILL"/.install-stage-* >/dev/null 2>&1 && fail "혼합 버전($stale_edit): 스테이징 잔여물 남음"
+  cmp -s "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_SKILL/config.sh.new" || fail "혼합 버전($stale_edit): config.sh.new 가 새 버전이 아님"
+  grep -q '^WORKER_MODEL="my-custom-worker-model"' "$TARGET_SKILL/config.sh" || fail "혼합 버전($stale_edit): 사용자 모델 설정이 덮어써짐"
+done
+# 병합(새 본문 + 기존 사용자 설정) 뒤에는 설치되고 사용자 설정이 유지된다
+sed -e 's/^WORKER_MODEL=.*/WORKER_MODEL="my-custom-worker-model"/' -e 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$TARGET_SKILL/config.sh.new" > "$TARGET_SKILL/config.sh"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/mixed.log" 2>&1 || fail "혼합 버전: 병합 뒤 설치 실패: $(cat "$SCRATCH/mixed.log")"
+[ ! -f "$TARGET_SKILL/scripts/.pre-update-sentinel" ] && grep -q '^WORKER_MODEL="my-custom-worker-model"' "$TARGET_SKILL/config.sh" || fail "혼합 버전: 병합 뒤 스킬 코드가 갱신되지 않았거나 사용자 설정이 바뀜"
+# 러너도 같은 표식을 대조한다(설치를 거치지 않고 스크립트만 복사한 혼합 상태)
+grep -q 'REQUIRED_RUNTIME_CONTRACT_VERSION=' "$TARGET_SKILL/scripts/feature-run.sh" \
+  && [ "$(sed -n 's/^REQUIRED_RUNTIME_CONTRACT_VERSION=//p' "$TARGET_SKILL/scripts/feature-run.sh")" = "$(sed -n 's/^FEATURE_RUNTIME_CONTRACT_VERSION=//p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")" ] \
+  || fail "혼합 버전: feature-run.sh 가 요구하는 런타임 계약 표식이 config.sh 와 다름"
+printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"   # 뒤 사례(4b)의 전제: 비호환 config 상태로 되돌린다
+echo "[OK] 4a. 옛 본문 config(표식 없음·계약 버전 불일치) → 혼합 설치 차단 + 사용자 설정 보존"
+
 # ---------- 4b. 세 번째 항목(schemas) 복사 실패 → 앞 항목도 기존 상태 유지 ----------
 BROKEN_SOURCE="$SCRATCH/broken-source"
 cp -R "$SOURCE_ROOT" "$BROKEN_SOURCE"
@@ -382,7 +406,7 @@ printf '%s\n' \
   'printf "WORKER_STREAM_MARKER\\n" >&2; echo called >> "$FAKE_WORKER_COUNT"' \
   'if [ "${FAKE_TAMPER_BASELINE:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; echo tampered >> src/existing-under-root.txt; fi' \
   'if [ "${FAKE_TAMPER_BOTH:-0}" = 1 ]; then printf "%s\\n" 4b825dc642cb6eb9a060e54bf8d69288fbee4904 > .agent-work/worker-baseline.tree; for m in .agent-work/feature-scope.json .agent-work/feature-scope.lock.json; do jq -c ".files += [\"src/z.txt\"]" "$m" > "$m.tmp" && mv "$m.tmp" "$m"; done; echo tampered-both >> src/existing-under-root.txt; fi' \
-  'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'\'' > "$output_file"' \
+  'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","paths":["src/x.txt"],"decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'\'' > "$output_file"' \
   > "$FAKE_CODEX"
 chmod +x "$FAKE_CODEX"
 sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
