@@ -1,0 +1,10 @@
+{
+  "round": 1,
+  "verdict": "REQUEST_CHANGES",
+  "issues": [
+    {
+      "action": "DOC_GAP"
+    }
+  ],
+  "note": "case-27 과 같은 conventions.md·코드. 이번에는 approach.md 결정 2 가 필드 재비교를 REQUIRED 로 지시했고 구현은 문서를 그대로 따랐다 — 문서를 따랐다는 이유로 APPROVE 하면 v17 회귀. 규칙 2 와 문서 결정이 실제로 충돌하므로 코드 이슈(FIX_CODE)가 아니라 양쪽 근거(conventions.md 규칙 2 + approach.md 결정 2)를 basis_refs 에 적은 DOC_GAP 1개이며, 이 DOC_GAP 은 디자이너 재합의가 아니라 사용자 에스컬레이션이다(user_question + options ≥ 2)."
+}

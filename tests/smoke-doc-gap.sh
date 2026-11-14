@@ -26,6 +26,9 @@
 #      리뷰 시작 전 tree 가 after tree 와 다르면 DOC_GAP_SOURCE_CHANGED(모델 0회). 리뷰 루프가 이미 진행됐으면(수정자) tree 는 리뷰 체크포인트가 판정한다
 #   M. 리뷰 해시가 없는 옛 체크포인트를 다음 gap 으로 넘길 때 현재 리뷰 내용으로 해시를 사후 생성하지 않는다(검증 근거 없는 기록으로 남는다)
 #   L. tag 중복 검사는 pipefail 아래 큰 문서에서도 이미 쓰인 tag 를 놓치지 않는다
+#   N. (feature 073) 수리 순서: 답·동기화·source·frozen 문서 검증 → 완료 unit 사전 검사(체크포인트 불변) → 통과했을 때만 지문 고정 + WORKER_PENDING.
+#      gap 해결이 unit 계약을 gap 표시 없이 바꾸면 DOC_GAP_SCOPE_EXCEEDED 로 멈추되 WAITING_USER·지문 없음 그대로이고(모델 0회), 재실행해도 같은 사유이며
+#      (provenance 불일치로 바뀌지 않는다), tag 를 보완하면 같은 체크포인트에서 review-gap 워커 1회 → 리뷰어 → DONE. 체크포인트는 gap 의 구조화 경로(paths)를 든다
 # =============================================================
 set -u
 PROJECT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,7 +115,7 @@ if printf '%s' "$prompt" | grep -q '^\[REVIEW GAP CONTEXT\]$'; then
   [ -f "$MOCK_STATE/gap-nochange" ] || { echo "review-gap fix" >> src/u01.txt; echo "review-gap fix" >> src/u02.txt; }   # gap-nochange: 코드 변경 없이 DONE 으로 끝나는 정상 실행
   if [ -f "$MOCK_STATE/gap-again" ]; then
     rm -f "$MOCK_STATE/gap-again"
-    emit '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u02.txt","decision_needed":"정렬 기준","options":["이름","날짜"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'; exit 0
+    emit '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u02.txt","paths":["src/u02.txt"],"decision_needed":"정렬 기준","options":["이름","날짜"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'; exit 0
   fi
   emit '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[{"name":"gap","result":"PASS"}],"context_updates":{"upsert":[],"remove":[]}}'; exit 0
 fi
@@ -122,7 +125,7 @@ echo "worker ${unit:-none}" >> "$MOCK_LOG"
 echo "worker $unit" >> "src/u$n.txt"
 if [ -f "$MOCK_STATE/undecided-$n" ]; then
   rm -f "$MOCK_STATE/undecided-$n"
-  emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u%s.txt","decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n")"; exit 0
+  emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u%s.txt","paths":["src/u%s.txt"],"decision_needed":"drop 시 상태 전이 위치","options":["서비스","도메인 객체"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n" "$n")"; exit 0
 fi
 emit "$(printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":{"upsert":[],"remove":[]}}' "$n")"
 exit 0
@@ -514,6 +517,38 @@ cp .agent-work/decisions.md "$TMP/l.decisions"
 ( set -o pipefail; source "$CFG"; [ "$(_doc_gap_unique_tags '[{"tag":"review-issue=R-77"}]' '[]' | jq -r '.[0].tag')" = 'review-issue=R-77@2' ] ) || fail "L: 이미 쓰인 tag 가 @2 로 유일화되지 않음"
 cp "$TMP/l.decisions" .agent-work/decisions.md
 pass "L: tag 중복 검사는 pipefail 아래 큰 문서에서도 이미 쓰인 tag 를 찾는다(SIGPIPE 오판 없음)"
+
+# ===== 사례 N: (feature 073) 수리 순서 — 완료 unit 사전 검사가 지문 고정보다 먼저다 =====
+reset_tree
+printf '\n## u01\nunit 01 방식\n' >> .agent-work/approach.md   # unit 01 이 의존하는 approach 절 (gap 의 code_refs = src/u01.txt → unit 01 과 연결)
+cp .agent-work/implementation-units.json "$TMP/n.units"
+jq '.units[0].references += ["approach.md#u01"]' "$TMP/n.units" > .agent-work/implementation-units.json
+fake_pass impl
+printf 'DOCGAP' > "$MOCK_STATE/review-next"
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] || { tail -20 "$TMP/run.log"; fail "N: 전제(리뷰 DOC_GAP) 실패 ($rc/$(reason))"; }
+[ "$(gap '.gaps[0].paths | tojson')" = '["src/u01.txt"]' ] && [ "$(gap '.gaps[0].location')" = 'src/u01.txt:L1-L1' ] || fail "N: 체크포인트에 구조화 경로(paths)·location 원문이 없음: $(gap '.gaps[0] | tojson')"
+RECORDED_N="$(gap .recorded_at)"
+printf -- '- [USER-QUESTION][scope=impl][review-issue=R-01] Map 사전 인덱스와 항목별 선형 탐색 중 무엇인가 → Map 사전 인덱스\n' >> .agent-work/decisions.md
+sed -i.bak 's/^unit 01 방식$/unit 01 방식 — Map 사전 인덱스(어느 gap 의 해결인지 표시 없음)/' .agent-work/approach.md && rm -f .agent-work/approach.md.bak
+for attempt in 1 2; do   # 실패한 실행이 지문을 고정하지 않으므로 재실행도 같은 사유다(고정된 지문과의 불일치로 바뀌지 않는다)
+  rc="$(run_runner)"
+  [ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SCOPE_EXCEEDED ] && [ ! -s "$MOCK_LOG" ] || { tail -20 "$TMP/run.log"; fail "N($attempt): 표시 없는 unit 계약 변경이 모델 0회 DOC_GAP_SCOPE_EXCEEDED 가 아님 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
+  [ "$(gap .next_step)" = WAITING_USER ] && [ -z "$(gap .resolved_impl_fingerprint)" ] && [ "$(gap .recorded_at)" = "$RECORDED_N" ] && [ "$(gap '.worker_run // "none"')" = none ] \
+    || fail "N($attempt): 사전 검사 실패인데 체크포인트가 바뀜(WAITING_USER·지문 없음이어야 한다): $(cat .agent-work/doc-gap-resume.json)"
+  grep -q '유효하지 않은 완료 unit: 01-intake\.' .agent-work/run-state.json && grep -q 'approach.md#u01 — 어느 gap 의 해결인지 표시(tag) 없는 변경' .agent-work/run-state.json && grep -q 'WAITING_USER 그대로' .agent-work/run-state.json \
+    || fail "N($attempt): 바뀐 unit·절·복구 안내가 detail 에 없음: $(jq -r .detail .agent-work/run-state.json)"
+  [ ! -e .agent-work/.doc-gap-resume.candidate.json ] || fail "N($attempt): 후보 파일 잔재가 남음"
+done
+( source "$CFG"; impl_docs_accepted ) && fail "N: 사전 검사 실패 상태에서 impl 문서가 승인된 것으로 판정됨(후보 상태가 실제 승인으로 새어 나감)"
+sed -i.bak 's/^unit 01 방식 — Map 사전 인덱스(어느 gap 의 해결인지 표시 없음)$/unit 01 방식 — [review-issue=R-01] Map 사전 인덱스/' .agent-work/approach.md && rm -f .agent-work/approach.md.bak
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "N: tag 를 보완했는데 같은 체크포인트로 진행되지 않음 ($rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }
+[ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer APPROVE|full-test|full-lint" ] || fail "N: 호출 순서 불일치(review-gap 워커 1회 → 리뷰어 1회 기대): $(paste -sd'|' "$MOCK_LOG")"
+no_reconsensus N
+[ "$(gap .next_step)" = RESOLVED ] && [ "$(gap .recorded_at)" = "$RECORDED_N" ] && [ "$(gap '.resolved_impl_fingerprint | length')" -eq 64 ] || fail "N: 같은 체크포인트가 RESOLVED 로 끝나지 않음: $(cat .agent-work/doc-gap-resume.json)"
+cp "$TMP/n.units" .agent-work/implementation-units.json
+pass "N: stale unit 사전 검사는 지문 고정 전 — 실패는 WAITING_USER·모델 0회(재실행도 같은 사유), tag 보완 뒤 같은 체크포인트로 review-gap 워커 1회 → DONE"
 
 rm -rf "$TMP"
 echo "smoke-doc-gap: 전부 통과"

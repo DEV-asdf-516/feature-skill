@@ -1,0 +1,25 @@
+{
+  "status": "DONE",
+  "undecided": [],
+  "delegated_choices": [
+    {
+      "location": "src/QuoteEditNotification.java fieldNames",
+      "technique": "logUpdated 가 반환한 변경 항목에서 field 이름만 꺼내는 private helper",
+      "basis": "결정 4(private helper 유무) DELEGATED"
+    }
+  ],
+  "tests": [
+    {
+      "name": "update_notifiesChangedFields",
+      "result": "PASS"
+    },
+    {
+      "name": "update_noChange_doesNotNotify",
+      "result": "PASS"
+    }
+  ],
+  "context_updates": {
+    "upsert": [],
+    "remove": []
+  }
+}

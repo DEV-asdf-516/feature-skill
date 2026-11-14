@@ -143,7 +143,7 @@ stop_review_output_invalid() { # why — 모델 호출 없이 진단을 돌려�
   exit 4
 }
 
-# ---------- 리뷰어 출력 계약 검사 (스키마 → 버전 → origin/ref → verdict 일관성) ----------
+# ---------- 리뷰어 출력 계약 검사 (스키마 → 버전 → origin/ref → DOC_GAP code_refs 경로 → verdict 일관성) ----------
 # 정의는 재개 블록보다 앞에 둔다 — 승인 체크포인트 재사용이 저장된 승인 출력을 현재 검사기로 재검증할 때 쓴다.
 # ATTEMPT_DIR·scoped_diff 는 호출 시점에만 필요하고(Round 2+ 의 fix_ref 대조), 그 호출은 둘이 정해진 뒤에만 일어난다.
 # 결과: 위반 목록 JSON 배열([{issue_id, field, observed, expected, rule_id}], 통과면 []). issue 본문·verdict 는 고치지 않는다.
@@ -204,6 +204,18 @@ validate_review_output() { # review round prev_review prev_tree cur_tree → err
         + chk((.origin=="FIX_REGRESSION" or .origin=="NEWLY_EXPOSED_BY_FIX") and .fix_ref==""; "fix_ref"; ""; "FIX_REGRESSION/NEWLY_EXPOSED_BY_FIX 는 fix_ref 필수"; "INVALID_FIX_REF")
         end)
       )] | add // [])' "$review")" || return 1
+  # DOC_GAP 의 code_refs: gap 을 구현 단위에 연결하는 유일한 입력이다(doc_gap_record_review → gaps[].paths). ref 하나라도 파일 경로로 확정할 수 없으면
+  # 체크포인트를 만들기 전에 거부한다 — 비정규 ref 만 버리고 남은 경로로 기록하면 빠진 파일의 unit 은 gap 해결로 인정받지 못하고, 사용자가 그 사실을 알 수 없다.
+  # 정규화는 줄 범위 제거와 선행 "./" 제거뿐이다(config.sh code_ref_path). 파일 실재 규칙은 워커 undecided[].paths 와 같다(repo_file_path_violation).
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    if [ "$(jq -r '.ok' <<< "$row")" = true ]; then
+      if why="$(repo_file_path_violation "$(jq -r '.path' <<< "$row")")"; then continue; fi
+    else why="저장소 상대 파일 경로가 아님(절대경로·\"..\"·glob·디렉터리 표기·설명 문구)"; fi
+    errors="$(jq -c --argjson r "$row" --arg why "$why" \
+      '. + [{issue_id:$r.id, field:("code_refs[" + ($r.i|tostring) + "]"), observed:($r.ref + " — " + $why), expected:"DOC_GAP 의 code_refs 는 전부 실제 저장소 상대 파일 경로:L시작-L끝", rule_id:"DOC_GAP_CODE_REF_PATH"}]' <<< "$errors")" || return 1
+  done < <(jq -c "$JQ_PATH_DEFS"'.issues[] | select(.action=="DOC_GAP") | .id as $id | .code_refs | to_entries[]
+             | (.value | code_ref_path) as $p | {id:$id, i:.key, ref:.value, path:$p, ok:($p | plain_file_path)}' "$review")
   # fix_ref ↔ 실제 수정 대조: 직전 리뷰 tree → 이번 리뷰 tree 의 범위 안 변경 목록과 새 버전 hunk (패치 파일 텍스트가 아니라 git tree 기준)
   if [ "$round" -gt 1 ] && [ -n "$prev_tree" ]; then
     changed_list="$ATTEMPT_DIR/.fix-changed-files.$$.tmp"

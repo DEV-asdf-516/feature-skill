@@ -22,6 +22,7 @@
 #   R7.  코드(tree)는 그대로인데 계약 문서(approach.md) 내용이 바뀜 → 저장된 출력은 다른 계약의 리뷰 — 재사용하지 않고 0회로 멈춤(달라진 문서 표시)
 #   R3b. hunk 없는 변경(파일 mode 만)을 가리킨 fix_ref 는 줄 번호가 무엇이든 거부
 #   R8.  검사기 버전(REVIEW_CHECKER_VERSION)만 바뀜 → 저장된 APPROVE 를 그대로 믿지 않고 로컬 재검증(리뷰어 0회), 새 검사기로 무효면 승인 미재사용
+#   R11. DOC_GAP 의 code_refs 가 일부라도 파일 경로로 확정되지 않으면(비정규·지어낸 경로·디렉터리) DOC_GAP_CODE_REF_PATH — gap 체크포인트를 만들지 않는다
 #   R9.  스키마 전체 검사: 필수 필드 누락·빈 code_refs(minItems)·enum 밖 origin·정의되지 않은 필드 → SCHEMA_INVALID(위반마다 따로, issue id·필드 경로 포함)
 #   R10. 코드는 그대로인데 계약 문서·사용자 결정이 바뀜 → 과거 APPROVE 재사용 금지(새 attempt 로 리뷰). 판정 이력 줄만 늘면 승인 유지
 #   R10b. APPROVE 이후 conventions.md 만 생성·변경·삭제 → 기존 승인 무효 → 새 리뷰. 옛 체크포인트 포맷은 해석하지 않는다
@@ -341,6 +342,33 @@ reset_case
 printf '{"schema_version":%s,"verdict":"APPROVE"}\n' "$V" > "$MOCK_STATE/review-1.json"
 rc="$(run_loop)"; [ "$rc" -eq 4 ] && [ "$(inv '.errors[0] | "\(.rule_id):\(.field)"')" = "SCHEMA_INVALID:issues" ] && [ ! -f .agent-work/approved.fingerprint ] || fail "R9: issues 없는 APPROVE 가 통과됨 (rc $rc)"
 pass "R9: 스키마의 required·minItems·enum·additionalProperties 위반은 SCHEMA_INVALID 로 필드별 진단(수정자·승인 없음)"
+
+# ===== R11: DOC_GAP 의 code_refs 는 전부 파일 경로여야 한다 — 일부만 비정규여도 gap 체크포인트를 만들지 않는다 =====
+docgap() { issue '. + {action:"DOC_GAP", category:"UNDECIDED_APPROACH", user_question:"어느 방식인가", options:["a","b"]}' | jq -c --argjson refs "$1" '.code_refs=$refs'; }
+r11_invalid() { # 사례 code_refs-json 기대-field(쉼표) 기대-observed-조각
+  reset_case; rm -f .agent-work/doc-gap-resume.json
+  review_of "$(docgap "$2")" > "$MOCK_STATE/review-1.json"
+  rc="$(run_loop)"
+  [ "$rc" -eq 4 ] && [ "$(inv '[.errors[].rule_id] | unique | join(",")')" = DOC_GAP_CODE_REF_PATH ] && [ "$(inv '[.errors[].field] | join(",")')" = "$3" ] && inv '.errors[0].observed' | grep -qF -- "$4" \
+    || { tail -20 "$TMP/loop.log"; fail "R11($1): 비정규 code_refs 가 DOC_GAP_CODE_REF_PATH 로 거부되지 않음 (rc $rc): $(inv '.errors|tojson' 2>/dev/null)"; }
+  [ ! -f .agent-work/doc-gap-resume.json ] && [ "$(fixer_calls)" -eq 0 ] && [ ! -f .agent-work/approved.fingerprint ] || fail "R11($1): 거부된 리뷰로 gap 체크포인트·수정자·승인이 생김"
+}
+r11_invalid 일부-절대경로 '["src/u01.txt:L3-L3","/abs/src/b/B.java:L3-L4"]' 'code_refs[1]' '/abs/src/b/B.java:L3-L4'
+r11_invalid 일부-상위경로 '["../outside.txt:L1-L2","src/u01.txt:L3-L3"]' 'code_refs[0]' '../outside.txt:L1-L2'
+r11_invalid 전부-비정규 '["src/*.txt:L1","src/"]' 'code_refs[0],code_refs[1]' 'src/*.txt:L1'
+r11_invalid 설명-문구 '["src/u01.txt:L3-L3 (drop 경로)"]' 'code_refs[0]' '작업 트리에 없고'
+r11_invalid 지어낸-경로 '["src/u01.txt:L3-L3","./src/ghost/Invented.java:L1-L2"]' 'code_refs[1]' './src/ghost/Invented.java:L1-L2'
+r11_invalid 디렉터리 '["src"]' 'code_refs[0]' '디렉터리'
+: > "$MOCK_LOG"; rc="$(run_loop)"; [ "$rc" -eq 4 ] && [ "$(codex_calls)" -eq 0 ] || fail "R11: 거부된 출력의 재실행이 리뷰어를 다시 부름 (rc $rc)"
+# 정규화: 줄 범위(여러 구간)와 선행 "./" 만 뗀다 — 검사기와 gap 기록이 같은 정의(code_ref_path)를 쓴다. FIX_CODE 의 code_refs 는 이 검사 대상이 아니다
+r11_errors() { ( set -- "$1"; source "$CFG"; SCHEMA_FILE="$PROJECT_ROOT/.claude/skills/feature/schemas/impl-review.schema.json"
+  eval "$(sed -n '/^validate_review_output() {/,/^}/p' "$REVIEW_LOOP")"; validate_review_output "$1" 1 "" "" "" | jq -c '[.[].rule_id]' ); }
+review_of "$(docgap '["./src/u01.txt:L3-L3,L8-L8","src/u01.txt"]')" > "$TMP/r11-ok.json"
+[ "$(r11_errors "$TMP/r11-ok.json")" = '[]' ] || fail "R11: 정규화 가능한 code_refs(선행 ./·여러 줄 범위·줄 범위 없음)가 거부됨: $(r11_errors "$TMP/r11-ok.json")"
+[ "$( ( source "$CFG"; jq -c "$JQ_PATH_DEFS"'[.issues[].code_refs[] | code_ref_path | select(plain_file_path)] | unique' "$TMP/r11-ok.json" ) )" = '["src/u01.txt"]' ] || fail "R11: gap 기록의 paths 정규화가 검사기와 다름"
+review_of "$(issue '.code_refs=["/abs/x.java:L1","src/u01.txt:L3-L3"]')" > "$TMP/r11-fix.json"
+[ "$(r11_errors "$TMP/r11-fix.json")" = '[]' ] || fail "R11: FIX_CODE issue 의 code_refs 까지 경로 검사 대상이 됨: $(r11_errors "$TMP/r11-fix.json")"
+pass "R11: DOC_GAP code_refs 는 일부만 비정규·지어낸 경로여도 REVIEW_OUTPUT_INVALID(gap 체크포인트 없음, 재실행 리뷰어 0회), 선행 ./·줄 범위만 정규화"
 
 # ===== R10: 계약 문서가 바뀌면 코드가 같아도 과거 APPROVE 를 재사용하지 않는다 =====
 reset_case

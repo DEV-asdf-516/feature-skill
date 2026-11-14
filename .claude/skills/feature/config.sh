@@ -53,7 +53,11 @@ FIXER_CLI=""
 #     구현 수단만 정한 결정은 scope=impl(impl 검증자만). request.md 의 `## 요구 변경/추가` 절(시간순 append)과 scope=design 결정이 함께 있을 때만, 그 항목이 명시한 범위에서
 #     뒤 요구가 옛 요구를 대체한다(범위 밖은 원 요구 유지, 문서 소유자의 주장만으로는 대체되지 않는다). 두 검증자 프롬프트가 같은 출처 우선순위를 쓴다.
 #     검증자에게 주는 결정 파일과 PASS/upstream 지문은 같은 함수(consensus_user_decision_lines)의 출력이다. 지문 계산 의미·체크포인트 포맷은 그대로라 CONSENSUS_CHECKPOINT_VERSION 은 올리지 않는다.
-VALIDATOR_CONTRACT_VERSION=20
+# 21: 교차 검증 ⑤ 기존 계산·판단 결과의 재사용 — approach.md 가 REQUIRED 로 새로 수행하게 한 판단과 같은 의미의 결과를 변경 대상의 직접 호출부·피호출부가 이미 반환·전달하고,
+#     그 반복이 적용되는 명시 convention(Memoization 류)·명시된 재사용/비용 계약·직접 건드리는 기존 코드의 책임 계약과 직접 충돌할 때만 기존 category
+#     (REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH, code_refs = 기존 생산·전달 경로)로 막는다. 새 category·스키마 필드·라운드 없음(schema_version 만 21).
+#     디자이너 수용 기준(designer-revise-impl/-design)에 적용 가능한 명시 convention·직접 변경하는 기존 코드 계약을 포함 — 요구 문서에 반복되지 않았다는 이유만으로 REJECT 하지 않는다.
+VALIDATOR_CONTRACT_VERSION=21
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -68,7 +72,9 @@ VALIDATOR_CONTRACT_VERSION=20
 # 리뷰어에게 주는 지시(프롬프트·스키마)가 그대로이고 루프 검사기의 버그만 고친 경우에는 올리지 않는다 — 그래야 저장된 REVIEW_OUTPUT_INVALID 출력을
 # 고친 검사기로 로컬 재검증(모델 0회)할 수 있다. 지시가 바뀌면 올리고, 그때 저장된 출력은 옛 계약의 것이므로 명시적 새 리뷰 시도가 필요하다.
 # 검사기만 고친 경우에는 대신 아래 REVIEW_CHECKER_VERSION 을 올린다 — 올리지 않으면 옛 검사기가 통과시킨 APPROVE 가 재검증 없이 재사용된다.
-REVIEWER_CONTRACT_VERSION=16
+# 17: 컨벤션 검사 기준에 '기존 계산·판단 결과의 재사용'(Memoization 류)을 추가 — 판정은 실제 데이터 흐름(생산자 → 반환값 → 소비자)이며 문서가 재계산을 지시했어도 통과시키지 않는다.
+#     규칙과 구현 문서가 충돌할 때의 DOC_GAP 은 디자이너 재합의가 아니라 사용자 에스컬레이션이라고 설명을 바로잡음. 일반적인 중복 local 연산은 대상이 아니다. 스키마·검사기는 그대로.
+REVIEWER_CONTRACT_VERSION=17
 # 루프 검사기(impl-review-loop.sh validate_review_output + 아래 review_fix_ref_* )의 버전 — 리뷰어 계약 버전과 목적이 다르다.
 #   REVIEWER_CONTRACT_VERSION : 리뷰어에게 주는 지시(프롬프트·스키마). 바뀌면 저장된 출력은 옛 계약의 것 → 새 리뷰.
 #   REVIEW_CHECKER_VERSION    : 같은 지시에 대한 러너의 결정론적 검사. 검사기만 고쳤으면 이것만 올린다 → 저장된 출력(무효 기록 **과 승인 캐시 모두**)을
@@ -78,7 +84,10 @@ REVIEWER_CONTRACT_VERSION=16
 # 2: hunk 없는 변경(binary·파일 mode 만)을 가리킨 fix_ref 를 거부(전에는 임의의 줄 번호가 통과).
 # 3: 스키마(schemas/impl-review.schema.json)의 required·enum·minItems·minLength·additionalProperties 를 실제로 검사(json_schema_violations).
 #    전에는 일부 필드의 타입만 봐서 필드 누락·enum 밖 origin·빈 code_refs 가 통과했다.
-REVIEW_CHECKER_VERSION=3
+# 4: DOC_GAP issue 의 code_refs 를 전부 검사(DOC_GAP_CODE_REF_PATH) — 줄 범위를 떼고 선행 "./" 만 정규화한 결과가 저장소 상대 파일 경로(plain_file_path)이고
+#    실제 파일(또는 이 피처가 만들 수 있는 경로)이어야 한다. 전에는 gap 기록(doc_gap_record_review)이 비정규 ref 만 조용히 버려, 일부만 비정규인 리뷰는
+#    남은 경로만으로 unit 에 연결되고(paths 가 있으므로 legacy 해석으로도 돌아가지 않는다) 빠진 파일의 unit 은 gap 해결로 인정받지 못했다.
+REVIEW_CHECKER_VERSION=4
 
 # --- 체크포인트 포맷 버전 ---
 # consensus-<target>.json / review-impl.json 의 필드·지문 '의미'가 바뀌면 올린다(계약 버전과 별개).
@@ -143,6 +152,28 @@ WORKER_SKILLS=()
 # =============================================================
 # 헬퍼
 # =============================================================
+
+# --- 런타임 계약 표식 (사용자 설정이 아니다 — 고치지 않는다) ---
+# config.sh 는 사용자 편집 파일이라 install.sh 가 덮어쓰지 않는다. 그래서 새 scripts/·schemas/·prompts/ 와 옛 config.sh 본문(아래 헬퍼)이 섞일 수 있고,
+# 헬퍼 '이름'이 같다는 사실은 본문이 호환된다는 증거가 아니다. 아래 헬퍼의 동작·출력 형식·체크포인트 필드 가운데 scripts/·schemas/·prompts/ 가 의존하는 것을 바꾸면 이 값을 올린다.
+# install.sh 는 대상 config.sh 의 값이 소스와 다르면(없음 포함) 활성 코드를 바꾸기 전에 중단하고(config.sh.new 병합 안내), feature-run.sh 도 시작할 때 자신이 요구하는 값과 대조한다.
+# 1: DOC_GAP 구조화 경로(undecided[].paths·gap paths)·legacy 위치 해석·WAITING_USER 수리 사전 검사(doc_gap_repair_preflight).
+FEATURE_RUNTIME_CONTRACT_VERSION=1
+
+# --- 저장소 상대 경로 공용 규칙 (jq 정의) ---
+# feature-scope / implementation-units 의 scope 경로, 워커 undecided[].paths, DOC_GAP 체크포인트의 paths 가 전부 이 정의를 쓴다(두 번째 경로 검사기를 만들지 않는다).
+#   canonical_path    : 저장소 상대, 선행 "/"·"./" 금지, 빈·"."·".." 세그먼트 금지(따라서 후행 "/" = 디렉터리 표기도 거부)
+#   plain_file_path   : canonical_path 이면서 glob 문자(* ?)가 없다 — 파일 하나를 가리키는 경로
+#   strip_line_ranges : 끝의 ":L10-L20" / ":L10-L20,L30-L40" 줄 범위만 뗀다. 문자열 **끝**에 그 형식이 있을 때만이다 — 경로 안의 ":" 를 첫 위치에서 자르지 않는다
+#   code_ref_path     : 리뷰 issue 의 code_ref("파일:L시작-L끝") → 경로. 줄 범위를 떼고 선행 "./" 만 뗀다(뜻이 하나뿐인 정규화). 그 밖의 비정규 형태(절대경로·".."·glob·
+#                       디렉터리 표기)는 고치지 않는다 — 결과가 plain_file_path 가 아니면 리뷰 출력 검사(DOC_GAP_CODE_REF_PATH)가 체크포인트 생성 전에 거부한다
+JQ_PATH_DEFS='
+  def canonical_path: type=="string" and length>0 and (startswith("/")|not) and (startswith("./")|not)
+    and (split("/") | all(.[]; . != "" and . != "." and . != ".."));
+  def plain_file_path: canonical_path and (test("[*?]")|not);
+  def strip_line_ranges: sub(":L?[0-9]+(-L?[0-9]+)?(,L?[0-9]+(-L?[0-9]+)?)*$"; "");
+  def code_ref_path: strip_line_ranges | sub("^(\\./)+"; "");
+'
 
 # 페르소나 템플릿(prompts/*.md) 렌더링. 지정한 변수만 치환해 본문의 다른 $ 문자를 보존한다.
 # 사용: VAR1=... VAR2=... render_prompt <템플릿 파일> '${VAR1} ${VAR2}'
@@ -772,9 +803,8 @@ lock_feature_scope() {
 #                    기존 파일의 수정·삭제·타입 변경은 범위 위반이다(정확한 파일명을 미리 알 수 없는 '생성' 경로라는 정의 그대로).
 #   files 와 new_file_roots 중 하나 이상에 항목이 있어야 한다 (마이그레이션만 만드는 피처는 roots 만으로 표현)
 feature_scope_valid_file() { # manifest-path
-  [ -f "$1" ] && jq -e --argjson v "$FEATURE_SCOPE_VERSION" '
-    def canonical: type=="string" and length>0 and (startswith("/")|not) and (startswith("./")|not)
-      and (split("/") | all(.[]; . != "" and . != "." and . != ".."));
+  [ -f "$1" ] && jq -e --argjson v "$FEATURE_SCOPE_VERSION" "$JQ_PATH_DEFS"'
+    def canonical: canonical_path;
     .version==$v and (.files|type=="array") and ((.new_file_roots // [])|type=="array")
     and ((.files|length) + ((.new_file_roots // [])|length)) > 0
     and all(.files[]; canonical)
@@ -853,16 +883,38 @@ cli_anomaly_count() { if [ -f "$CLI_ANOMALY_LOG" ]; then grep -c . "$CLI_ANOMALY
 # 워커 결과 JSON 이 러너가 실제로 쓰는 계약을 만족하는가 — 파일 존재만으로 성공 취급하지 않는다.
 #   JSON parse / status ∈ {DONE,UNDECIDED} / undecided·delegated_choices·tests 배열 / context_updates.upsert·remove 배열(unit 의 rolling context 가 읽는다) /
 #   undecided 항목의 kind·location·decision_needed / DONE+undecided>0 · UNDECIDED+undecided==0 모순.
+#   undecided 항목의 paths: 비어 있지 않은 배열, 항목마다 저장소 상대 파일 경로(plain_file_path — 절대경로·".."·선행 "./"·빈 값·glob·디렉터리 표기 거부), 중복 없음.
+#     location 은 사람에게 보여 주는 자유 문자열이고 unit 연결 판정에는 paths 만 쓴다. 파일 실재·신규 파일 허용 범위는 worker_undecided_path_violations 가 따로 본다
+#     (이 함수는 저장된 결과의 재검증에도 쓰이므로 작업 트리 상태에 의존하지 않는다).
 worker_result_valid() { # result.json
   [ -s "$1" ] || return 1
-  jq -e '
+  jq -e "$JQ_PATH_DEFS"'
     type=="object"
     and (.status=="DONE" or .status=="UNDECIDED")
     and (.undecided|type)=="array" and (.delegated_choices|type)=="array" and (.tests|type)=="array"
     and (.context_updates|type)=="object" and (.context_updates.upsert|type)=="array" and (.context_updates.remove|type)=="array"
-    and all(.undecided[]; (.kind=="DOC_GAP" or .kind=="USER_DECISION") and (.location|type)=="string" and (.decision_needed|type)=="string")
+    and all(.undecided[]; (.kind=="DOC_GAP" or .kind=="USER_DECISION") and (.location|type)=="string" and (.decision_needed|type)=="string"
+          and (.paths|type)=="array" and (.paths|length)>0 and all(.paths[]; plain_file_path) and ((.paths|unique|length) == (.paths|length)))
     and ((.status=="DONE" and (.undecided|length)==0) or (.status=="UNDECIDED" and (.undecided|length)>0))
   ' "$1" >/dev/null 2>&1
+}
+# 이번 호출이 낸 undecided[].paths 가 실제 파일을 가리키는가 — "<undecided 번호>:<path>:<사유>" 줄로 위반을 낸다(빈 출력 = 통과). 현행 worktree/scope 규칙과 같다:
+#   · 작업 트리에 있는 파일이면 통과(범위 밖의 기존 파일도 미결정의 위치일 수 있다 — unit 연결은 scope 대조가 따로 정한다)
+#   · 없는 경로는 이 피처가 만들 수 있는 곳(feature-scope 의 files 에 정확히 있거나 new_file_roots 아래)일 때만 통과
+#   · 디렉터리이거나, 없으면서 범위 밖이면 위반 — 모델이 지어낸 경로로 gap 을 unit 에 연결하지 않는다
+# 리뷰 DOC_GAP 의 code_refs 도 같은 규칙으로 본다(repo_file_path_violation — impl-review-loop.sh validate_review_output).
+repo_file_path_violation() { # path → 위반이면 사유를 출력하고 1, 아니면 0
+  if [ -d "$PROJECT_ROOT/$1" ]; then printf '디렉터리'; return 1
+  elif [ -e "$PROJECT_ROOT/$1" ] || [ -L "$PROJECT_ROOT/$1" ]; then return 0
+  elif path_in_feature_scope "$1"; then return 0
+  else printf '작업 트리에 없고 feature-scope(files/new_file_roots) 밖'; return 1; fi
+}
+worker_undecided_path_violations() { # result.json
+  local i p why
+  while IFS=$'\t' read -r i p; do
+    [ -n "$p" ] || continue
+    why="$(repo_file_path_violation "$p")" || printf '%s:%s:%s\n' "$i" "$p" "$why"
+  done < <(jq -r '.undecided | to_entries[] | (.key + 1) as $n | .value.paths[] | [($n|tostring), .] | @tsv' "$1")
 }
 # 디자이너 범위 가드: 디자이너(편집 역할)가 합의 단계에서 문서 밖 source 작업 트리를 바꾸면 rc 와 무관하게 DESIGNER_SCOPE_VIOLATION 으로 중단한다.
 # 검증자는 설계 문서를 검증하는 역할이지 디자이너가 바꾼 구현 코드를 승인하는 역할이 아니므로 VALIDATOR_PENDING 으로 넘기지 않는다.
@@ -945,9 +997,8 @@ units_manifest_file() { if [ -f "$UNITS_MANIFEST_LOCK" ]; then printf '%s' "$UNI
 #   requirements/references ≥1 · targeted_test 비어 있지 않음 · scope 는 feature-scope 와 같은 canonical 규칙(files/roots 중 하나 이상)
 #   depends_on / priority / parallel 같은 필드는 additionalProperties false 로 거부된다(스케줄링 개념 없음).
 units_manifest_valid_file() { # manifest-path
-  [ -f "$1" ] && jq -e --argjson v "$UNITS_MANIFEST_VERSION" '
-    def canonical: type=="string" and length>0 and (startswith("/")|not) and (startswith("./")|not)
-      and (split("/") | all(.[]; . != "" and . != "." and . != ".."));
+  [ -f "$1" ] && jq -e --argjson v "$UNITS_MANIFEST_VERSION" "$JQ_PATH_DEFS"'
+    def canonical: canonical_path;
     def nonempty_strings: type=="array" and length>0 and all(.[]; type=="string" and length>0);
     type=="object" and .version==$v and ((keys - ["version","units"])|length)==0
     and (.units|type=="array") and (.units|length)>=1
@@ -1228,46 +1279,58 @@ unit_worker_contract_current() { # unit-id unit-dir
 #      앞서 해결된 gap(prior_gaps)도 같은 조건으로 센다 — 대상 선별은 _unit_gap_linked_tags 가 한다.
 #   ② 전역 입력(global.txt)은 기준 그대로다 — gap 해결은 request·conventions·design·묶이지 않은 결정을 바꾸지 않는다([review-issue=…]/[worker-gap=…] 줄은 전역 계약에 들어가지 않는다).
 #   ③ local 계약의 차이가 approach.md 를 가리키는 reference 블록 안에만 있다(해결 범위 = approach.md 반영 + decisions.md 추가). implementation·design 절이나 unit JSON 이 달라졌으면 gap 해결이 아니다.
-#   ④ 이 unit 이 그 gap 과 연결돼 있다: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 이 unit 의 scope(files / new_file_roots) 안이다.
+#   ④ 이 unit 이 그 gap 과 연결돼 있다: gap 의 구조화된 경로(paths — 워커 undecided 의 paths / 리뷰 issue 의 code_refs) 중 하나 이상이 이 unit 의 scope(files / new_file_roots) 안이다.
+#      paths 가 없는 옛 체크포인트만 refs/location 을 제한적으로 해석한다(doc_gap_links). 자유 문자열 location 은 새 기록의 판정 근거가 아니다.
 #   ⑤ 달라진 approach 절 **각각**이 그 gap 의 해결임이 명시돼 있다: 절 본문에 연결된 gap 의 tag(`[review-issue=<id>]` / `[worker-gap=review-gap#<n>]`)가 있다.
 #      절과 gap 의 관계를 코드가 추정하지 않는다 — 표시가 없는 절 변경은 gap 해결로 확정할 수 없으므로 자동 승인하지 않고 stale 로 사용자에게 돌아간다.
 # 그 해결의 구현자는 unit 워커가 아니라 review-gap 워커(→ 전체 리뷰)다. gap 과 무관한 unit 의 approach 절까지 같이 고쳤으면 그 unit 은 정상 stale 이다(변경 계약으로 다시 돈다).
-# gap 과 연결된 unit 인가: gap 의 코드 위치(리뷰 issue 의 code_refs / 워커 undecided 의 location) 중 하나가 unit scope(files / new_file_roots) 안인 gap 의 tag 목록(JSON 배열).
+# gap 과 연결된 unit 인가: gap 의 경로(doc_gap_links 가 해석한 paths) 중 하나 이상이 unit scope(files / new_file_roots) 안인 gap 의 tag 목록(JSON 배열).
+# 경로가 하나도 확인되지 않은 gap 은 어느 unit 과도 연결되지 않는다(모든 unit 에 허용하지 않는다).
 # new_file_roots 는 manifest 가 'src/gen/' 처럼 끝 슬래시를 달 수 있으므로 정규화한 뒤 접두 비교한다('src/gen//' 와 비교해 정상 경로를 놓치지 않게).
 # 대상 gap: ① 현재 체크포인트의 gap(리뷰 DOC_GAP 이거나 unit_id 가 없는 워커 미결정일 때만 — unit 워커 gap 은 그 unit 을 다시 돌린다)
 #           ② 앞서 해결된 gap(prior_gaps) 가운데 원본 리뷰·이슈 ID·사용자 결정의 연결이 지금도 확인되는 것(doc_gap_prior_valid_tags).
 #   리뷰 DOC_GAP 이 연달아 나오면 체크포인트는 새 gap 으로 바뀌지만 unit 의 기준 계약은 그대로라, 앞 해결로 바뀐 절도 계속 '기준과 다른 절'이다 —
 #   앞 해결을 잊으면 그 unit 이 stale 로 멈춘다(feature 061). 허용 범위는 gap 마다 같다: 그 gap 의 코드 위치가 scope 안인 unit 의, 그 gap 의 tag 가 적힌 approach 절.
-_unit_gap_linked_tags() { # unit-json
-  local prior; prior="$(doc_gap_prior_valid_tags)" || return 1
-  jq -c --argjson u "$1" --argjson pv "$prior" '
+_unit_links_tags() { # unit-json links-json(doc_gap_links) → 그 unit scope 와 연결된 gap 의 tag 배열
+  jq -c --argjson u "$1" '
     ($u.scope.files // []) as $f | [($u.scope.new_file_roots // [])[] | sub("/+$"; "")] as $r
-    | [((if .origin=="review" or (.unit_id // "")=="" then .gaps else [] end)[], ((.prior_gaps // [])[] | select(.tag as $t | $pv | index($t) != null)))
-        | select([((.refs // []) + [.location // ""])[] | select(type=="string") | split(", ")[] | sub(":L?[0-9]+(-L?[0-9]+)?$"; "") | select(length>0)]
-                 | any(.[]; . as $p | any($f[]; . == $p) or any($r[]; . as $root | $p | startswith($root + "/"))))
-        | .tag]' "$DOC_GAP_RESUME"
+    | [.[] | select(any(.paths[]; . as $p | any($f[]; . == $p) or any($r[]; . as $root | $p | startswith($root + "/")))) | .tag]' <<< "$2"
 }
-unit_contract_drift_covered() { # unit-id
-  local id="$1" dir uj tags
-  doc_gap_resolved_current || return 1
+_unit_gap_linked_tags() { # unit-json
+  local links; links="$(doc_gap_links)" || return 1
+  _unit_links_tags "$1" "$links"
+}
+# 기준 계약 대비 **이 unit 의** 차이를 진단 JSON 으로 낸다 — 판정은 하지 않는다(해결 provenance 를 보지 않는다). 1 = 진단 불가(기준 스냅샷 없음·references 해석 불가).
+#   {unit, global_changed, linked_tags:[연결된 gap tag], changed:[{block:"=== reference: approach.md#… ===", approach:bool, tagged:bool, mentions:[본문에 적힌 후보 gap tag]}]}
+#   tagged   = 그 블록 본문에 이 unit 과 연결된 gap 의 tag 가 있다(조건 ⑤)
+#   mentions = 연결 여부와 무관하게 본문에 적힌 후보 gap 의 tag — tag 는 적혀 있는데 연결이 안 된 경우(위치 미확정·다른 unit 의 gap)를 구분해 보고하는 데 쓴다
+unit_contract_drift_json() { # unit-id
+  local id="$1" dir uj links tags g=false
   dir="$(unit_contract_dir "$id")"
   [ -f "$dir/baseline/contract.txt" ] && [ -f "$dir/contract.json" ] || return 1
   unit_contract_current "$id" || return 1
-  [ "$(jq -r '.global_fingerprint // ""' "$dir/contract.json")" = "$UC_GLOBAL" ] || return 1
+  [ "$(jq -r '.global_fingerprint // ""' "$dir/contract.json")" = "$UC_GLOBAL" ] || g=true
   uj="$(unit_json "$id")"; [ -n "$uj" ] || return 1
-  tags="$(_unit_gap_linked_tags "$uj")" || return 1
-  [ "$tags" != "[]" ] || return 1
-  # 계약을 '=== … ===' 머리줄 단위 블록으로 나눠 기준과 현재를 블록별로 대조한다. 달라진 블록은 전부 ③ approach.md reference 블록이어야 하고,
-  # ⑤ 그 블록마다 연결된 gap 의 tag 가 본문에 있어야 한다 — 같은 unit 의 다른 approach 절(B04)을 같이 고친 것까지 덮지 않는다.
-  jq -ne --rawfile a "$dir/baseline/contract.txt" --rawfile b "$UC_DIR/contract.txt" --argjson tags "$tags" '
+  links="$(doc_gap_links)" || return 1
+  tags="$(_unit_links_tags "$uj" "$links")" || return 1
+  # 계약을 '=== … ===' 머리줄 단위 블록으로 나눠 기준과 현재를 블록별로 대조한다.
+  jq -nc --arg id "$id" --argjson g "$g" --rawfile a "$dir/baseline/contract.txt" --rawfile b "$UC_DIR/contract.txt" --argjson tags "$tags" --argjson links "$links" '
     def blocks: split("\n") | reduce .[] as $l ({cur:"", m:{}};
       if ($l|test("^=== .* ===$")) then .cur=$l | .m[$l]="" else .m[.cur] = ((.m[.cur] // "") + $l + "\n") end) | .m;
     ($a|blocks) as $A | ($b|blocks) as $B
-    | [ (($A + $B) | keys[]) | select($A[.] != $B[.]) ] as $changed
-    | ($changed|length) > 0
-      and all($changed[]; . as $k
-            | ($k|test("^=== reference: approach\\.md(#.*)? ===$"))
-              and (($B[$k] // "") as $body | any($tags[]; . as $t | $body | contains("[" + $t + "]"))))' >/dev/null 2>&1
+    | {unit:$id, global_changed:$g, linked_tags:$tags,
+       changed:[ (($A + $B) | keys[]) | select($A[.] != $B[.]) | . as $k | ($B[$k] // "") as $body
+         | {block:$k, approach:($k|test("^=== reference: approach\\.md(#.*)? ===$")),
+            tagged:any($tags[]; . as $t | $body | contains("[" + $t + "]")),
+            mentions:[$links[].tag | select(. as $t | $body | contains("[" + $t + "]"))]} ]}'
+}
+unit_contract_drift_covered() { # unit-id
+  local d
+  doc_gap_resolved_current || return 1
+  d="$(unit_contract_drift_json "$1")" || return 1
+  # ② 전역 입력 그대로 · ④ 연결된 gap 이 있음 · 달라진 블록은 전부 ③ approach.md reference 블록이고 ⑤ 그 블록마다 연결된 gap 의 tag 가 본문에 있다 —
+  # 같은 unit 의 다른 approach 절(B04)을 같이 고친 것까지 덮지 않는다.
+  jq -e '(.global_changed|not) and (.linked_tags|length) > 0 and (.changed|length) > 0 and all(.changed[]; .approach and .tagged)' <<< "$d" >/dev/null 2>&1
 }
 # 완료 체크포인트가 유효한가: run-state 는 힌트일 뿐이고 실제 판정은 units/<id>/done.json 의 내용 + 현재 spec 지문 + **현재 유효 계약 지문** 교차 확인이다.
 # 문서가 달라졌는데 unit JSON 이 같다는 이유로 DONE 을 재사용하지 않는다. done.json 포맷(version 2)만 맞춘다고 유효해지지 않는다 — 기준 스냅샷과 현재 계약이 같아야 한다.
@@ -1824,7 +1887,9 @@ consensus_stage_accepted() { consensus_pass_current "$1" || user_escalation_reso
 #   사용자 결정이 그 gap 의 최종 결정이며 validator PASS 와는 다른 provenance 다 — consensus-impl.json 을 위조하거나 PASS 지문을 덮어쓰지 않는다.
 #   대신 이 파일이 "이미 PASS 한 impl 문서(base_consensus_review) + 사용자가 답한 gap + 동기화된 approach" 의 지문(resolved_impl_fingerprint)을 들고,
 #   러너는 consensus_pass_current impl 이 stale 이어도 그 지문이 현재 입력과 같으면 impl 단계로 되돌리지 않는다(impl_docs_accepted).
-#   next_step: WAITING_USER(사용자 답 전 — 모델 호출 0회) → WORKER_PENDING(답·동기화·source tree 확인됨) → REVIEW_PENDING(review-gap 워커 완료) → RESOLVED.
+#   next_step: WAITING_USER(사용자 답 전 — 모델 호출 0회) → WORKER_PENDING(답·동기화·source tree 확인 + 리뷰 gap 이면 완료 unit 사전 검사 통과) → REVIEW_PENDING(review-gap 워커 완료) → RESOLVED.
+#   gaps[].paths 는 그 gap 의 구조화된 파일 경로(워커 undecided 의 paths / 리뷰 issue 의 code_refs), gaps[].location 은 표시용 원문이다. unit 연결 판정은 paths 만 쓴다(doc_gap_links).
+#     paths 는 덧붙인 필드라 포맷 버전은 그대로다 — paths 가 없는 옛 기록은 doc_gap_links 의 제한된 legacy 해석으로 읽는다.
 #   gaps[].tag 는 decisions.md 의 답 줄이 달아야 하는 태그다: `- [USER-QUESTION][scope=impl][<tag>] <질문> → <답>`
 #     리뷰어 issue  → review-issue=<issue id>          워커 undecided → worker-gap=<unit id | review-gap>#<n>
 #     기록 시점에 그 tag 가 이미 쓰였으면 "@2", "@3" … 이 붙는다(_doc_gap_unique_tags) — 다른 리뷰의 같은 issue id·다시 1 부터인 워커 번호가 앞 gap 과 섞이지 않는다.
@@ -1880,7 +1945,7 @@ _doc_gap_unique_tags() { # gaps-json prior-json → gaps-json
   printf '%s' "$gaps"
 }
 # 지금 체크포인트(해결된 상태로 유효함을 호출자가 확인)의 gap 을 해결 기록으로 바꿔 기존 prior_gaps 뒤에 붙인다 → JSON 배열.
-#   항목마다 원본(origin·review 경로·review 내용 해시·attempt·round·unit_id·워커 결과 경로), 이슈 ID(key·tag), 질문·선택지·근거·코드 위치,
+#   항목마다 원본(origin·review 경로·review 내용 해시·attempt·round·unit_id·워커 결과 경로), 이슈 ID(key·tag), 질문·선택지·근거·코드 위치(location 원문 + 구조화된 paths),
 #   사용자 결정(그 시점 decisions.md 의 답 줄 원문), 그 해결을 고정한 impl 입력 지문을 함께 든다 — 여러 번의 미결정이 이어져도 앞 기록을 덮지 않는다.
 _doc_gap_carry_prior() {
   local answers='{}' tag rsha
@@ -1891,9 +1956,10 @@ _doc_gap_carry_prior() {
   # 사후에 만든 해시는 리뷰 발생 시점의 내용을 증명하지 못하므로, 그 기록은 검증 근거 없는 상태로 남아 doc_gap_prior_valid_tags 가 인정하지 않는다.
   rsha="$(doc_gap_field '.review_sha256 // ""')"
   jq -c --argjson ans "$answers" --arg rsha "$rsha" '
-    . as $c | [(.prior_gaps // [])[], (.gaps[] | {key, tag, question, options, refs, location, impact,
+    . as $c | [(.prior_gaps // [])[], (.gaps[] | ({key, tag, question, options, refs, location, impact,
       origin:$c.origin, review:$c.review, review_sha256:$rsha, attempt:$c.attempt, round:$c.round, unit_id:$c.unit_id, result:$c.result,
-      answer:($ans[.tag] // ""), resolved_impl_fingerprint:$c.resolved_impl_fingerprint, resolved_at:$c.updated_at})]' "$DOC_GAP_RESUME"
+      answer:($ans[.tag] // ""), resolved_impl_fingerprint:$c.resolved_impl_fingerprint, resolved_at:$c.updated_at}
+      + (if (.paths|type)=="array" then {paths} else {} end)))]' "$DOC_GAP_RESUME"   # paths 는 기록에 있을 때만 넘긴다 — 없던 기록에 사후로 만들어 넣지 않는다
 }
 # 앞선 해결(prior_gaps) 가운데 지금도 연결이 확인되는 것의 tag → JSON 배열. 하나라도 어긋난 항목은 조용히 빠진다(그 해결로는 계약 변경을 덮지 않는다 — fail closed).
 #   · unit 워커 gap(unit_id 있음)이 아니다(그 unit 은 다시 돌았다 — 해결 예외의 근거가 아니라 이력이다)
@@ -1956,17 +2022,92 @@ _doc_gap_write() { # gaps-json origin review attempt round unit_id result source
 # 리뷰어 DOC_GAP issue → 체크포인트(WAITING_USER). 리뷰 루프가 수정자 호출 전에 부른다(같은 리뷰의 FIX_CODE 는 review-gap 워커가 함께 처리).
 doc_gap_record_review() { # review attempt round source_tree
   local gaps
-  gaps="$(jq -c '[.issues[] | select(.action=="DOC_GAP") | {key:.id, tag:("review-issue=" + .id), question:.user_question, options:.options,
-    refs:(.basis_refs + .code_refs), impact:.impact, location:(.code_refs|join(", "))}]' "$1")"
+  # paths: code_refs 를 code_ref_path 로 바꾼 저장소 상대 파일 경로(공용 규칙 — 워커 undecided 의 paths 와 같은 검사).
+  # 리뷰 루프는 validate_review_output(DOC_GAP_CODE_REF_PATH)을 통과한 리뷰만 넘기므로 여기서 빠지는 ref 는 없다 — 아래 select 는 그 검사를 거치지 않은 호출에 대한 방어일 뿐이고,
+  # 하나도 정규 경로가 아니면 paths 를 넣지 않는다(빈 배열로 '연결 없음'을 확정하지 않는다).
+  gaps="$(jq -c "$JQ_PATH_DEFS"'[.issues[] | select(.action=="DOC_GAP") | {key:.id, tag:("review-issue=" + .id), question:.user_question, options:.options,
+    refs:(.basis_refs + .code_refs), impact:.impact, location:(.code_refs|join(", ")),
+    paths:([.code_refs[] | code_ref_path | select(plain_file_path)] | unique)} | if (.paths|length) == 0 then del(.paths) else . end]' "$1")"
   _doc_gap_write "$gaps" review "$1" "$2" "$3" "" "" "$4"
 }
 # 워커 undecided(DOC_GAP·USER_DECISION 모두 — 구현 시점의 solution-shape 선택은 둘 다 사용자 판단) → 체크포인트(WAITING_USER).
 # unit 호출이면 unit_id, review-gap 워커면 review 경로를 남겨 재개 시 같은 워커를 다시 부른다. key 는 <unit|review-gap>#<n>(스키마에 id 없음).
+# 호출자(run_worker)가 worker_result_valid + worker_undecided_path_violations 로 paths 계약을 확인한 결과만 넘긴다.
 doc_gap_record_worker() { # result unit_id review source_tree
   local gaps prefix="${2:-review-gap}"
   gaps="$(jq -c --arg p "$prefix" '[.undecided | to_entries[] | ($p + "#" + ((.key + 1)|tostring)) as $k
-    | {key:$k, tag:("worker-gap=" + $k), question:.value.decision_needed, options:.value.options, refs:[.value.location], impact:.value.kind, location:.value.location}]' "$1")"
+    | {key:$k, tag:("worker-gap=" + $k), question:.value.decision_needed, options:.value.options, refs:[.value.location], impact:.value.kind,
+       location:.value.location, paths:.value.paths}]' "$1")"   # location = 워커가 적은 원문(표시용), paths = 구조화된 경로(연결 판정용)
   _doc_gap_write "$gaps" worker "$3" 0 0 "$2" "$1" "$4"
+}
+# ---------- gap ↔ 파일 경로 (unit 연결 판정의 유일한 입력) ----------
+# 후보 gap(① 현재 체크포인트의 gap — 리뷰 DOC_GAP 이거나 unit_id 가 없는 워커 미결정일 때만 ② 지금도 연결이 확인되는 prior_gaps)마다 경로를 해석한다 → JSON 배열
+#   [{tag, key, prior, structured, location, paths:[저장소 상대 경로], unresolved:[{token, candidates:[…]}]}]
+# · paths 가 있는 기록(신규): 그 배열만 쓴다. location/refs 는 읽지 않는다(legacy 파서를 실행하지 않는다).
+# · paths 가 없는 옛 기록: **코드 위치만** 결정론적으로 해석한다(이 수정 이전에 기록된 체크포인트·prior_gaps 를 무효화하지 않기 위한 제한된 호환 경로).
+#     리뷰 gap 은 원본 리뷰가 기록 당시 내용(review_sha256)으로 확인되면 그 issue 의 code_refs 배열을 쓰고(_doc_gap_legacy_code_refs), 확인되지 않으면 location 을 해석한다.
+#     refs 는 읽지 않는다 — 리뷰 gap 의 refs 는 basis_refs + code_refs 라서 계약 **근거** 파일(basis)이 gap 의 코드 위치로 섞이면 무관한 unit 까지 연결된다.
+#     끝의 " (설명)" 을 떼고 → " / " 와 ", " 로 파일을 나누고 → 각 조각 끝의 줄 범위(":L1-L2", ":L1-L2,L5-L9")만 뗀다. 경로 안의 ":" 를 첫 위치에서 자르지 않는다.
+#     "/" 가 있는 조각은 그 경로 그대로다. basename 뿐인 조각은 **잠긴 feature-scope·units manifest 가 명시한 파일 경로 전체**(+ 저장소 루트의 같은 이름 파일)에서
+#     정확히 하나와 맞을 때만 그 경로로 본다 — unit 마다 따로 맞춰 서로 다른 파일에 중복 연결하지 않고, 저장소를 검색해 추측하지도 않는다.
+#     코드 위치의 조각이 0개·2개 이상과 맞으면 unresolved 로 남긴다(호출자가 DOC_GAP_LOCATION_UNRESOLVED 로 구분).
+_doc_gap_path_universe() { # 잠긴 scope·manifest 가 명시한 파일 경로 전체(JSON 배열, 중복 제거)
+  local fs um a='[]' b='[]'
+  fs="$(feature_scope_file)"; um="$(units_manifest_file)"
+  if [ -f "$fs" ]; then a="$(jq -c '[.files[]? | select(type=="string")]' "$fs" 2>/dev/null)" || a='[]'; fi
+  if [ -f "$um" ]; then b="$(jq -c '[.units[]?.scope.files[]? | select(type=="string")]' "$um" 2>/dev/null)" || b='[]'; fi
+  jq -nc --argjson a "${a:-[]}" --argjson b "${b:-[]}" '$a + $b | unique'
+}
+_doc_gap_root_files() { # 저장소 루트의 파일 이름(JSON 배열) — "/" 없는 조각이 루트 파일 자체일 수 있다
+  local f
+  { for f in "$PROJECT_ROOT"/* "$PROJECT_ROOT"/.[!.]*; do if [ -f "$f" ]; then printf '%s\n' "${f##*/}"; fi; done; } | jq -Rsc 'split("\n") | map(select(length > 0))'
+}
+# paths 없는 옛 리뷰 gap(현재 gap·prior_gaps) 가운데 원본 리뷰 JSON 이 기록 당시 내용 그대로인 것의 code_refs → {"<tag>":[code_refs…]}.
+# 해시가 없거나 리뷰 파일이 달라졌거나 그 id 의 DOC_GAP 이 없으면 항목을 내지 않는다(호출자는 location 해석으로 돌아간다 — 지금 내용으로 사후 추정하지 않는다).
+_doc_gap_legacy_code_refs() {
+  local out='{}' row review rsha refs
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    review="$(jq -r '.review // ""' <<< "$row")"; rsha="$(jq -r '.sha // ""' <<< "$row")"
+    [ -n "$rsha" ] && [ -f "$review" ] && [ "$(sha256_stdin < "$review")" = "$rsha" ] || continue
+    refs="$(jq -c --arg k "$(jq -r '.key' <<< "$row")" '[.issues[]? | select(.id==$k and .action=="DOC_GAP") | .code_refs[]? | select(type=="string")]' "$review" 2>/dev/null)" || continue
+    [ -n "$refs" ] && [ "$refs" != "[]" ] || continue
+    out="$(jq -c --arg t "$(jq -r '.tag' <<< "$row")" --argjson r "$refs" '. + {($t):$r}' <<< "$out")" || return 1
+  done < <(jq -c '. as $c
+    | ((if .origin == "review" then [.gaps[] | {tag, key, review:($c.review // ""), sha:($c.review_sha256 // ""), paths}] else [] end)
+       + [(.prior_gaps // [])[] | select(.origin == "review") | {tag, key, review:(.review // ""), sha:(.review_sha256 // ""), paths}])[]
+    | select(((.paths | type) == "array" and (.paths | length) > 0) | not) | select((.tag | type) == "string" and (.key | type) == "string")' "$DOC_GAP_RESUME" 2>/dev/null)
+  printf '%s' "$out"
+}
+doc_gap_links() {
+  local prior universe roots code_refs
+  code_refs="$(_doc_gap_legacy_code_refs)" || return 1
+  prior="$(doc_gap_prior_valid_tags)" || return 1
+  universe="$(_doc_gap_path_universe)" || return 1
+  roots="$(_doc_gap_root_files)" || return 1
+  jq -c --argjson pv "$prior" --argjson U "$universe" --argjson RF "$roots" --argjson CR "$code_refs" "$JQ_PATH_DEFS"'
+    def legacy_tokens: sub("\\s+\\([^()]*\\)\\s*$"; "")
+      | [ splits("\\s+/\\s+") | splits(",\\s+") | gsub("^\\s+|\\s+$"; "")
+          | select(length > 0 and (test("^L?[0-9]+(-L?[0-9]+)?$") | not)) | strip_line_ranges | select(length > 0) ];
+    def resolve: . as $t
+      | if ($t | canonical_path | not) then {token:$t, candidates:[]}
+        elif ($t | contains("/")) or (($U | index($t)) != null) then {path:$t}
+        else ([($U[] | select((split("/") | last) == $t)), ($RF[] | select(. == $t))] | unique) as $c
+          | if ($c | length) == 1 then {path:$c[0]} else {token:$t, candidates:$c} end
+        end;
+    def link($prior):
+      if (.paths | type) == "array" and (.paths | length) > 0 then
+        {tag, key:(.key // ""), prior:$prior, structured:true, location:(.location // ""), paths:([.paths[] | select(plain_file_path)] | unique), unresolved:[]}
+      else ((.location // "") | if type == "string" then . else "" end) as $raw
+        | ($CR[.tag // ""] // []) as $cr
+        | (if ($cr | length) > 0 then [$cr[] | code_ref_path | select(length > 0) | resolve]   # 검증된 원본 리뷰의 code_refs(배열 그대로 — 문자열을 다시 쪼개지 않는다)
+           else [$raw | select(length > 0) | legacy_tokens[] | resolve] end) as $hard
+        | {tag, key:(.key // ""), prior:$prior, structured:false, location:$raw,
+           paths:([$hard[] | .path // empty] | unique),
+           unresolved:(if ($raw | length) > 0 and ($hard | length) == 0 then [{token:$raw, candidates:[]}] else [$hard[] | select(has("path") | not)] end)}
+      end;
+    [ ((if .origin == "review" or (.unit_id // "") == "" then .gaps else [] end)[] | link(false)),
+      ((.prior_gaps // [])[] | select(.tag as $t | $pv | index($t) != null) | link(true)) ]' "$DOC_GAP_RESUME"
 }
 doc_gap_field() { jq -r "$1" "$DOC_GAP_RESUME"; }
 doc_gap_next_step() { [ -f "$DOC_GAP_RESUME" ] && jq -r --argjson v "$DOC_GAP_RESUME_VERSION" 'if .version==$v then .next_step else "" end' "$DOC_GAP_RESUME" || printf ''; }
@@ -2012,14 +2153,111 @@ doc_gap_base_consensus_valid() {
   [ "$(doc_gap_field '.base_consensus_review')" = "$WORK_DIR/reviews/validator-impl-round-$(printf '%02d' "$(doc_gap_field '.base_consensus_round')").json" ] || return 1
   valid_spec_pass_review "$(doc_gap_field '.base_consensus_review')"
 }
-# 사용자 답 수리: 답·approach 동기화·source tree 는 호출자가 확인했다. 여기서는 해결 범위(frozen 문서 불변·decisions append-only)와 밑바탕 PASS 를 다시 확인한 뒤
-# 지금의 impl 입력 지문(문서 + [scope=impl] 결정)을 사용자 해결 provenance 로 고정하고 WORKER_PENDING 으로. 반환: 0 수리, 2 해결 범위 밖 변경, 1 밑바탕 무효/기록 실패.
-doc_gap_accept() {
+# 사용자 답 수리: 답·approach 동기화·source tree 는 호출자가 확인했다. 수리는 세 단계다 — ① 사전 조건(doc_gap_accept_precheck) ② 리뷰 gap 이면 stale unit 사전 검사
+# (doc_gap_repair_preflight — 체크포인트를 바꾸지 않는다) ③ 확정(doc_gap_accept). 지문을 먼저 고정하고 unit 을 검사하면, 검사 실패 뒤 사용자가 안내대로 문서를 고쳐도
+# 이미 고정된 지문과 달라 재시도할 수 없다(feature 073). 그래서 ①·② 가 전부 통과한 뒤에만 ③ 이 한 번의 tmp+mv 로 지문과 단계를 함께 쓴다.
+# precheck: 해결 범위(frozen 문서 불변·decisions append-only)·답 존재·밑바탕 PASS. 반환: 0 통과, 2 해결 범위 밖 변경, 1 밑바탕 무효. 상태를 바꾸지 않는다.
+doc_gap_accept_precheck() {
   doc_gap_base_consensus_valid || return 1
   doc_gap_resolution_scope_ok || return 2
   [ -z "$(doc_gap_unanswered)" ] || return 2
-  jq --arg fp "$(consensus_pass_fingerprint impl)" --arg now "$(date '+%FT%T%z')" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING" | .updated_at=$now' \
+}
+# 확정: 지금의 impl 입력 지문(문서 + [scope=impl] 결정)을 사용자 해결 provenance 로 고정하고 WORKER_PENDING 으로. 인자를 주면(사전 검사가 본 지문) 지금의 지문과 같을 때만 쓴다.
+# 반환: 0 수리, 2 해결 범위 밖 변경, 3 사전 검사 뒤 입력이 바뀜(체크포인트 불변), 1 밑바탕 무효/기록 실패.
+doc_gap_accept() { # [사전 검사가 본 지문]
+  local fp
+  doc_gap_accept_precheck || return $?
+  fp="$(consensus_pass_fingerprint impl)" || return 1
+  [ -z "${1:-}" ] || [ "$1" = "$fp" ] || return 3
+  jq --arg fp "$fp" --arg now "$(date '+%FT%T%z')" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING" | .updated_at=$now' \
     "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.tmp" && mv "$DOC_GAP_RESUME.tmp" "$DOC_GAP_RESUME"
+}
+# ---------- 완료 unit 진단 (gap 해결이 낳은 계약 변경이 gap 으로 설명되는가) ----------
+# 지금의 $DOC_GAP_RESUME 기준으로 유효하지 않은 완료 unit 과 위치를 확정하지 못한 후보 gap 을 모은다(모델 호출 없음, 상태 변경 없음) → JSON
+#   {stale:[{unit, status, global_changed, linked_tags, changed:[{block, approach, tagged, mentions}]} | {unit, status, why}], unresolved:[{tag, key, prior, location, unresolved:[…]}]}
+doc_gap_units_diagnosis() {
+  local id stale='[]' d st links
+  for id in $(unit_ids); do
+    if unit_done_valid "$id"; then continue; fi
+    st="$(unit_contract_status "$id")"
+    if d="$(unit_contract_drift_json "$id" 2>/dev/null)"; then
+      d="$(jq -c --arg st "$st" '. + {status:$st}' <<< "$d")" || return 1
+    else
+      UC_WHY=""; unit_contract_current "$id" >/dev/null 2>&1 || true   # 사유(UC_WHY)는 서브셸 밖에서 다시 받아야 남는다
+      d="$(jq -nc --arg id "$id" --arg st "$st" --arg why "${UC_WHY:-기준 계약 스냅샷 또는 완료 체크포인트를 읽을 수 없음}" '{unit:$id, status:$st, why:$why}')" || return 1
+    fi
+    stale="$(jq -c --argjson d "$d" '. + [$d]' <<< "$stale")" || return 1
+  done
+  links="$(doc_gap_links)" || return 1
+  jq -nc --argjson stale "$stale" --argjson links "$links" '{stale:$stale, unresolved:[$links[] | select((.unresolved | length) > 0) | {tag, key, prior, location, unresolved}]}'
+}
+# 진단 JSON → 중단 사유(DOC_GAP_PREFLIGHT_KIND)와 보고문(DOC_GAP_PREFLIGHT_DETAIL). 0 = 통과, 2 = 중단.
+#   둘째 인자 "repair"(WAITING_USER 의 최초 수리 — doc_gap_repair_preflight): **현재 gap** 의 위치가 미확정이면 유효하지 않은 unit 이 하나도 없어도 중단한다.
+#     위치를 모르는 gap 의 해결을 승인하면 그 gap 이 어느 unit 의 것인지 정하지 못한 채 지문이 고정된다 — stale unit 유무와 독립인 조건이다.
+#     앞서 해결된 gap(prior_gaps)의 미확정 위치는 이 조건에 넣지 않는다: 이미 승인된 이력이고, 그 해결로 덮이지 않는 unit 은 stale 로 드러난다(정상 재개 호환).
+#     인자가 없으면(이미 지문이 고정된 WORKER_PENDING 재검사) 종전대로 유효하지 않은 unit 이 있을 때만 중단한다 — 승인된 체크포인트를 사후에 무효화하지 않는다.
+#   DOC_GAP_SCOPE_EXCEEDED       확인 가능한 범위 위반이 하나라도 있다: 전역 입력 변경, approach.md 가 아닌 계약 블록 변경, 어느 gap 의 해결인지 표시 없는 approach 절 변경,
+#                                위치가 확정된 gap 인데 그 unit scope 와 연결되지 않는 gap 의 tag 만 적힌 절, 기준 스냅샷·완료 체크포인트 무효
+#   DOC_GAP_LOCATION_UNRESOLVED  남은 문제가 전부 'gap 위치를 확정할 수 없음'이다(절에 적힌 tag 의 gap, 또는 repair 에서 현재 gap) — 범위 위반으로 단정하지 않는다(옛 체크포인트의 자유 문자열 위치)
+DOC_GAP_PREFLIGHT_KIND=""; DOC_GAP_PREFLIGHT_DETAIL=""; DOC_GAP_PREFLIGHT_FP=""
+doc_gap_diagnosis_classify() { # diagnosis-json [repair]
+  local out cur=0
+  DOC_GAP_PREFLIGHT_KIND=""; DOC_GAP_PREFLIGHT_DETAIL=""
+  out="$(jq -c '
+    ([.unresolved[].tag]) as $ut
+    | def name: sub("^=== reference: "; "") | sub("^=== "; "") | sub(" ===$"; "");
+      def classify: # 변경 블록 하나 → {kind: ok|scope|location, text}
+        if (.approach | not) then {kind:"scope", text:("\(.block | name) — approach.md 절이 아닌 계약 변경(gap 해결 범위 밖)")}
+        elif .tagged then {kind:"ok", text:("\(.block | name) — 연결된 gap tag 있음")}
+        elif ([.mentions[] | select(. as $m | $ut | index($m) != null)] | length) > 0 then
+          {kind:"location", text:("\(.block | name) — tag [\([.mentions[] | select(. as $m | $ut | index($m) != null)] | join("] ["))] 가 적혀 있지만 그 gap 의 위치를 확정할 수 없음")}
+        elif (.mentions | length) > 0 then
+          {kind:"scope", text:("\(.block | name) — tag [\(.mentions | join("] ["))] 가 적혀 있지만 그 gap 의 경로가 이 unit scope 밖")}
+        else {kind:"scope", text:("\(.block | name) — 어느 gap 의 해결인지 표시(tag) 없는 변경")} end;
+      [.stale[] | if has("changed") then
+          ([.changed[] | classify]) as $c
+          | {unit, items:$c, extra:([ (if .global_changed then "전역 입력(request·conventions·design·unit 에 묶이지 않은 결정) 변경" else empty end),
+                                      (if (.changed | length) == 0 and (.global_changed | not) then "계약은 기준과 같지만 완료 체크포인트(done.json)가 유효하지 않음" else empty end) ]),
+             linked:.linked_tags}
+          | . + {text:("[\(.unit)] " + (((.items | map(.text)) + .extra) | join(" / ")) + " (이 unit 과 연결된 gap tag: " + (if (.linked | length) > 0 then (.linked | map("[" + . + "]") | join(" ")) else "없음" end) + ")")}
+        else {unit, items:[], extra:["\(.status): \(.why)"], text:("[\(.unit)] \(.status) — \(.why)")} end] as $units
+    | {n:($units | length),
+       scope:([$units[] | select((.extra | length) > 0 or any(.items[]; .kind == "scope"))] | length),
+       location:([$units[] | select(any(.items[]; .kind == "location"))] | length),
+       units:([$units[].unit] | join(" ")),
+       text:([$units[].text] | join(" ; ")),
+       current_unresolved:([.unresolved[] | select(.prior | not)] | length),
+       unresolved:([.unresolved[] | "[\(.tag)] 원문 \"\(.location)\" — " + ([.unresolved[] | "\"\(.token)\" 후보 \(if (.candidates | length) == 0 then "없음" else (.candidates | join(", ")) end)"] | join(" / "))] | join(" ; "))}' <<< "$1")" || return 1
+  [ "${2:-}" != repair ] || cur="$(jq -r '.current_unresolved' <<< "$out")"
+  if [ "$(jq -r '.n' <<< "$out")" -eq 0 ]; then
+    [ "$cur" -gt 0 ] || return 0
+    DOC_GAP_PREFLIGHT_KIND=DOC_GAP_LOCATION_UNRESOLVED
+    DOC_GAP_PREFLIGHT_DETAIL="유효하지 않은 완료 unit 은 없다. 위치를 확정할 수 없는 gap(경로 추정·저장소 검색 없음) — $(jq -r '.unresolved' <<< "$out")"
+    return 2
+  fi
+  if [ "$(jq -r '.scope' <<< "$out")" -eq 0 ] && { [ "$(jq -r '.location' <<< "$out")" -gt 0 ] || [ "$cur" -gt 0 ]; }; then DOC_GAP_PREFLIGHT_KIND=DOC_GAP_LOCATION_UNRESOLVED; else DOC_GAP_PREFLIGHT_KIND=DOC_GAP_SCOPE_EXCEEDED; fi
+  DOC_GAP_PREFLIGHT_DETAIL="유효하지 않은 완료 unit: $(jq -r '.units' <<< "$out"). unit 별 내역 — $(jq -r '.text' <<< "$out")"
+  [ -z "$(jq -r '.unresolved' <<< "$out")" ] || DOC_GAP_PREFLIGHT_DETAIL="$DOC_GAP_PREFLIGHT_DETAIL. 위치를 확정할 수 없는 gap(경로 추정·저장소 검색 없음) — $(jq -r '.unresolved' <<< "$out")"
+  return 2
+}
+# WAITING_USER 의 최초 수리 전용 사전 검사. "지금 문서로 수리하면" 완료 unit 이 전부 유효한가를 **후보 상태**로 본다:
+#   체크포인트 사본에 지금의 지문·WORKER_PENDING 을 넣은 후보 파일을 만들고, 이 함수의 서브셸 안에서만 DOC_GAP_RESUME 을 그 파일로 바꿔 기존 판정 함수
+#   (unit_done_valid → unit_contract_drift_covered → doc_gap_resolved_current)를 그대로 돌린다. 실제 doc-gap-resume.json 은 읽기만 한다 — 실패하든 도중에 죽든 WAITING_USER 그대로다.
+#   후보 파일은 승인 근거가 아니다: 어떤 판정도 이 경로를 체크포인트로 읽지 않고(doc_gap_next_step 은 $DOC_GAP_RESUME 만 본다), 호출마다 새로 만들고 끝나면 지운다.
+#   남아 있는 잔재가 다음 실행의 검사를 건너뛰게 하지 못한다.
+# 반환: 0 통과(DOC_GAP_PREFLIGHT_FP = 검사한 지문 — doc_gap_accept 에 그대로 넘긴다) / 2 중단(KIND·DETAIL) / 1 실행 실패.
+DOC_GAP_CANDIDATE="$WORK_DIR/.doc-gap-resume.candidate.json"
+doc_gap_repair_preflight() {
+  local fp diag rc=0
+  DOC_GAP_PREFLIGHT_KIND=""; DOC_GAP_PREFLIGHT_DETAIL=""; DOC_GAP_PREFLIGHT_FP=""
+  [ "$(doc_gap_next_step)" = WAITING_USER ] || return 1
+  fp="$(consensus_pass_fingerprint impl)" || return 1
+  jq --arg fp "$fp" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING"' "$DOC_GAP_RESUME" > "$DOC_GAP_CANDIDATE" || { rm -f "$DOC_GAP_CANDIDATE"; return 1; }
+  diag="$( DOC_GAP_RESUME="$DOC_GAP_CANDIDATE"; doc_gap_resolved_current || exit 9; doc_gap_units_diagnosis )" || rc=$?
+  rm -f "$DOC_GAP_CANDIDATE"
+  [ "$rc" -eq 0 ] || return 1
+  doc_gap_diagnosis_classify "$diag" repair || return $?
+  DOC_GAP_PREFLIGHT_FP="$fp"
 }
 # 사용자 해결 provenance 가 현재 입력에 유효한가 — 다섯 가지를 모두 만족할 때만 true(어느 하나라도 깨지면 일반 impl 재합의로 돌아간다):
 #   ① 활성 체크포인트(포맷 버전, 수리된 단계 WORKER_PENDING/REVIEW_PENDING/RESOLVED, 수리 지문 존재)
@@ -2027,7 +2265,7 @@ doc_gap_accept() {
 #   ③ 모든 pending gap 에 사용자 답이 지금도 존재
 #   ④ 해결 범위 안의 변경뿐(frozen 문서 불변, decisions append-only)
 #   ⑤ 수리 시점에 고정한 impl 입력 지문 == 현재 impl 입력 지문(그 뒤 approach/decisions 를 또 고쳤으면 무효)
-# approach.md 가 바뀌었다는 사실만으로는 어느 조건도 만족하지 않는다 — 수리 지문은 doc_gap_accept 만 쓴다.
+# approach.md 가 바뀌었다는 사실만으로는 어느 조건도 만족하지 않는다 — 수리 지문은 doc_gap_accept 만 쓴다(사전 검사의 후보 파일은 그 호출 안에서만 읽힌다).
 doc_gap_resolved_current() {
   [ -f "$DOC_GAP_RESUME" ] || return 1
   jq -e --argjson v "$DOC_GAP_RESUME_VERSION" '.version==$v and (.next_step=="WORKER_PENDING" or .next_step=="REVIEW_PENDING" or .next_step=="RESOLVED") and .resolved_impl_fingerprint!=""' \

@@ -39,7 +39,7 @@ printf '{"type":"thread.started","thread_id":"mock-thread-%s"}\n' "$$"   # codex
 printf '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}\n'
 case "$FAKE_WORKER_MODE" in
   DONE) printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > "$out";;
-  DOCGAP) printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/ClientService.java summary","decision_needed":"요약 반환 구조(NEW DTO / record / 기존 타입)가 approach.md 에 없음","options":["NEW ClientSummary record","기존 타입 재사용"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > "$out";;
+  DOCGAP) printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/ClientService.java summary","paths":["src/ClientService.java"],"decision_needed":"요약 반환 구조(NEW DTO / record / 기존 타입)가 approach.md 에 없음","options":["NEW ClientSummary record","기존 타입 재사용"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > "$out";;
   *) echo "unknown mode" >&2; exit 9;;
 esac
 EOF

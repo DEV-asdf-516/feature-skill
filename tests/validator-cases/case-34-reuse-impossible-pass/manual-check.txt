@@ -1,0 +1,1 @@
+blocking_issues 가 비어 있는가. case-31 과 같은 request·design·conventions 이지만 `logUpdated` 가 저장 건수(int)만 반환한다 — 기존 반환값으로는 바뀐 필드 이름 목록을 만들 수 없고, 그것을 반환하게 고치는 것은 request.md 의 제외 범위다. conventions 5.1 은 "이미 계산한 결과를 전달받아 쓴다" 인데 전달받을 결과가 없으므로 직접 충돌이 아니다 — 5.1 을 이유로 BLOCK 하거나 `QuoteChangeLogService` 변경을 요구하면 오탐(v21 교차 검증 ⑤ 의 "기존 반환값으로는 필요한 결과를 만들 수 없다")
