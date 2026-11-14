@@ -467,10 +467,17 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   # [Modified: GOAL-6] 판정 순서를 "결과 유효성 → CLI rc" 로 둔다. CLI rc 가 0 이어도 결과가 스키마/의미 검증(worker_result_valid)에 실패했고 작업 트리가
   # 바뀌었으면 같은 WORKER_OUTCOME_UNCERTAIN 가드(before/after tree·invocation_id·raw 로그·원본 rc·이유)로 멈춘다 — ENV_ERROR 로만 끝나 변경이 가드 없이 남지 않게.
   # 트리 변경이 없으면 기존 실행 실패(재실행 허용). 유효 결과 + rc≠0 의 CLI_EXIT_STATUS_MISMATCH 복구는 그대로다. 자동 원복·재호출·세션 교체 없음.
-  local worker_cli; worker_cli="$(role_cli WORKER)"
-  if ! worker_result_valid "$result"; then
+  # undecided[].paths: 구조(worker_result_valid)가 맞아도 가리키는 파일이 실재하지 않고 이 피처가 만들 수 있는 곳도 아니면 지어낸 경로다 — 그 경로로 gap 을 unit 에
+  # 연결하지 않는다(체크포인트를 쓰지 않고 같은 '결과 무효' 경로로 멈춘다: 트리 변경 없으면 실행 실패, 있으면 WORKER_OUTCOME_UNCERTAIN). 자동 재호출 없음.
+  local worker_cli path_violations=""; worker_cli="$(role_cli WORKER)"
+  if worker_result_valid "$result"; then
+    path_violations="$(worker_undecided_path_violations "$result")" || env_error "undecided paths 검사 실패: $result"
+  fi
+  if ! worker_result_valid "$result" || [ -n "$path_violations" ]; then
     local why="${result_diag:-}"
-    if [ -z "$why" ]; then
+    if [ -n "$path_violations" ]; then
+      why="WORKER_UNDECIDED_PATHS_INVALID($(printf '%s' "$path_violations" | paste -sd';' -)) — undecided[].paths 는 그 미결정이 걸린 실제 저장소 상대 파일 경로여야 한다"
+    elif [ -z "$why" ]; then
       if [ -s "$result" ]; then why="WORKER_RESULT_SCHEMA_INVALID"; else why="WORKER_RESULT_MISSING"; fi
     fi
     if [ "$after_tree" = "$before_tree" ]; then
@@ -522,7 +529,7 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   worker_session_sync_id || env_error "worker-session.json 세션 ID 동기화 실패"
   worker_session_mark_bound || env_error "worker-session.json 세션 결속(session_bound) 기록 실패"
   log "워커${unit_id:+ (unit $unit_id)} status: $status / undecided: $n / delegated_choices: $(jq '.delegated_choices|length' "$result")"
-  jq -r '.undecided[]? | "  [UNDECIDED] \(.location): \(.decision_needed)"' "$result"
+  jq -r '.undecided[]? | "  [UNDECIDED] \(.location) [paths: \(.paths | join(", "))]: \(.decision_needed)"' "$result"
   if [ "$status" = UNDECIDED ]; then
     # DOC_GAP 이든 USER_DECISION 이든 구현 시점에 워커가 정할 권한이 없는 solution-shape 선택이다 — 둘 다 사용자 판단으로 간다(kind 는 진단 정보).
     # impl 재합의(검증자·디자이너)로 돌아가지 않는다: 체크포인트(doc-gap-resume.json, 이 호출 후 tree 포함)를 남기고 NEED_USER. 사용자가 답하면

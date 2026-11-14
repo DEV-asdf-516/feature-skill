@@ -83,7 +83,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 |---|---|---|
 | 0 | `DONE` | 승인 + 전체 테스트 통과 |
 | 3 | `NEED_DOCS` | `DESIGN_MISSING` / `IMPL_DOCS_MISSING`(implementation-units.json 누락·형식·부분집합 위반 포함) / `SCOPE_MISSING`: 오케스트레이터가 문서를 쓸 차례 |
-| 2 | `NEED_USER` | `UNDECIDED`(워커 DOC_GAP/USER_DECISION) / `REVIEW_DOC_GAP`(리뷰어 DOC_GAP) / `DOC_GAP_SOURCE_CHANGED`: 구현 중 드러난 미결정 solution shape — 사용자 결정이 최종. 답을 `decisions.md` 에 `[USER-QUESTION][scope=impl][review-issue=<id>|worker-gap=<key>]` 태그로 기록하고 approach.md 에 동기화하면 검증자·디자이너·impl 재합의 없이 워커 → 리뷰로 이어진다(`doc-gap-resume.json`) |
+| 2 | `NEED_USER` | `UNDECIDED`(워커 DOC_GAP/USER_DECISION) / `REVIEW_DOC_GAP`(리뷰어 DOC_GAP) / `DOC_GAP_SOURCE_CHANGED` / `DOC_GAP_SCOPE_EXCEEDED` / `DOC_GAP_LOCATION_UNRESOLVED`: 구현 중 드러난 미결정 solution shape — 사용자 결정이 최종. gap 해결이 그 gap 과 연결되지 않은 unit 의 계약을 바꿨는지는 **지문을 고정하기 전에** 검사하므로, 멈춘 뒤 절을 되돌리거나 gap tag 를 보완하면 같은 체크포인트로 재실행된다. 답을 `decisions.md` 에 `[USER-QUESTION][scope=impl][review-issue=<id>|worker-gap=<key>]` 태그로 기록하고 approach.md 에 동기화하면 검증자·디자이너·impl 재합의 없이 워커 → 리뷰로 이어진다(`doc-gap-resume.json`) |
 | 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS`(design·impl 합의): 사용자 결정이 최종. 마지막 리뷰의 **모든 blocker** 에 `- [USER-QUESTION][scope=design\|impl][escalation=<blocker id>] <쟁점> → <답>` 을 `decisions.md` 에 추가하고 결정 내용을 그 단계 문서에 반영한 뒤 재실행하면 그 단계 검증자·디자이너 호출 0회로 다음 단계(design → impl, impl → worker)로 간다(`user-escalation-resume-<target>.json`, `USER_RESOLVED` — 검증자 PASS 아님). 답이 없거나 일부만 있으면 모델 0회로 다시 멈춘다 |
 | 2 | `NEED_USER` | `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
 | 2 | `NEED_USER` | `REVIEW_OUTPUT_INVALID`: 리뷰어 출력이 계약(스키마 → 버전 → origin/`fix_ref` → verdict 일관성)에 어긋남 — 승인도 수정 요청도 아니고 수정자는 호출되지 않는다. 원본·진단·입력 지문은 `reviews/invalid-review.json`. 그대로 재실행하면 리뷰어 0회로 같은 진단, 새 리뷰는 `--new-review-attempt` 로만 |
@@ -166,10 +166,10 @@ tests/
 ├── smoke-worker-regression.sh  # worker-regression 하네스 회귀 — 가짜 워커로 DONE=exit 0 / DOC_GAP=exit 2 + 체크포인트가 production 이 인정하는 impl PASS 위에 생김 · provenance 가드 불변 · usage summary v3 (LLM 호출 없음)
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
-├── validator-cases/             # 고정 픽스처 25개 (문서·src·expected.json)
+├── validator-cases/             # 고정 픽스처 39개 (문서·src·expected.json)
 ├── validator-regression.sh      # 실제 검증자 모델로 회귀 실행 (프롬프트·스키마 변경 시)
 ├── reviewer-cases.md            # 리뷰어 판정 감도 회귀 세트 설명
-├── reviewer-cases/              # 고정 픽스처 26개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
+├── reviewer-cases/              # 고정 픽스처 29개 (문서·base/·changed/·expected.json, Round 2 는 fixed/·prev-review.json)
 ├── reviewer-regression.sh       # 실제 리뷰어 모델로 회귀 실행 (리뷰어 프롬프트·스키마 변경 시)
 ├── worker-cases.md              # 워커 material-contract 충실도 회귀 세트 설명
 ├── worker-cases/                # 고정 픽스처 8개 (base/ 컴파일 가능한 Java + run-tests.sh, .agent-work/ 합의 문서·scope·unit 1개, expected.json, assert.py) + lib/javacheck.py

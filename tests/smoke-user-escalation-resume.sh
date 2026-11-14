@@ -100,7 +100,7 @@ echo "worker ${unit:-none}" >> "$MOCK_LOG"
 echo "worker $unit" >> "src/u$n.txt"
 if [ -f "$MOCK_STATE/undecided-$n" ]; then
   mv "$MOCK_STATE/undecided-$n" "$MOCK_STATE/undecided-$n.used"
-  emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u%s.txt","decision_needed":"상태 전이 위치","options":["서비스","도메인 객체"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n")"; exit 0
+  emit "$(printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"src/u%s.txt","paths":["src/u%s.txt"],"decision_needed":"상태 전이 위치","options":["서비스","도메인 객체"]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}' "$n" "$n")"; exit 0
 fi
 emit "$(printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[{"name":"u%s","result":"PASS"}],"context_updates":{"upsert":[],"remove":[]}}' "$n")"
 exit 0
