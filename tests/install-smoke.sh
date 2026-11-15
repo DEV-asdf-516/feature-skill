@@ -60,6 +60,20 @@ bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"
 jq -e '.hooks.UserPromptSubmit and .hooks.PreToolUse' "$TARGET/.claude/settings.json" >/dev/null \
   || fail "신규 설치: settings.json hooks 누락"
+# 참조 문서(references/): SKILL.md 가 분기 직전에 읽으라고 가리키는 파일이 전부 설치돼야 한다.
+# 목록의 세 출처(SKILL.md 언급 / 소스 references/ 실제 파일 / 러너의 SKILL_REFERENCE_FILES)가 서로 같아야 한다 — 하나만 고치면 여기서 실패한다.
+SRC_SKILL="$SOURCE_ROOT/.claude/skills/feature"
+refs_in_skill="$(grep -oE 'references/[A-Za-z0-9._-]+\.md' "$SRC_SKILL/SKILL.md" | sed 's|references/||' | sort -u | paste -sd' ' -)"
+refs_on_disk="$(cd "$SRC_SKILL/references" && ls *.md | sort | paste -sd' ' -)"
+refs_in_runner="$(sed -n 's/^SKILL_REFERENCE_FILES="\(.*\)"$/\1/p' "$SRC_SKILL/scripts/feature-run.sh" | tr ' ' '\n' | sort | paste -sd' ' -)"
+[ -n "$refs_in_skill" ] && [ "$refs_in_skill" = "$refs_on_disk" ] && [ "$refs_in_skill" = "$refs_in_runner" ] \
+  || fail "참조 문서 목록 불일치 — SKILL.md 언급($refs_in_skill) / references/ 파일($refs_on_disk) / 러너 목록($refs_in_runner)"
+for ref in $refs_in_skill; do
+  cmp -s "$SRC_SKILL/references/$ref" "$TARGET_SKILL/references/$ref" || fail "신규 설치: 참조 문서 누락/불일치: references/$ref"
+done
+[ -x "$TARGET/.claude/hooks/compact_recovery.sh" ] || fail "신규 설치: 압축 복구 훅(compact_recovery.sh) 누락/실행권한 없음"
+jq -e '[.hooks.SessionStart[]? | select(.matcher == "compact") | .hooks[]? | select(.type == "command" and (.command | endswith("/.claude/hooks/compact_recovery.sh")))] | length == 1' \
+  "$TARGET/.claude/settings.json" >/dev/null || fail "신규 설치: settings.json 에 SessionStart(compact) → compact_recovery.sh 미등록"
 # config.sh 의 CHANGE_ME 가드를 지나려면 값을 채운 사본으로 source 한다 (대상 config.sh 는 건드리지 않는다)
 # 사본은 대상 config.sh 옆에 둔다 — PROJECT_ROOT 가 파일 위치 기준이라 다른 곳에서 source 하면 대상 프로젝트를 못 찾는다
 sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" > "$TARGET_SKILL/.config.smoke.sh"
@@ -119,6 +133,64 @@ run_conventions_hook '{"session_id":"orch-2"}' | grep -q '프로젝트 컨벤션
 [ ! -e "$HOOK_TMP/claude-conventions-injected/child-1" ] || fail "child 중복 주입: child 호출이 세션 마커를 남김"
 run_conventions_hook '{}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: session_id 없는 호출이 주입하지 않음"
 run_conventions_hook '{}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: session_id 없는 재호출이 주입하지 않음"
+# 압축 복구 훅(SessionStart, source=compact): 세션당 1회 주입 정책은 그대로 두고 압축 직후에만 복구 지침을 넣는다.
+run_compact_hook() { # project-dir stdin-json [env...] → stdout
+  local dir="$1" json="$2"; shift 2
+  printf '%s' "$json" | env "$@" CLAUDE_PROJECT_DIR="$dir" TMPDIR="$HOOK_TMP" bash "$dir/.claude/hooks/compact_recovery.sh"
+}
+(cd "$TARGET" && git add -A >/dev/null 2>&1 && git -c user.email=smoke@test -c user.name=smoke commit -qm fixture >/dev/null 2>&1) || fail "압축 복구 훅: 픽스처 커밋 실패"
+compact_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","hook_event_name":"SessionStart","source":"compact"}')"
+echo "$compact_out" | grep -q "$TARGET_SKILL/SKILL.md" && echo "$compact_out" | grep -q "$TARGET_SKILL/references/" \
+  || fail "압축 복구 훅: SKILL.md·references 재확인 지침(절대 경로)이 없음"
+# conventions 는 본문이 아니라 경로 + 재확인 지침만 싣는다(훅 출력은 10,000자를 넘으면 잘려 전달된다 — 크기와 무관하게 다시 읽게 한다)
+echo "$compact_out" | grep -q "$TARGET/conventions.md 를 Read 로" || fail "압축 복구 훅: 피처 worktree 가 없는데 프로젝트 conventions.md 경로·재확인 지침이 없음"
+echo "$compact_out" | grep -q '프로젝트 컨벤션' && fail "압축 복구 훅: conventions 본문을 출력에 실음(경로만 줘야 한다)"
+# 큰 conventions.md(10,000자 초과)여도 출력은 한도보다 충분히 작고 본문이 섞이지 않는다
+cp "$TARGET/conventions.md" "$SCRATCH/conventions.keep"
+awk 'BEGIN { for (i = 0; i < 400; i++) print "- BIG-CONV-RULE 아주 긴 프로젝트 규칙 본문 " i }' >> "$TARGET/conventions.md"
+[ "$(wc -m < "$TARGET/conventions.md" | tr -d ' ')" -gt 10000 ] || fail "압축 복구 훅: 큰 conventions 픽스처가 10,000자를 넘지 않음"
+compact_big_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
+compact_big_chars="$(printf '%s' "$compact_big_out" | wc -m | tr -d ' ')"
+[ "$compact_big_chars" -lt 5000 ] || fail "압축 복구 훅: 출력이 ${compact_big_chars}자 — 훅 출력 한도(10,000자)에 가깝다"
+echo "$compact_big_out" | grep -q 'BIG-CONV-RULE' && fail "압축 복구 훅: 큰 conventions 본문이 출력에 실림"
+echo "$compact_big_out" | grep -q "$TARGET/conventions.md 를 Read 로" || fail "압축 복구 훅: 큰 conventions 에서 경로 안내가 없음"
+cp "$SCRATCH/conventions.keep" "$TARGET/conventions.md"
+echo "$compact_out" | grep -q '커스텀 규칙' && fail "압축 복구 훅: core_rules.md 가 오케스트레이터에 주입됨"
+# 같은 세션의 후속 프롬프트: 압축 뒤에도 UserPromptSubmit 훅은 다시 주입하지 않는다(반복 주입 없음 — 복구는 compact 훅 1회뿐)
+[ -z "$(run_conventions_hook '{"session_id":"orch-1","prompt":"after compact"}')" ] || fail "압축 복구 훅: 압축 뒤 UserPromptSubmit 훅이 conventions 를 다시 주입함"
+# compact 가 아닌 SessionStart(startup/resume/clear)·source 없는 호출: 무출력(matcher 없이 등록돼도 반복 주입하지 않는다)
+for src in startup resume clear; do
+  src_json="$(jq -cn --arg s "$src" '{session_id:"orch-1", source:$s}')"
+  src_out="$(run_compact_hook "$TARGET" "$src_json")"
+  [ -z "$src_out" ] || fail "압축 복구 훅: source=$src 인데 출력함"
+done
+[ -z "$(run_compact_hook "$TARGET" '{"session_id":"orch-1"}')" ] || fail "압축 복구 훅: source 없는 호출인데 출력함"
+# child(FEATURE_ROLE_CHILD=1): 무출력
+[ -z "$(run_compact_hook "$TARGET" '{"session_id":"child-1","source":"compact"}' FEATURE_ROLE_CHILD=1)" ] || fail "압축 복구 훅: child 호출에 중복 주입"
+# 피처 worktree 가 있으면: 원본 conventions 본문을 넣지 않고(worktree 의 더 최신 규칙을 덮어쓰지 않는다) worktree 사본 경로만 알려 준다
+COMPACT_WT="$SCRATCH/target-feature-wt1"
+git -C "$TARGET" worktree add -q -b feature/wt1 "$COMPACT_WT" HEAD >/dev/null 2>&1 || fail "압축 복구 훅: 픽스처 worktree 생성 실패"
+printf '# worktree 최신 컨벤션 WT-ONLY-RULE\n' > "$COMPACT_WT/conventions.md"
+compact_wt_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
+echo "$compact_wt_out" | grep -q '프로젝트 컨벤션' && fail "압축 복구 훅: 피처 worktree 가 있는데 원본 conventions 본문을 주입함(잘못된 worktree 규칙 적용)"
+echo "$compact_wt_out" | grep -q 'WT-ONLY-RULE' && fail "압축 복구 훅: 임의로 고른 worktree 의 conventions 본문을 주입함"
+echo "$compact_wt_out" | grep -q "feature-wt1/conventions.md" && echo "$compact_wt_out" | grep -q '임의로 고르지 말고' \
+  || fail "압축 복구 훅: 피처 worktree conventions 경로·재확인 지침이 없음"
+# 피처 worktree 가 많아도 후보 목록은 상한까지만 나열하고 출력은 한도보다 충분히 작다
+for i in $(seq 2 26); do git -C "$TARGET" worktree add -q -b "feature/wt$i" "$SCRATCH/target-feature-wt$i" HEAD >/dev/null 2>&1 || fail "압축 복구 훅: 픽스처 worktree $i 생성 실패"; done
+compact_many_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
+[ "$(echo "$compact_many_out" | grep -c '/conventions.md$')" = 20 ] && echo "$compact_many_out" | grep -q '외 6개' \
+  || fail "압축 복구 훅: worktree 후보 목록 상한(20개 + 나머지 개수)이 지켜지지 않음"
+[ "$(printf '%s' "$compact_many_out" | wc -m | tr -d ' ')" -lt 8000 ] || fail "압축 복구 훅: worktree 가 많을 때 출력이 훅 한도에 가깝다"
+for i in $(seq 2 26); do git -C "$TARGET" worktree remove --force "$SCRATCH/target-feature-wt$i" >/dev/null 2>&1; git -C "$TARGET" branch -q -D "feature/wt$i" >/dev/null 2>&1 || true; done
+git -C "$TARGET" worktree remove --force "$COMPACT_WT" >/dev/null 2>&1; git -C "$TARGET" branch -q -D feature/wt1 >/dev/null 2>&1 || true
+# conventions.md 부재: 스킬 복구 지침만, conventions 블록 없음, exit 0
+NOCONV_TARGET="$SCRATCH/noconv"; git init -q "$NOCONV_TARGET"; bash "$SOURCE_ROOT/install.sh" "$NOCONV_TARGET" >/dev/null
+noconv_out="$(run_compact_hook "$NOCONV_TARGET" '{"session_id":"x","source":"compact"}')" || fail "압축 복구 훅: conventions.md 부재에서 non-zero 종료"
+echo "$noconv_out" | grep -q 'references/' || fail "압축 복구 훅: conventions.md 부재에서 스킬 복구 지침이 없음"
+echo "$noconv_out" | grep -q 'PROJECT CONVENTIONS\|conventions:' && fail "압축 복구 훅: conventions.md 가 없는데 conventions 안내가 출력됨"
+[ -z "$(printf '%s' '{"session_id":"x"}' | CLAUDE_PROJECT_DIR="$NOCONV_TARGET" TMPDIR="$HOOK_TMP" bash "$NOCONV_TARGET/.claude/hooks/inject_conventions.sh")" ] \
+  || fail "conventions 훅: conventions.md 부재인데 출력함"
 # run_*_role 의 claude 호출은 FEATURE_ROLE_CHILD=1 을 붙인다 (두 헬퍼 모두)
 [ "$(grep -c 'FEATURE_ROLE_CHILD=1 "\$CLAUDE_BIN" -p' "$TARGET_SKILL/config.sh")" = 2 ] || fail "child 중복 주입: run_readonly_json_role/run_edit_role 의 claude 호출에 FEATURE_ROLE_CHILD=1 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit.md" || fail "규칙 전달: unit 워커 프롬프트 누락"
@@ -233,6 +305,59 @@ ls "$PARTIAL_TARGET/.claude/skills/feature"/.install-stage-* >/dev/null 2>&1 \
   && fail "복사 실패: 스테이징 잔여물 남음"
 echo "[OK] 4b. 항목 일부 복사 실패 시 전체 무손상"
 
+# ---------- 4c. 참조 문서(references/) — 구버전 설치 업데이트 / 소스 누락 시 실패 / 러너의 시작 거부 ----------
+# (a) references/ 가 없던 구버전 설치(긴 단일 SKILL.md)의 업데이트: references/ 가 새로 배포되고 SKILL.md 가 진입 문서로 교체된다. 사용자 설정은 보존.
+REF_TARGET="$SCRATCH/ref-update"
+git init -q "$REF_TARGET"
+bash "$SOURCE_ROOT/install.sh" "$REF_TARGET" >/dev/null
+REF_SKILL="$REF_TARGET/.claude/skills/feature"
+rm -rf "$REF_SKILL/references"; printf '# 구버전 단일 문서 OLD-SKILL-SENTINEL\n' > "$REF_SKILL/SKILL.md"
+sed -i.sedbak 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$REF_SKILL/config.sh" && rm -f "$REF_SKILL/config.sh.sedbak"
+printf '# 프로젝트 커스텀 규칙\n' >> "$REF_TARGET/.claude/hooks/core_rules.md"
+bash "$SOURCE_ROOT/install.sh" "$REF_TARGET" > "$SCRATCH/ref-update.log" 2>&1 || fail "references 업데이트: 구버전 설치 업데이트 실패: $(cat "$SCRATCH/ref-update.log")"
+for ref in $refs_in_skill; do
+  cmp -s "$SRC_SKILL/references/$ref" "$REF_SKILL/references/$ref" || fail "references 업데이트: 구버전 설치에 references/$ref 가 배포되지 않음"
+done
+grep -q 'OLD-SKILL-SENTINEL' "$REF_SKILL/SKILL.md" && fail "references 업데이트: SKILL.md 가 갱신되지 않음"
+grep -q 'npm test' "$REF_SKILL/config.sh" && grep -q '커스텀 규칙' "$REF_TARGET/.claude/hooks/core_rules.md" || fail "references 업데이트: 사용자 설정(config.sh·core_rules.md)이 보존되지 않음"
+# 설치된 references/ 에 남은 낡은 파일은 교체로 사라진다(디렉터리 단위 교체 — 옛 버전 문서가 섞여 남지 않는다)
+printf 'stale\n' > "$REF_SKILL/references/stale-old.md"
+bash "$SOURCE_ROOT/install.sh" "$REF_TARGET" >/dev/null 2>&1 || fail "references 업데이트: 재설치 실패"
+[ ! -e "$REF_SKILL/references/stale-old.md" ] || fail "references 업데이트: 옛 참조 문서가 섞여 남음"
+# (b) 소스에 참조 문서 하나가 없으면: 설치 실패, 성공 메시지 없음, 기존 설치 무손상(SKILL.md·references 그대로)
+REF_BROKEN="$SCRATCH/ref-broken-source"
+cp -R "$SOURCE_ROOT" "$REF_BROKEN"
+printf '\n<!-- REF-BROKEN-SENTINEL -->\n' >> "$REF_BROKEN/.claude/skills/feature/SKILL.md"
+rm -f "$REF_BROKEN/.claude/skills/feature/references/exit-states-resume.md"
+if bash "$REF_BROKEN/install.sh" "$REF_TARGET" > "$SCRATCH/ref-broken.log" 2>&1; then fail "references 누락: 참조 문서가 빠진 소스인데 설치가 성공함"; fi
+grep -q 'references/exit-states-resume.md' "$SCRATCH/ref-broken.log" || fail "references 누락: 누락된 문서 이름이 보고되지 않음: $(cat "$SCRATCH/ref-broken.log")"
+grep -q '\[완료' "$SCRATCH/ref-broken.log" && fail "references 누락: 실패했는데 성공 메시지를 출력함"
+grep -q 'REF-BROKEN-SENTINEL' "$REF_SKILL/SKILL.md" && fail "references 누락: 실패했는데 SKILL.md 가 교체됨"
+[ -s "$REF_SKILL/references/exit-states-resume.md" ] || fail "references 누락: 실패했는데 기존 references 가 손상됨"
+ls "$REF_SKILL"/.install-stage-* >/dev/null 2>&1 && fail "references 누락: 스테이징 잔여물 남음"
+# references/ 디렉터리 전체가 없는 소스·빈 참조 문서도 같은 실패
+rm -rf "$REF_BROKEN/.claude/skills/feature/references"
+if bash "$REF_BROKEN/install.sh" "$REF_TARGET" > "$SCRATCH/ref-broken2.log" 2>&1; then fail "references 누락: references/ 없는 소스인데 설치가 성공함"; fi
+grep -q '\[완료' "$SCRATCH/ref-broken2.log" && fail "references 누락: references/ 없는 소스에서 성공 메시지를 출력함"
+cp -R "$SRC_SKILL/references" "$REF_BROKEN/.claude/skills/feature/references"; : > "$REF_BROKEN/.claude/skills/feature/references/impl-docs.md"
+if bash "$REF_BROKEN/install.sh" "$REF_TARGET" > "$SCRATCH/ref-broken3.log" 2>&1; then fail "references 누락: 빈 참조 문서인데 설치가 성공함"; fi
+grep -q 'references/impl-docs.md' "$SCRATCH/ref-broken3.log" || fail "references 누락: 빈 참조 문서가 보고되지 않음"
+# (c) 설치 뒤 참조 문서가 사라진 대상: 러너가 어떤 단계도 시작하지 않고 exit 1 로 누락을 드러낸다(부트스트랩·finalize 포함, .agent-work 미생성)
+sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$REF_SKILL/config.sh" && rm -f "$REF_SKILL/config.sh.sedbak"
+mv "$REF_SKILL/references/done-finalize.md" "$SCRATCH/done-finalize.keep"
+for runner_args in "" "--feature ref-x" "--feature ref-x --finalize"; do
+  set +e
+  # shellcheck disable=SC2086
+  (cd "$REF_TARGET" && bash "$REF_SKILL/scripts/feature-run.sh" $runner_args) > "$SCRATCH/ref-runner.log" 2>&1
+  ref_rc=$?
+  set -e
+  [ "$ref_rc" = 1 ] && grep -q '필수 참조 문서 누락: references/done-finalize.md' "$SCRATCH/ref-runner.log" \
+    || fail "references 누락: 러너($runner_args)가 누락을 드러내며 exit 1 하지 않음 (rc $ref_rc): $(cat "$SCRATCH/ref-runner.log")"
+  [ ! -e "$REF_TARGET/.agent-work" ] && [ ! -e "$SCRATCH/ref-update-feature-ref-x" ] || fail "references 누락: 러너($runner_args)가 누락 상태에서 작업을 시작함"
+done
+mv "$SCRATCH/done-finalize.keep" "$REF_SKILL/references/done-finalize.md"
+echo "[OK] 4c. references/ — 구버전 설치 업데이트 배포(사용자 설정 보존)·옛 문서 미잔존 / 소스 누락·빈 문서 → 실패(성공 메시지 없음·기존 설치 무손상) / 러너 시작 거부"
+
 # ---------- 5. 잘못된 이벤트에 등록된 훅 → 미등록으로 판정 ----------
 WRONG_EVENT_TARGET="$SCRATCH/wrong-event"
 git init -q "$WRONG_EVENT_TARGET"
@@ -281,6 +406,37 @@ grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventio
 grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh" && fail "훅 마이그레이션: 보존돼야 할 구버전 훅이 덮어써짐"
 echo "$legacy_conv_output" | grep -q '수동 병합 필요' || fail "훅 마이그레이션: 구버전 훅인데 완료 메시지가 수동 병합을 요구하지 않음"
 echo "[OK] 5d. 구버전 conventions 훅 → 교체 안내 + .new"
+
+# ---------- 5e. 기존 settings.json 에 SessionStart(compact) 훅 미등록 → 추가 안내(덮어쓰지 않음), 등록돼 있으면 조용 ----------
+COMPACT_HOOK_TARGET="$SCRATCH/compact-hook"
+git init -q "$COMPACT_HOOK_TARGET"
+mkdir -p "$COMPACT_HOOK_TARGET/.claude"
+jq 'del(.hooks.SessionStart)' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
+cp "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before"
+compact_hook_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
+echo "$compact_hook_output" | grep -q 'SessionStart 에 compact_recovery.sh 미등록' || fail "SessionStart 훅 검사: 미등록 상태를 조용히 정상으로 보고함"
+echo "$compact_hook_output" | grep -q '"matcher": "compact"' || fail "SessionStart 훅 검사: 추가할 항목(matcher compact)이 안내되지 않음"
+echo "$compact_hook_output" | grep -q '수동 병합 필요' || fail "SessionStart 훅 검사: 수동 병합 필요로 마무리되지 않음"
+echo "$compact_hook_output" | grep -q 'UserPromptSubmit 에\|PreToolUse 에' && fail "SessionStart 훅 검사: 등록된 다른 훅까지 미등록으로 보고함"
+cmp -s "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before" || fail "SessionStart 훅 검사: 기존 settings.json 을 수정함"
+[ -x "$COMPACT_HOOK_TARGET/.claude/hooks/compact_recovery.sh" ] || fail "SessionStart 훅 검사: 훅 스크립트가 설치되지 않음"
+cp "$SOURCE_ROOT/.claude/settings.json" "$COMPACT_HOOK_TARGET/.claude/settings.json"
+bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET" | grep -q 'WARN' && fail "SessionStart 훅 검사: 등록돼 있는데 WARN 발생"
+# command 는 같지만 matcher 가 compact 가 아니면(startup 등) 압축 뒤에 실행되지 않는다 — 등록으로 인정하지 않는다
+jq '.hooks.SessionStart[0].matcher = "startup"' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
+cp "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before"
+wrong_matcher_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
+echo "$wrong_matcher_output" | grep -q 'SessionStart 에 compact_recovery.sh 가 있지만 matcher 가 "compact" 가 아닙니다' || fail "SessionStart 훅 검사: matcher=startup 등록을 정상으로 판정함"
+echo "$wrong_matcher_output" | grep -q '"matcher": "compact"' && echo "$wrong_matcher_output" | grep -q '수동 병합 필요' || fail "SessionStart 훅 검사: 잘못된 matcher 에 올바른 항목·수동 병합 안내가 없음"
+cmp -s "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before" || fail "SessionStart 훅 검사: 잘못된 matcher 의 settings.json 을 수정함"
+# matcher 가 없는 SessionStart 등록도 같다(모든 source 에서 실행 — 훅이 스스로 걸러 내지만 의도한 등록이 아니다)
+jq 'del(.hooks.SessionStart[0].matcher)' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
+no_matcher_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
+echo "$no_matcher_output" | grep -q 'matcher 가 "compact" 가 아닙니다' || fail "SessionStart 훅 검사: matcher 없는 등록을 정상으로 판정함"
+# compact 를 포함한 대안 목록 matcher 는 등록으로 인정한다
+jq '.hooks.SessionStart[0].matcher = "resume|compact"' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
+bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET" | grep -q 'WARN' && fail "SessionStart 훅 검사: compact 를 포함한 matcher 인데 WARN 발생"
+echo "[OK] 5e. SessionStart(compact) 훅 미등록·잘못된 matcher 안내 + settings.json 불변"
 
 # ---------- 6. .gitignore 중복 방지 ----------
 duplicate_count="$(grep -c '^\.agent-work/$' "$TARGET/.gitignore")"
@@ -342,6 +498,16 @@ set -e
 # NEED_DOCS 반환은 worktree conventions.md 를 덧붙인다 — 이 시점엔 conventions.md 가 없으므로 블록이 없어야 한다
 grep -q '\[PROJECT CONVENTIONS\]' "$LOG_TARGET/.need-docs-design.out" \
   && fail "NEED_DOCS conventions 주입: conventions.md 가 없는데 블록이 출력됨"
+# 로딩 경로: 종료 상태마다 러너가 다음 행동 전에 읽을 참조 문서의 절대 경로를 알려 준다(파일이 실제로 있어야 한다)
+ref_hint_ok() { # output-file status-pattern reference-name
+  local line path
+  line="$(grep "^\[SKILL REFERENCE\] $2" "$1" | tail -1)"
+  [ -n "$line" ] || return 1
+  path="$(printf '%s' "$line" | grep -oE "/[^ ,]*/references/$3")" || return 1
+  [ -s "$path" ]
+}
+ref_hint_ok "$LOG_TARGET/.need-docs-design.out" 'NEED_DOCS(DESIGN_MISSING)' phase0-design.md \
+  || fail "로딩 경로: DESIGN_MISSING 반환에 references/phase0-design.md 안내가 없음: $(grep 'SKILL REFERENCE' "$LOG_TARGET/.need-docs-design.out")"
 [ "$(cat "$LOG_TARGET/.agent-work/archive/live-regression/live.log")" = '이전 피처 로그' ] \
   || fail "live.log 아카이브: 이전 로그 내용이 보존되지 않음"
 [ -f "$LOG_TARGET/.agent-work/archive/live-regression/previous.txt" ] \
@@ -366,6 +532,9 @@ grep -q 'SMOKE-CONV-RULE-1' "$LOG_TARGET/.need-docs-impl.out" \
   || fail "NEED_DOCS conventions 주입: conventions.md 본문이 출력에 없음"
 grep -q 'implementation.md·approach.md 작성 직전' "$LOG_TARGET/.need-docs-impl.out" \
   || fail "NEED_DOCS conventions 주입: 대상 문서 안내(implementation.md·approach.md)가 없음"
+ref_hint_ok "$LOG_TARGET/.need-docs-impl.out" 'NEED_DOCS(IMPL_DOCS_MISSING)' impl-docs.md \
+  || fail "로딩 경로: IMPL_DOCS_MISSING 반환에 references/impl-docs.md 안내가 없음: $(grep 'SKILL REFERENCE' "$LOG_TARGET/.need-docs-impl.out")"
+grep -q 'phase0-design.md' "$LOG_TARGET/.need-docs-impl.out" && fail "로딩 경로: IMPL_DOCS_MISSING 반환이 다른 분기 문서(phase0-design.md)를 가리킴"
 consensus_start_count="$(grep -c 'consensus-loop design 시작' "$LOG_TARGET/.agent-work/live.log")"
 [ "$consensus_start_count" = 1 ] \
   || fail "중첩 tee: consensus-loop 시작 로그가 ${consensus_start_count}회 기록됨 (1회여야 함)"
@@ -414,10 +583,12 @@ printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' \
   > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"
 set +e
-(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >/dev/null 2>&1
+(cd "$LOG_TARGET" && FAKE_KIND=USER_DECISION bash "$LOG_SKILL/scripts/feature-run.sh") >"$SCRATCH/need-user.out" 2>&1
 worker_rc=$?
 set -e
 [ "$worker_rc" = 2 ] || fail "워커 스트리밍: USER_DECISION 종료 코드가 2가 아님 ($worker_rc)"
+ref_hint_ok "$SCRATCH/need-user.out" 'NEED_USER(UNDECIDED)' exit-states-resume.md \
+  || fail "로딩 경로: NEED_USER(UNDECIDED) 반환에 references/exit-states-resume.md 안내가 없음: $(grep 'SKILL REFERENCE' "$SCRATCH/need-user.out")"
 [ -f "$LOG_TARGET/.agent-work/worker-baseline.tree" ] || fail "워커 기준선: 러너가 worker-baseline.tree 를 기록하지 않음"
 (cd "$LOG_TARGET" && git cat-file -e "$(cat .agent-work/worker-baseline.tree)") || fail "워커 기준선: tree 객체가 저장소에 없음"
 worker_raw="$(ls "$LOG_TARGET"/.agent-work/units/01-all/worker-*.log.stderr.log | tail -1)"   # unit 워커 원문은 units/<id>/ 에 남는다
@@ -882,6 +1053,8 @@ set -e
 [ "$(wc -l < "$VFIX_SIDE/test-calls" | tr -d ' ')" = 2 ] || fail "verify 재진입: 복구 후 테스트가 다시 실행되지 않음"
 [ "$(jq -r .active "$VFIX_TARGET/.agent-work/worker-baseline.guard.json")" = false ] || fail "verify 재진입: 복구 후 가드가 비활성화되지 않음"
 [ "$(tail -1 "$VFIX_TARGET/src/other.txt")" = tampered ] || fail "verify 재진입: 범위 밖 변경이 원복됨(보존돼야 함)"
+ref_hint_ok "$VFIX_SIDE/run1.log" 'NEED_USER(SCOPE_BASELINE_CHANGED)' exit-states-resume.md || fail "로딩 경로: NEED_USER(SCOPE_BASELINE_CHANGED) 반환에 references/exit-states-resume.md 안내가 없음"
+ref_hint_ok "$VFIX_SIDE/run3.log" 'DONE' done-finalize.md || fail "로딩 경로: DONE 반환에 references/done-finalize.md 안내가 없음: $(grep 'SKILL REFERENCE' "$VFIX_SIDE/run3.log")"
 echo "[OK] 11d. verify worker-fix 기준선 변조 → 미복구 재진입은 테스트·codex 0회로 재중단, 복구 후에만 DONE"
 
 # ---------- 12. 유료 회귀 승인 게이트 (실제 LLM 호출 없음) ----------
@@ -1037,6 +1210,64 @@ forbid "$PROMPTS/reviewer.md" "문서가 지정하지 않은 private helper 추�
 require "$PROMPTS/reviewer.md" "local implementation expression"; require "$PROMPTS/reviewer.md" "standalone abstraction"
 forbid "$PROMPTS/fixer.md" "지정된 helper 를 inline 하지 않고"; require "$PROMPTS/fixer.md" "material contract"
 echo "[OK] 14. 프롬프트 철학 가드 — material decision / local implementation expression 경계 (과잉 명세·두 워커 diff·타이피스트·helper/local DOC_GAP 의미 부재)"
+
+# ---------- 15. SKILL.md 진입 문서 + 참조 문서 계약 (LLM 호출 없음) ----------
+ENTRY="$SRC_SKILL/SKILL.md"; REFS="$SRC_SKILL/references"
+# (a) 진입 문서는 압축 뒤에도 남는 크기여야 한다. 토큰 계측기가 없으므로 바이트·문자 수 상한으로 회귀만 막는다(토큰의 정확한 대체값이 아니다).
+entry_bytes="$(wc -c < "$ENTRY" | tr -d ' ')"
+[ "$entry_bytes" -le 14000 ] || fail "SKILL.md 진입 문서가 다시 커짐: ${entry_bytes} bytes (> 14000) — 상세 절차는 references/ 에 둔다"
+# (b) 참조 문서를 @import 로 한꺼번에 펼치지 않는다(필요 시 읽는 파일이어야 한다)
+grep -nE '(^|[[:space:]])@[A-Za-z0-9._/-]*references/' "$ENTRY" && fail "SKILL.md 가 references 를 @import 로 펼침"
+# (c) 분기별 읽기 지시·누락 시 중단·압축 뒤 재확인이 진입 문서에 있다
+for phrase in '행동하기 전에 그 파일을 Read 로 읽고' '파일이 없거나 읽히지 않으면 진행하지 않는다' '압축·재개 뒤 복구' '피처 worktree 의' '[SKILL REFERENCE]' \
+              'DESIGN_MISSING' 'IMPL_DOCS_MISSING' 'SCOPE_MISSING' 'ASK_USER' 'DEADLOCK' 'MAX_ROUNDS' 'UNDECIDED' 'REVIEW_DOC_GAP' 'UNIT' 'DONE' '--finalize' 'USER_RESOLVED' 'ENV_ERROR'; do
+  grep -Fq -- "$phrase" "$ENTRY" || fail "SKILL.md 진입 문서에 필수 항목 누락: '$phrase'"
+done
+# (d) 러너가 내는 모든 NEED_USER/NEED_DOCS reason 이 참조 문서에 설명돼 있다(요약 편집으로 종료 사유가 문서에서 사라지지 않게)
+runner_reasons="$(grep -ohE 'stop_need_(user|docs) [A-Z][A-Z_]+' "$SRC_SKILL"/scripts/*.sh | awk '{print $2}' | sort -u)"
+[ "$(printf '%s\n' "$runner_reasons" | grep -c .)" -ge 20 ] || fail "참조 문서 계약: 러너 reason 추출 실패"
+for r in $runner_reasons; do
+  grep -Fq -- "$r" "$REFS"/*.md || fail "참조 문서 계약: 러너가 내는 reason '$r' 이 references/ 어디에도 없음"
+done
+# (e) 사용자 결정 태그·승인 경계 등 필수 계약의 원문이 참조 문서에 남아 있다
+ref_require() { grep -Fq -- "$2" "$REFS/$1" || fail "참조 문서 계약: references/$1 에 '$2' 가 없음"; }
+ref_require exit-states-resume.md '[USER-QUESTION][scope=<stage>][escalation=<blocker id>]'
+ref_require exit-states-resume.md '[USER-QUESTION][scope=impl][worker-gap=<unit id>#<n>]'
+ref_require exit-states-resume.md '[USER-QUESTION][scope=impl][review-issue=<issue id>]'
+ref_require exit-states-resume.md '검증자 PASS 가 아니다'
+ref_require exit-states-resume.md 'resolved_impl_fingerprint'
+ref_require phase0-design.md '[USER-QUESTION][scope=design]'
+ref_require phase0-design.md '## 요구 변경/추가'
+ref_require impl-docs.md 'feature-scope.lock.json'
+ref_require impl-docs.md 'REUSE_DISCOVERY_GAP'
+ref_require done-finalize.md 'finalize 는 사용자 승인 없이는 실행하지 않는다'
+ref_require done-finalize.md 'touch .claude/ALLOW_COMMIT'
+ref_require done-finalize.md 'FINALIZE_CONFLICT'
+ref_require pipeline-contracts.md '범위 밖 변경은 자동 원복하지 않는다'
+ref_require pipeline-contracts.md '파일 삭제 절대 금지'
+ref_require pipeline-contracts.md 'WORKER_SESSION_MISMATCH'
+ref_require pipeline-contracts.md '막히면 AI끼리 풀지 말고 사용자에게 묻는다'
+# (f) 줄 길이: Read 도구는 한 줄이 2,000자를 넘으면 뒷부분을 잘라 보여 준다 — 진입 문서·참조 문서의 어느 줄도 그 근처에 가지 않게 한다(코드 블록 포함).
+#     표의 한 행은 나눌 수 없으므로 긴 설명은 표가 아니라 절(### reason)과 문단으로 쓴다.
+#     로케일·awk 구현에 따라 length 가 문자/바이트로 갈리므로 LC_ALL=C 의 바이트로 고정해 센다(바이트 ≥ 문자 수 — 1,500바이트 이하면 1,500자 이하다).
+MAX_DOC_LINE_BYTES=1500
+long_lines="$(LC_ALL=C awk -v max="$MAX_DOC_LINE_BYTES" 'length($0) > max { printf "%s:%d(%d bytes) ", FILENAME, FNR, length($0) }' "$ENTRY" "$REFS"/*.md)"
+[ -z "$long_lines" ] || fail "참조 문서에 ${MAX_DOC_LINE_BYTES}바이트를 넘는 줄이 있음(Read 에서 잘릴 수 있다 — 문장 경계에서 줄을 나눈다): $long_lines"
+# (g) 모든 종료 reason 이 exit-states-resume.md 의 절 제목에 있어야 한다(SKILL.md 가 "제목에 그 reason 이 든 절 전체"를 읽게 한다 — 통합 절도 제목에 reason 이름이 든다).
+#     러너가 stop_need_* 로 내는 reason 전부 + 합의 루프 status 에서 오는 동적 reason(ASK_USER/DEADLOCK/MAX_ROUNDS) + ENV_ERROR. 새 reason 을 절 없이 추가하면 여기서 실패한다.
+for r in $runner_reasons ASK_USER DEADLOCK MAX_ROUNDS ENV_ERROR; do
+  grep -q "^### .*\`$r\`" "$REFS/exit-states-resume.md" || fail "참조 문서 계약: exit-states-resume.md 에 '$r' 절 제목이 없음"
+done
+# 통합 절과 WORKER_SESSION_* 의 추가 읽기 경로는 진입 문서가 명시한다
+grep -Fq '`DEADLOCK`/`MAX_ROUNDS`, `TEST_RETRIES_EXHAUSTED`/`APPROVAL_STALE_REPEATED`' "$ENTRY" || fail "SKILL.md: 통합 절(reason 둘이 한 절) 안내가 없음"
+grep -q 'WORKER_SESSION_\*.*references/pipeline-contracts.md' "$ENTRY" || fail "SKILL.md: WORKER_SESSION_* 의 pipeline-contracts.md 읽기 경로가 없음"
+grep -q '^|' "$REFS/exit-states-resume.md" && fail "참조 문서 계약: exit-states-resume.md 에 표가 다시 생김(긴 행은 Read 에서 잘린다)"
+# (h) decisions.md '기존 줄 수정 금지' 의 유일한 예외(DECISION_SCOPE_REQUIRED 의 scope 보정)가 진입 문서에 명시돼 있다
+grep -Fq '유일한 예외: `DECISION_SCOPE_REQUIRED`' "$ENTRY" || fail "SKILL.md: decisions.md 기존 줄 수정 금지의 DECISION_SCOPE_REQUIRED 예외가 없음"
+for f in "$REFS"/*.md; do
+  forbid "$f" "과잉 명세를 택한다"; forbid "$f" "과잉 명세 > 과소 명세"; forbid "$f" "구조적으로 다른 코드를 쓸 수 있다면"; forbid "$f" "타이피스트"
+done
+echo "[OK] 15. SKILL.md 진입 문서(${entry_bytes} bytes)·분기별 읽기 지시 / 러너 reason $(printf '%s\n' "$runner_reasons" | grep -c .)개 전부 references 에 존재 / 필수 계약 원문 보존"
 
 echo ""
 echo "install.sh 스모크 테스트 전부 통과"

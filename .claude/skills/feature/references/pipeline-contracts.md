@@ -1,0 +1,176 @@
+# 파이프라인 계약 — 구현 단위 실행 · 강제 규칙 · 변경 소유권 · 세션/사용량
+
+> feature 스킬 참조 문서(`SKILL.md` 에서 분리한 원문). 읽는 시점: 러너의 worker 단계 동작(unit·세션·rolling context·세션 교체)을 판단하거나 사용자에게 설명해야 할 때, 검증자·리뷰어·워커 역할 경계나 `decisions.md` 태그·scope 규칙을 적용할 때, 범위·기준선·worktree 소유권 문제(`SCOPE_*`·`FOREIGN_WORKTREE_CHANGE`)를 다룰 때, 프롬프트·스키마·계약 버전을 바꿀 때, 비용·사용량을 보고할 때. 커밋·finalize 규칙은 `references/done-finalize.md` 에 있다.
+
+## 구현 단위 직렬 실행 (worker stage)
+
+큰 feature 를 워커 한 턴에 맡기면 후반부로 갈수록 conventions 가 soft constraint 처럼 밀려 기존 utility/predicate 재구현, `a == X || a == Y` 나열, 불필요한 분기, 책임 배치 이탈이 누적된다. 작은 기능 범위에서는 워커가 기존 컨벤션을 잘 따르므로, 설계 일관성은 전체 문서 합의로 유지하고 **실제 코드 작성만 unit 크기의 턴으로 제한**한다.
+워커 모델을 바꾸는 것도, 리뷰 구조를 바꾸는 것도 아니다. **Unit 은 구현·검증·재개 단위이고, Worker 는 Feature 전체의 단일 구현 주체다** — 구현 단계는 Feature 당 하나의 지속되는 Claude CLI 세션(`FEATURE_WORKER_SESSION`, 최초 `--session-id` → 이후 `--resume`)이 unit 순서대로 턴을 이어 가며, 앞 unit 에서 파악한 기존 API·컨벤션·선택된 구현을 다음 unit 이 같은 세션 문맥에서 재사용한다.
+unit 마다 CLI 를 다시 부르는 것은 러너이고(Feature 당 프로세스 1회가 아니다 — unit 별 테스트·체크포인트 게이트를 위해), 다음 unit 시작 권한도 러너만 갖는다. 그 앞뒤(design/impl 합의, 전체 review/fixer, 전체 verify)의 의미는 그대로다. unit 별 design·review·fixer, Worker pool, Group/Wave, 병렬은 두지 않는다.
+
+- **직렬만.** 러너는 `implementation-units.json` 을 워커 진입 시 `implementation-units.lock.json` 으로 확정(`feature-scope.lock.json` 과 같은 철학 — 원본≠lock 이면 `UNITS_MANIFEST_CHANGED`, 호출 중 바뀌어도 같은 사유)하고 배열 순서대로 하나씩 돈다. Unit N 이 끝나기(워커 DONE + targeted test 통과) 전에 N+1 을 시작하지 않는다. 병렬 워커·DAG·우선순위·worker pool·투기 실행은 없고 앞으로도 그 추상화를 두지 않는다. 러너는 unit 을 건너뛸지 판단하지 않는다 — 완료 체크포인트가 유효한가만 본다.
+- **unit 하나의 흐름.** `units/<id>/` 를 만들고 시작 tree(`before.tree`)를 기록 → **Feature Worker 세션의 턴**(`prompts/worker-unit.md`, 세션은 피처 공통 `feature-worker` — 최초 턴만 [CORE RULES]/[REFERENCE CODE] 전체를 받고 후속 턴은 짧은 재명시 + unit 명세만 받는다
+  — 단 아래 "워커 규칙 원문 재전달 경계" 에서는 후속 턴도 규칙 원문을 다시 받는다; 결과 `worker-result.json`, `DOC_GAP`/`USER_DECISION` 처리는 전체 워커와 같다) → **targeted test**(`targeted_test` 를 저장소 루트에서 실행, `targeted-test-NN.log`) → `done.json`(version·unit_id·spec_hash·worker/targeted_test 상태·completed_at, 임시 파일 +
+  `mv`). 세션 전제(cli·모델·effort·워커 규칙 지문·세대·결속 여부)는 `worker-session.json` 저널로 고정하고, 불일치하면 `WORKER_SESSION_MISMATCH` 로 자동 resume 도 자동 fresh 도 없이 멈춘다. 실제 세션 ID 는 CLI 어댑터 한 곳에서만 관리한다
+  — claude 는 `.session-feature-worker`, codex 는 `.session-feature-worker.codex.json` 원장(`thread_id` 를 저널에 복사하지 않는다). 저널의 `session_bound` 는 모든 게이트 + 결과 계약 검사를 지난 결과 수용(`role_session_accept`
+  — DONE/UNDECIDED 모두) 뒤에만 true 가 되며, "아직 세션 미생성"(false + 원장 없음)과 "수용된 세션 소실"(true + 원장 없음)을 구별해 소실·그리고 원장 존재+미결속 불일치는 전부 fail-closed 로 멈춘다(자동 fresh 금지). 예전 fresh-워커 실행이 남은 피처는 묵시적으로 마이그레이션하지 않는다(`WORKER_SESSION_MISSING`
+  — `--new` 또는 사용자가 `worker-session.migrate` 마커로 명시). `run_worker` 의 장치(워커 규칙·[REFERENCE CODE]·스키마·index 지문·기준선 가드·before/after tree·manifest 불변·write-set 검사·DONE/UNDECIDED 모순 검사)는 unit 호출에 그대로 쓰이고, 전체 범위 검사 뒤에 **같은 함수로 unit scope 검사**를 한 번 더 한다(`UNIT_SCOPE_VIOLATION`, 원복 없음).
+  unit 사이에 리뷰어·수정자·검증자를 부르지 않는다.
+- **워커 규칙 원문 재전달 경계.** 최초 턴에 넣은 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 을 모델 기억만으로 신뢰하지 않는다. 같은 세션을 잇는 턴이라도 ① 러너 (재)실행 뒤 첫 워커 턴(중단 뒤 재실행·장기 재개) ② 작업 단위가 바뀌는 턴(새 unit 의 첫 턴, unit → verify 의 worker-fix / review-gap) ③ 직전 워커 호출의 이벤트 로그에서 컨텍스트 압축이 관측된 다음 턴(claude
+  `stream-json` 의 `system/compact_boundary`, codex 이벤트의 `*compact*` type)에는 `core_rules.md` + **현재 worktree 의** `conventions.md` + `WORKER_SKILLS` 원문 전체를 `[RULES RECHECK — 규칙 원문 재전달: <사유>]` 블록으로 다시 싣는다(`load_worker_rules`
+  — 최초 턴과 같은 로더). 그 밖의 턴(같은 unit 의 test-fix 반복 등)은 짧은 필수 불변식 + 규칙 원문 파일 경로만 받는다 — 매 턴 전문을 중복 삽입하지 않는다. handoff 뒤 fresh 세대의 첫 턴은 종전대로 최초 턴 전문이다. 경계 판단은 러너 프로세스 메모리만 쓴다(새 상태 파일 없음
+  — 러너가 다시 뜨면 ① 이 된다). 재전달은 프롬프트 본문일 뿐이다: `worker-session.json`·`implementation-context.json`·session resume·handoff·계약 지문·Shell 게이트의 의미는 그대로이고, 규칙이 바뀌었다는 이유로 fresh 세션을 만들거나 체크포인트를 우회하지 않는다(규칙 변경은 종전대로 `WORKER_SESSION_MISMATCH`/`UNIT_CONTRACT_IMPACT_REQUIRED` 가 멈춘다).
+  전달 범위는 `live.log` 의 `워커 규칙 전달 … full|short, N bytes` 줄에 남는다. 회귀: `tests/smoke-implementation-units.sh` 사례 P.
+- **unit 간 rolling context.** 세션이 이어져도 세션 기억을 체크포인트로 삼지 않는다 — 앞 unit 이 **실제 코드로 확정한** 구현 문맥만 `implementation-context.json`(`{version, completed_units, facts[{kind, subject, note, source_unit}]}`, kind 는 `CONTRACT_BINDING`·`REUSE`·`ENTRY_POINT`·`INVARIANT` 넷뿐)으로 압축해 다음 unit
+  워커·test-fix 프롬프트의 `[IMPLEMENTATION CONTEXT]` 블록에 넣는다. 별도 요약 모델·stage·합의·리뷰는 없다 — 각 unit 워커(및 test-fix)가 결과 JSON 의 `context_updates{upsert,remove}` 로 후보를 내고 러너가 `(kind, subject)` 키로 기계적으로 fold 한다(같은 키 upsert 는 제자리 교체, remove 는 삭제;
+  의미 병합 없음). 확정은 targeted test **PASS 뒤**에만: 워커 → fix 순서의 update 를 `units/<id>/context-updates.json` 에 보존하고 `done.json` 을 쓴 뒤 lock 순서대로 유효한 done 체크포인트의 update 를 다시 fold 해 파일을 재구성한다(파생 상태
+  — 실패한 unit 의 update 는 pending 으로 버려지고, spec_hash 로 무효화된 체크포인트의 update 는 재사용하지 않으며, 같은 unit 재처리로 중복 append 되지 않는다). 규범(무엇을 해야 하는가)은 합의 문서 > 현재 코드 > 이 파일, 현재 상태(무엇이 존재하는가)는 현재 코드 기준이다
+  — 앞 unit 의 코드가 문서와 충돌하면 그 코드를 precedent 로 따르지 않고 scope 밖이면 DOC_GAP 으로 보고한다. 워커는 적힌 symbol 의 현재 구현을 확인·재사용하되 코드 탐색을 생략하지 않는다. hard size limit 은 두지 않는다 — 중복 키 금지·문서 복제 금지·obsolete 제거로 수렴시킨다.
+- **targeted test 는 리뷰의 대체물이 아니다.** 다음 unit 이 깨진 코드 위에 쌓이는 것을 막는 장치일 뿐이다. 실패하면 unit 범위 안에서만 수정(`prompts/worker-unit-fix.md`, 워커 역할, 이후 unit 기능 선행 구현 금지)하고 바로 재테스트한다 — 리뷰어를 부르지 않는다. 수정 횟수는 `MAX_TEST_RETRIES` 를 재사용하며 소진하면 `UNIT_TEST_RETRIES_EXHAUSTED`.
+- **checkpoint / resume.** `run-state.json` 은 힌트다. 재실행은 lock 검증 → 앞에서부터 `units/<id>/done.json` 의 내용과 현재 lock 의 unit spec 지문(`spec_hash`)을 대조 → 첫 미완료 unit 부터 **같은 Worker 세션으로** 재개한다(01/02 완료 후 03 에서 멈췄으면 01/02 워커를 다시 부르지 않는다).
+  단일 세션에서는 대화 진도와 코드 진도가 둘 다 있으므로 중간에 멈춘 unit 의 재개는 **결과 JSON + 실제 tree** 로 판정한다: 직전 시도의 유효한 DONE 결과의 after-tree 가 현재 tree 와 일치하면(워커는 끝났고 테스트 전에 죽음) CLI 재호출 없이 테스트부터 재개하고(건너뛴 호출 몫의 scope 게이트는 다시 돈다), before-tree 만 있고 after-tree 가 없는 시도 위에 tree 까지 바뀌었으면(CLI 호출 중 사망
+  — 대화 진도 불명) `WORKER_OUTCOME_UNCERTAIN` 으로 멈춘다(새 세션 생성·자동 재호출·원복 없음). 그 외에는 워커 턴부터 다시 돌되 `before.tree` 는 첫 시도의 것을 재사용한다(unit 시작 시점의 증거). manifest 를 바꾸면 impl PASS 가 무효라 재합의를 거치고, 워커 진입에서 lock 과 다르면 멈춘다
+  — 사용자가 lock 을 지우면 spec 이 그대로인 unit 의 체크포인트만 유지된다. 단 **직렬 의존성**: 어떤 unit N 을 다시 실행해야 하는데 N 뒤에 완료 체크포인트가 있는 unit 이 있으면 `UNIT_CHECKPOINT_CHAIN_STALE` 로 멈춘다(뒤 unit 의 spec 이 그대로여도 재사용하지 않고, 자동 원복·replay 도 하지 않는다).
+  어느 체크포인트도 최종 품질 승인이 아니다.
+- **세션 교체(회전)는 unit 경계에서만.** 단일 세션이 길어질 때의 컨텍스트 오염·압축 손실·cache-read 증가는 실제 위험이다 — 논리적 워커는 하나로 유지하되, unit 완료(targeted test PASS) 직후 마지막 워커 invocation 의 **마지막 턴 실제 컨텍스트**(`usage.jsonl` 의 `context_last_turn`
+  — claude 는 `stream-json` 마지막 assistant 메시지 usage 합, codex 는 rollout 마지막 `token_count.last_token_usage.input_tokens`; 없으면 `input_per_turn` = `input_effective / num_turns` 근사
+  — `input_effective` 자체는 invocation 누적 입력이라 기준이 아니다)이 `WORKER_SESSION_ROTATE_INPUT_TOKENS`(기본 1000000, 0 이면 비활성; 창 크기 `context_window` 까지 관측되면 고정 임계치 대신 `context_last_turn / context_window ≥ WORKER_SESSION_ROTATE_CONTEXT_RATIO`(기본 0.8);
+  실측 없이 근사를 쓰면 그 사실을 로그에 남긴다; 판단은 그 unit 에서 이 실행이 부른 마지막 워커 호출의 행만 — `units/<id>/last-usage-label`) 이상이면 `worker-handoff.json`(`schemas/worker-handoff.schema.json` — generation·last/next unit·source_tree·계약 지문·context 파일)을 쓰고 다음 unit 부터 fresh 세대로 교체한다.
+  새 세대의 첫 호출 전에 스키마·계약 지문·git tree 일치를 검증하며(불일치 → `WORKER_SESSION_MISMATCH`, 검증 없는 fresh 생성 금지), 첫 턴은 최초 턴과 같이 계약 문서·context 색인을 전부 다시 받는다. telemetry 가 둘 다 없으면 임의 추정 없이 세션을 유지하고, claude 는 세션 파일을·codex 는 원장(`.session-<key>.codex.json`)을 세대 접미사로 은퇴시키며, test-fix 도중이나 unit 중간에는 교체하지
+  않는다. 구현 사실은 `implementation-context.json`, 이관 제어는 `worker-handoff.json` — 역할을 섞지 않는다.
+- **워커 CLI 도구 제한은 SH 가 강제한다(프롬프트 아님).** `run_edit_role` 은 `role=WORKER` 인 호출(unit·test-fix·verify 의 worker-fix·review-gap, 최초·resume·handoff 뒤 새 세대 모두)에만 claude 는 `--disallowedTools "Agent,ScheduleWakeup"` + child 프로세스 전용 환경변수
+  `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`·`CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, codex 는 `exec`/`exec resume` 양쪽에 `-c 'agents.enabled=false'`(다른 `-c` 뒤, 전역 `~/.codex/config.toml` 불변)를 Bash 배열로 붙인다(`eval` 없음).
+  `SendMessage`·`Monitor` 는 막지 않고 Read/Edit/일반 Bash 테스트는 그대로다(`--allowedTools Bash` 유지 — 이것은 독점 허용 목록이 아니라 `Agent` 차단을 대체하지 못한다). CLI 가 옵션을 거부하면 그 호출은 실패로 끝나고 제한을 풀어 재실행하지 않는다.
+  DESIGNER/VALIDATOR/REVIEWER/FIXER 의 인자는 바뀌지 않는다. 막는 것은 CLI 관리형 하위 Agent 와 내장 백그라운드 기능이다 — 워커가 일반 Bash 에서 `&`/nohup/별도 CLI 를 띄우는 것까지 OS 수준에서 막지는 않고 그걸 위한 프로세스 감시도 두지 않는다.
+  이 정책은 호출별 CLI 인자이지 세션 대화 계약이 아니므로 `worker-session.json` 의 계약 지문에는 들어가지 않는다(단, 이번 변경의 `worker-unit.md` 수정으로 프롬프트 지문이 바뀌어 진행 중 피처는 기존 `WORKER_SESSION_MISMATCH` 절차를 거친다 — 묵시적 새 세션 전환 없음).
+  회귀: `tests/smoke-worker-tool-policy.sh`.
+- **claude 워커의 result 이벤트는 정확히 하나여야 한다.** `--output-format stream-json` 원본(`<raw>.stream.jsonl`)에서 `type=result` 이벤트가 **1개**이고 결과가 워커 스키마에 맞을 때만 수용한다(`claude_stream_extract_result`
+  — 마지막 이벤트를 고르던 `tail -1` 제거). 0개(`CLAUDE_RESULT_MISSING`)·2개 이상(`CLAUDE_RESULT_MULTIPLE` — 하위 Agent·백그라운드 실행이 result 를 여러 번 남긴 경우)·파싱 실패(`CLAUDE_RESULT_INVALID` — result 가 1개여도 JSON 으로 읽을 수 없는 줄이 섞여 있으면 포함)는 각각 명시적 오류이며 중간의 유효해 보이는 이벤트를 자동 선택하지 않는다.
+  그 경우 결과 파일을 만들지 않으므로 호출자는 "유효 결과 없음" 경로를 탄다. 판정 순서는 결과 유효성이 먼저다: CLI rc 가 0 이어도 결과가 워커 스키마/의미 검증(`worker_result_valid`)에 실패했고 작업 트리가 바뀌었으면 같은 `WORKER_OUTCOME_UNCERTAIN` 가드(before/after tree·`invocation_id`·raw 로그 경로·원본 rc·이유
+  — `WORKER_RESULT_SCHEMA_INVALID`/`WORKER_RESULT_MISSING`/`CLAUDE_RESULT_*`)로 `NEED_USER` 중단(변경 보존·자동 재호출 없음), 바뀌지 않았으면 실행 실패(재실행 허용). `CLI_EXIT_STATUS_MISMATCH` 복구(rc≠0 + 유효 결과)는 **유일하고 유효한 결과**에만 적용된다(claude 도 codex 의 `-o` 파일처럼 CLI rc 와 무관하게 유일한 result 의 `structured_output` 을 꺼내
+  호출자가 판정한다). claude 워커 세션의 확정(`.session-feature-worker.new` → 확정 파일)은 CLI rc 가 아니라 호출자의 `role_session_accept` 가 `worker_result_valid` 통과 뒤에만 한다(codex 원장과 같은 2단계) — 첫 턴의 결과가 무효면 그 대화는 다음 실행에서 이어지지 않고 새 `--session-id` 로 시작한다.
+  이미 확정된 세션의 후속 턴이 무효로 끝난 경우는 되돌릴 수 없으므로, 복구 뒤 재개 턴은 재개 프롬프트의 서열(합의 문서 → 현재 코드 → 세션 기억)로 그 턴의 기억을 덮는다. 디자이너·수정자(스키마 없는 편집 역할)의 세션 확정은 바뀌지 않는다. 레거시 단일 객체(`type` 없는 JSON 한 줄
+  — 구형 json 출력·테스트 mock)만 별도 명시 경로로 읽는다. 판정은 셸/jq 뿐이다. 회귀: `tests/smoke-claude-result-events.sh`.
+- **해결된 unit 미결정은 재개 프롬프트에 ID 로 전달된다.** unit 워커가 `UNDECIDED` 로 멈추고 사용자가 `decisions.md` 에 `[worker-gap=<unit-id>#<n>]` 답을 적어 체크포인트가 `WORKER_PENDING` 으로 수리되면, **그 unit 의 다음 워커 턴에만** `worker-unit.md` 의 `[RESOLVED GAPS]`(`${GAP_CONTEXT}`) 블록에 각 항목의 ID·원 질문·선택지·`decisions.md` 답
+  줄·approach.md 참조를 넣는다(`doc-gap-resume.json` 의 `gaps[].key` 와 태그로만 연결, 다른 unit 의 gap 은 넣지 않음, 정상 최초 호출은 빈 블록). 답이 없거나 일부만 있으면 해결로 추정하지 않는다(기존 WAITING_USER 계약). 전달 항목은 `units/<id>/resolved-gaps.json` 에 남고, 그 턴이 같은 ID·같은 질문·같은 위치를 다시 undecided 로 내면 세션 수용 전에 `RESOLVED_GAP_REPEATED` 로
+  멈추고, 그 턴의 변경을 턴 이전 tree 로 되돌린 뒤에만 재개된다(`references/exit-states-resume.md` 의 `RESOLVED_GAP_REPEATED` 절). 회귀: `tests/smoke-resolved-gap-context.sh`.
+- **기존 전체 review / verify 는 그대로다.** 모든 unit 완료 후 unit 별 `worker-result.json` 을 합쳐 `.agent-work/worker-result.json` 으로 두고 기존 `impl-review-loop.sh`(워커 진입 기준선 대비 전체 feature diff) → verify(`TEST_CMD`/`LINT_CMD`) 를 현재와 동일하게 수행한다. 컨벤션·설계 일치 판정은 전부 이 전체 review 의 책임이며, unit 분할은 그 책임을 줄이지 않는다.
+
+이 정책의 회귀는 `tests/smoke-implementation-units.sh`(LLM 호출 없음, mock claude/fake codex): 01→02→03 직렬·겹침 없음 / Unit 01 실패 시 02 미호출 / 03 중단 후 재실행은 03 부터 / spec_hash 불일치 체크포인트 무효 / lock≠원본·호출 중 변경 → `UNITS_MANIFEST_CHANGED` / unit scope 밖 → `UNIT_SCOPE_VIOLATION`(원복 없음) / unit 사이 리뷰어·수정자
+호출 0회 / targeted test 실패 → fix → 재테스트 · 재시도 소진 / 모든 unit 뒤 final review 1회 → verify → DONE / manifest 변경 시 impl PASS 무효 / 스키마·부분집합 검사 / **Feature 당 Worker 세션 1개**(01 `--session-id`, 02/03 과 test-fix 는 같은 ID `--resume`, 저널 일치) / 워커 응답 직후 중단 시 유효 결과 + after-tree 일치면 CLI 재호출 없이
+테스트부터 재개 / 세션 전제(모델·세션 파일) 불일치 → `WORKER_SESSION_MISMATCH`(모델 0회), 복구 후에만 같은 세션 재개 / 예전 fresh-워커 잔존 → `WORKER_SESSION_MISSING`(묵시적 마이그레이션 금지, `worker-session.migrate` 후에만 새 세션) / 임계치 도달 시 unit 경계에서만 세션 교체(handoff 스키마·tree 검증, 변조 시 fresh 거부) / codex 워커도 세션 1 thread(thread_id 는
+원장에만, 저널은 `session_bound` — 원장 소실·결속 불일치 fail-closed) / rolling context(01 fact → 02 프롬프트, 실패 unit 미확정, fix 정정 반영, 같은 키 replace, remove 미전달, 재개 시 전달, 무효 체크포인트 미재사용, 추가 모델 호출 0회) / 앞 unit 무효화 + 뒤 unit 완료 → `UNIT_CHECKPOINT_CHAIN_STALE`(워커 0회, 원복 없음).
+
+## 강제 규칙 (어길 수 없음)
+
+- **검증자는 게이트지 설계자가 아니다.** REVISE_DOC은 여섯 가지 입장 조건(요구·결정·계약 위반 / 근거: 문서 대조 DIRECT_MISMATCH 또는 실행 경로 REACHABLE_FAILURE / 명시 계약과 다른 결과·권한·비밀·영속 데이터·구현 불가 영향 / 이번 변경이 만들거나 활성화 / 지금 결정 없이는 진행 불가 / 정확한 근거 위치)을 모두 만족할 때만, ASK_USER는 별도 네 조건(어디에도 미결정 / 동작·데이터·보안·범위가 갈림 / 기존 계약·패턴이 확정 못 함 /
+  없이는 시작 불가)을 만족할 때 등록된다. 단, 이번 피처가 직접 만들거나 활성화하는 blocker가 정확히 입증되고 확정 요구·사용자 결정·범위를 함께 지킬 안전한 구현이 없을 때는 ASK_USER 1·3조건의 예외로, 충돌이 입증된 계약에 한해서만 사용자 결정을 다시 요구한다. 범위 안의 안전한 대안이 있거나 기존 결함만 있는 경우에는 적용하지 않는다.
+  스키마와 러너가 근거 필드, 사용하지 않는 필드의 공백, id 유일성, Round 2 `origin`의 형식과 참조 대상 존재(직전 이슈 id, docs diff에서 실제 바뀐 파일)를 강제하며 어긋나면 검증자 응답 오류로 중단한다. 수정과 신규 blocker 사이의 의미적 인과관계까지 러너가 보장하지는 않는다
+  — 그것은 `tests/validator-cases.md` 감도 회귀 세트의 몫이다. 순수 정책 미결정은 `POLICY_UNDECIDED` + `UNDECIDED_CHOICE`로 표현해 충돌 계약이나 실패 경로를 지어내지 않게 한다. 검증자 프롬프트는 두 층이다 — 공통 계약(`prompts/validator-review-design.md`/`-impl.md`:
+  관할·탐색 범위·입장 조건·출력 형식, 모델과 무관)과 판정 전략 오버레이(`prompts/validator-overlays/<프로필>.md`, `[VALIDATOR PROFILE: …]` 블록으로 task prompt 끝에 붙음). 프로필은 `config.sh`의 `VALIDATOR_PROFILE`(compact / guided / conservative / none)이며 기본은 명시 `guided` 다.
+  비워 두면 `validator_profile` 헬퍼가 `VALIDATOR_MODEL`의 정확한 ID 로 기본값을 고른다(gpt-6-sol·gpt-5.6-sol→compact, gpt-6-astra→guided, 그 외→conservative). 오버레이는 계약을 바꾸지 못하고 "그 계약을 어떤 순서·깊이로 판정할지"만 담는다
+  — 모델별로 계약 파일을 복제하지 않는다. 프로필 이름이 있는데 파일이 없으면 검증자를 부르지 않고 실패한다. 검증자 프롬프트(공통 계약·오버레이 모두)·스키마·러너 검사 중 하나라도 바뀌면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 그 값과 다른 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
+  검증자는 문서의 사실 주장을 그대로 믿지 않는다 — 명시적 convention 규칙과의 직접 충돌, 요구·확정 결정·기존 필수 계약에 근거 없는 새 제품 동작, 변경 대상의 직접 호출부·피호출부 누락으로 인한 계약 위반, 직접 범위 코드와 어긋나는 NEW 탐색 근거를 독립적으로 대조한다(확정적인 위반만 BLOCK, 탐색은 변경 대상과 직접 의존까지, 필수 파생 기술 변경·local expression 은 대상 아님).
+  검증자는 최소 불변식만 요구하고 해결 방법을 처방하지 않는다. 디자이너는 5단계 판정을 거쳐 REJECT하고, ACCEPT해도 검증자의 처방을 복사하지 않는다. Round 1은 전부, Round 2부터는 직전 이슈 종결 검토와 직접 회귀만. 파이프라인 운영(git 기준선·지문·테스트 순서)은 러너 책임이며 문서 blocking 사유가 아니다.
+- **리뷰어는 병합 게이트지 개선자가 아니다.** issue 는 여섯 가지 입장 조건(이번 diff 가 만든 문제 / 아홉 category 중 하나: CONTRACT_VIOLATION·UNDECLARED_BEHAVIOR·REACHABLE_BUG·SECURITY_OR_DATA_RISK·REDUNDANT_CONTROL_FLOW·REDUNDANT_CODE·TEST_CONTRACT_GAP·OUT_OF_SCOPE_CHANGE·UNDECIDED_APPROACH / 증거:
+  DIRECT_MISMATCH·REACHABLE_FAILURE·SEMANTIC_REDUNDANCY / verify 전에 반드시 해결(UNDECIDED_APPROACH 는 동작이 맞아도 예외) / 기존 결함·장래 개선이 아님 / 정확한 위치)을 모두 만족할 때만 등록된다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락·합의된 동작의 추가 black-box 테스트는 issue 가 아니다.
+  `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. action 은 `FIX_CODE`(수정자) / `DOC_GAP`(사용자 결정 — 루프 exit 3 → 러너 `NEED_USER/REVIEW_DOC_GAP`) 둘뿐이다. DOC_GAP 에는 `user_question`(비어 있지 않음)·`options`(≥2, 실제로 갈리는 solution shape 만, 우열 없음)가 필수이고 FIX_CODE 는 둘 다 빈 값이다(스키마 + 루프 검사).
+  DOC_GAP 은 impl 재합의(검증자·디자이너)로 가지 않는다 — 사용자가 고른 순간 그 gap 의 설계 판단은 종결이며 review-gap 워커가 그대로 구현하고 다음 리뷰가 검증한다. 같은 리뷰의 FIX_CODE 는 그 워커가 함께 처리하므로 DOC_GAP 이 하나라도 있으면 수정자를 먼저 부르지 않는다.
+  리뷰 diff 는 러너가 워커 진입 직전에 기록한 `worker-baseline.tree` 대비다(피처 이전 미커밋 변경은 이번 작업이 아니다). `OUT_OF_SCOPE_CHANGE` 는 수정자에게 가지 않는다 — 러너가 수정자 호출 전에 `FOREIGN_WORKTREE_CHANGE` 로 사용자에게 돌려보내며, 어떤 역할도 범위 밖 파일을 원복하지 않는다(`pre_bash_guard` 가 `git restore`/`checkout --`/`reset --hard` 를 차단).
+  워커·수정자의 git index 조작(add/reset/stash/restore --staged)은 금지이며, 러너·루프가 호출 전후 index 지문을 비교해 바뀌었으면 자동 복구 없이 중단한다. 루프가 증거·action 별 필드, id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상을 강제한다
+  — `UNRESOLVED_PREVIOUS` 는 직전 리뷰의 같은 id(`previous_issue_id`=id, `fix_ref` 빈 값), `FIX_REGRESSION`/`NEWLY_EXPOSED_BY_FIX` 는 `previous_issue_id` 빈 값 + `fix_ref` 필수이며 `fix_ref` 는 **직전 수정으로 실제 바뀐 소스 파일 경로:L시작-L끝**(패치 파일 `fix-diff-round-N.patch` 의 경로·행 번호가 아니라 수정 후 소스의 행 번호, git tree 로
+  계산한 변경 hunk 와 겹쳐야 한다 — 정의 문장은 `config.sh` 의 `REVIEW_FIX_REF_RULE` 하나를 프롬프트·스키마·검사가 같이 쓴다). 어긋난 출력은 `ENV_ERROR` 가 아니라 `REVIEW_OUTPUT_INVALID`(`references/exit-states-resume.md` 의 해당 절)로 멈추고, 재실행은 리뷰어를 다시 부르지 않는다.
+  Round 1 은 전부, Round 2 부터는 직전 이슈 종결 검토와 수정이 만든 직접 회귀만. 같은 이슈가 내용 변화 없이 반복되면 `DEADLOCK`. 수정자는 `FIX_CODE` 의 required_outcome 만 구현하고 잘못된 이슈는 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다.
+  리뷰어 프롬프트·스키마·루프 검사 중 하나라도 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을 올리고 `tests/reviewer-cases.md` 감도 회귀를 돌린다 — 유료 실행이므로 사용자 승인 후 `touch .claude/ALLOW_REAL_LLM_REGRESSION`(1회용)이 있어야 스크립트가 돈다.
+  오케스트레이터가 지시 없이 만들지 않는다.
+- **막히면 AI끼리 풀지 말고 사용자에게 묻는다.** 러너가 자동으로 도는 루프는 성공 조건이 기계적인 두 가지뿐 — (리뷰 이슈 → 수정자 → 재리뷰), (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트). unit 단계의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째 형태와 같고 같은 한도를 쓴다. 교착·라운드 초과·`UNDECIDED`·재시도 소진은 전부 즉시 사용자 반환이며, 러너·오케스트레이터 어느 쪽도 "다른 에이전트에게 다시 물어보는" 자동 복구를 추가하지 않는다.
+- **테스트는 동작 계약 검증용이다** — 작성 순서는 강제하지 않는다. 워커는 `implementation.md`가 명시한 동작 계약을 검증하는 테스트만 쓰고, 테스트 편의만을 위한 운영 API·분기·추상화·가시성 변경과 커버리지 수치 목적의 테스트는 금지. 리뷰어는 명시 요구 테스트의 누락, 내부 호출·private 상태만 검증하는 테스트, 테스트 편의용 운영 코드 변경을 `TEST_CONTRACT_GAP` 으로 올린다. 이미 합의된 외부 동작을 검증하는 추가 black-box 테스트는 문서에 이름이 없어도 issue 가 아니다.
+- **합의 문서는 코드 diff 를 사전에 고정하지 않는다 — material implementation contract 를 고정한다.** `implementation.md`+`approach.md` 가 material decision(외부 동작·API 계약, public/package 계약, 영속 데이터, transaction/lock/concurrency, 보안 경계, 책임 배치, REUSE/EXTEND vs 새 병렬 책임, sync/async, retry/fallback/cache/error
+  semantics, 외부 호출 topology·횟수, 의미 있는 비용 특성, 새 production 구조물, 사용자·convention 이 직접 요구한 방식)을 결정하고 검증자가 합의한다(검증자 `CODE_SPEC_GAP` = material 구현 계약 하나가 열려 있음, 일곱 입장 조건 + "이 선택을 워커에게 맡기면 제품/아키텍처/책임 경계/상태 의미/I/O 비용/안전성 중 무엇이 달라지는가" gate
+  — helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded local collection 표현은 근거가 아니다). 워커는 그 계약 안에서 convention → material contract → 직접 범위의 기존 표현 → 관용 표현 → 가장 단순한 구현 순으로 local implementation expression 을 직접 고르되, 문서가 요구하지 않은 standalone production
+  class·interface·repository·service·converter·shared helper·새 persistence/query path·새 state/result/context abstraction 은 만들지 않는다(local autonomy 는 확대, architectural surface area autonomy 는 확대하지 않음).
+  워커·수정자가 material REQUIRED 와 다른 기법·책임 위치·호출 횟수·상태 순서를 쓰거나 REUSE/EXTEND 로 지정된 symbol 옆에 같은 책임의 병렬 구현을 만들면 **동작이 같아도** 리뷰어가 `CONTRACT_VIOLATION` 으로 잡고, 단순 직접 구현으로 완전히 대체 가능한 새 standalone abstraction 은 `REDUNDANT_CODE` 로 잡는다.
+  반대로 helper/local naming/intermediate/if·switch/for·stream/동등 overload/bounded collection 표현/반환 직전 alias 의 차이는 approach.md 가 REQUIRED 로 적어 두었더라도 issue 가 아니다(명시 convention·사용자 결정이 요구한 경우만 예외)
+  — 문서에 적혀 있다는 사실만으로 모든 문장이 동등한 강도의 contract 가 되는 것은 아니다. 리뷰어의 근거는 문서·project convention·인용된 reference 뿐이며 문서가 지정하지 않은 재사용 후보를 찾지 않는다. 워커가 material decision(책임 위치, shared component 확장 vs 병렬 책임, 호출 횟수가 달라지는 접근, transaction/lock/cache/retry, 외부 동작이 달라지는 분기, 새 standalone abstraction
+  필요 여부)을 문서·reference·convention·직접 범위 precedent 어디서도 찾지 못하면 `DOC_GAP` 으로 돌려보내고, 골라 버렸으면 리뷰어가 `UNDECIDED_APPROACH` + `DOC_GAP` 으로 잡는다 — 어느 쪽이 나은지는 판단하지 않는다. local expression 으로는 DOC_GAP 을 만들지 않는다.
+  합의의 역할 경계: design consensus = 구현 전 요구·설계 계약 확정, impl consensus = **최초 워커 진입 전** implementation/approach/units 의 실행 가능성 검증(사전 게이트), 워커·리뷰어 DOC_GAP = 구현 중 발견된 미결정 material 사항 → 사용자에게 직접 escalation → 사용자 결정이 최종 → child validator/designer 재승인 없음.
+  리뷰어·워커의 구체적 질문에 답해 approach 를 보강한 것은 새 implementation proposal 이 아니라 pending gap 의 resolution 이다.
+- 모호한 요구·갈리는 설계 판단은 추측 금지 — 사용자 질문 후 문서 반영, `decisions.md`에 `- [USER-QUESTION][scope=design|impl] <질문> → <답>` 기록. scope 는 "그 질문이 어디서 발생했는가"가 아니라 **"그 결정이 처음 영향을 주는 단계"** 다:
+  요구·외부 동작·설계(`design.md`)에 영향을 주는 결정은 질문이 impl 합의·워커·리뷰 중 어디서 나왔어도 `scope=design`(design·impl 검증자가 모두 본다), 합의된 설계는 그대로이고 구현 수단(`implementation.md`·`approach.md`·unit 분할·범위)에만 영향을 주는 결정은 `scope=impl`(impl 검증자만 본다
+  — design PASS 를 깨지 않는다). `scope=impl` 전부를 design 검증자에게 넘기지 않는다(단계 격리). 신규 규칙은 앞으로 기록하는 결정에 적용한다 — 이미 기록된 `scope=impl` 줄을 문구로 추정해 재분류하지 않는다. 합의 에스컬레이션(ASK_USER/DEADLOCK/MAX_ROUNDS)의 답은 어느 blocker 에 대한 답인지 기계적으로 확인되도록 세 번째 태그를 붙인다
+  — `[USER-QUESTION][scope=design|impl][escalation=<blocker id>]`(모든 blocker 에 답이 있어야 그 단계 검증자 재호출 없이 다음 단계로 간다. `[USER-QUESTION]` 줄이 하나 늘었다는 사실만으로는 수리되지 않는다). 구현 후 gap 의 답도 어느 pending gap 에 대한 답인지 기계적으로 확인되도록 세 번째 태그를 붙인다(`[escalation=…]` 과 서로의 답으로 인정되지 않는다)
+  — `[USER-QUESTION][scope=impl][review-issue=<issue id>]`(리뷰어) / `[USER-QUESTION][scope=impl][worker-gap=<unit id 또는 review-gap>#<n>]`(워커). 모든 pending gap 에 비어 있지 않은 답이 있어야 워커가 재개되며, 기존 `[scope=impl]` 의미(impl 지문 포함, design PASS 무영향)는 그대로다.
+  **태그 달린 답 줄의 scope 는 그 체크포인트 계약이 정한 값 그대로 둔다**(`[escalation=…]` 은 발생 단계, `[review-issue=…]`/`[worker-gap=…]` 은 `scope=impl`) — 이 태그들은 "어느 pending 항목의 답인가"이고 scope 승격 수단이 아니다.
+  후기 단계의 답이 순수 구현 gap(예: unit scope 에 테스트 파일 추가, 조회 방식 선택)이면 그 답 줄과 approach.md 반영으로 끝나고 design 은 다시 검증되지 않는다. 답이 **요구·외부 동작·설계 자체를 바꾸는 신규 제품 요구**면 gap 답으로 우회하지 않는다 — ① request.md 에 `## 요구 변경/추가` 를 append(어느 옛 규칙을 어느 범위에서 대체하는지 명시) ② 태그 없는
+  `- [USER-QUESTION][scope=design] <질문> → <답>` 줄을 추가 ③ design.md(필요하면 implementation.md/approach.md)를 갱신한 뒤 재실행한다. design PASS 가 stale 이 되어 정상 design → impl 재합의를 거치고(옛 `doc-gap-resume.json` 은 재합의를 건너뛰는 데 쓰이지 않으며 impl 재합의가 끝나면 `SUPERSEDED` 로 남는다), 그 unit 은 `[CHANGED CONTRACT]` 를 받아
+  다시 돈다.
+- 판정은 스키마 검증된 JSON만 신뢰한다: 검증자(`PASS/BLOCK`), 리뷰어(`APPROVE/REQUEST_CHANGES`), 워커(`DONE/UNDECIDED` + `context_updates`, `schemas/worker-result.schema.json`). 모순 응답은 스크립트가 즉시 거부. "대충 통과 간주" 금지.
+- 하위 실행은 반드시 `--model`/`-m` 명시(`config.sh` 한 곳에서 관리). 역할별 CLI 는 고정이 아니라 모델 ID 로 라우팅한다(`claude*` → claude, `gpt-*`/`o*`/`codex*` → codex, 그 외는 `<ROLE>_CLI` 명시). 검증자·리뷰어는 `run_readonly_json_role`(읽기 전용 + 스키마 JSON), 디자이너·수정자·워커는 `run_edit_role`(편집)로 호출되며 두 CLI 의 플래그 차이는 이 헬퍼 안에서만 다룬다.
+  `core_rules.md`는 워커에게만, 선택 `conventions.md`는 전 역할에 이 헬퍼가 명시 주입한다(claude 호출은 `FEATURE_ROLE_CHILD=1` 을 달아 프로젝트 `inject_conventions.sh` 훅이 중복 주입하지 않게 한다; 훅은 interactive 오케스트레이터 세션당 첫 프롬프트에만 넣는다.
+  컨텍스트 압축 직후에는 `SessionStart`(compact) 훅 `compact_recovery.sh` 가 1회, SKILL.md·현재 단계 참조 문서를 디스크에서 다시 읽으라는 지침을 넣는다 — conventions 본문은 싣지 않는다(훅 출력이 10,000자를 넘으면 잘려 전달되므로 크기와 무관하게 경로만): 피처 worktree 가 하나도 없으면 프로젝트 루트 파일 경로를, 있으면 worktree 사본 경로를 알려 주고 다시 읽게 한다.
+  child 에는 넣지 않는다). Claude 세션은 stage/attempt 단위(`designer-<design|impl>`, `validator-<design|impl>`, `reviewer-aNN`, `fixer-aNN`)와 Feature 단위(워커 — `feature-worker` 하나로 unit·test-fix·worker-fix·review-gap 전부, `worker-session.json` 저널로 전제 고정)로만 `--resume` 하고 그 밖으로 대화 문맥을 넘기지 않는다
+  — 상태는 문서·JSON·체크포인트·지문으로만 전달. 워커에는 추가로 `config.sh`의 `WORKER_SKILLS`(기본 비어 있음; 탐색 순서 `.claude/skills/<이름>/SKILL.md` → `.agents/skills/<이름>/SKILL.md`)의 본문을 `[WORKER SKILL]` 블록으로 붙일 수 있다.
+  목록에 있는데 어디에도 없으면 워커를 실행하지 않고 실패한다. 프로젝트 codex hooks(`.codex/hooks.json` + `worker_guard.sh`)는 매 툴 호출에 별도 적용.
+- **워커와 리뷰어·수정자는 파일 삭제 절대 금지** — 어느 CLI 로 돌아도 훅이 강제한다(claude 쪽 `pre_bash_guard`, codex 쪽 `worker_guard`). 러너의 `--new` 아카이브도 `mv`만 쓴다. 삭제가 필요하면 `decisions.md`에 대상·사유를 남기고 사용자 에스컬레이션.
+- 모든 하위 실행은 stdin을 닫고 돌린다(스크립트 시작부 `exec </dev/null`). 러너를 다른 명령·heredoc과 한 줄로 묶지 않는다.
+- **진행 확인은 "프로세스 생존"이 아니라 "실제 진척"으로 판정** — `live.log` 최근 갱신과 CPU 시간 증가를 본다. 둘 다 멈춰 있으면 입력 대기·행(hang)이다: 해당 PID만 TERM으로 정리하고(`pkill` 광역 금지) 원인 확인 후 같은 명령으로 재실행하면 러너가 재개 지점을 찾는다. 중단된 라운드 산출물은 archive로 옮긴다.
+
+## 공유 working tree 와 변경 소유권
+
+`worker-baseline.tree` 는 시점 기준선이지 변경 소유권 증거가 아니다. git 은 같은 working tree 에서 생긴 변경이 워커의 것인지 다른 채팅 세션의 것인지 기록하지 않는다. 그래서:
+
+- 같은 working tree 에서 피처 실행 중 다른 writer 의 변경이 존재할 수 있으므로, **범위 밖 변경은 자동 원복하지 않는다.** 현재 내용을 보존하고 `FOREIGN_WORKTREE_CHANGE`(리뷰어 판정) 또는 `SCOPE_VIOLATION`(write-set 대조) 으로 중단한다. 되돌릴지 보존할지는 사용자가 정한다.
+- 이번 피처의 변경은 시점이 아니라 **범위**(`feature-scope.json` → 워커 진입 시 `feature-scope.lock.json` 으로 확정)로 정의한다. 리뷰 diff 와 승인 지문은 범위 경로만 본다(`new_file_roots` 아래는 기준선에 없던 신규 파일만). manifest 는 검사 기준이면서 에이전트가 쓸 수 있는 `.agent-work` 안에 있으므로, 호출 전후 원본·lock 해시를 대조해 바뀌었으면 `SCOPE_MANIFEST_CHANGED` 로 중단한다.
+  같은 이유로 `worker-baseline.tree` 도 호출 전에 읽은 값으로만 소유권을 판정하고, 호출 중 바뀌었으면 `SCOPE_BASELINE_CHANGED` 로 중단한다. 범위 안 파일을 다른 세션이 동시에 고치는 경우는 구분할 수 없다 — 그 파일의 변경은 이번 작업으로 리뷰된다.
+- **모든 피처는 처음부터 피처별 전용 git worktree 에서 돈다** (`feature-run.sh --feature <id>`, Phase 0). 같은 프로젝트의 여러 피처를 동시에 실행해도 서로의 `.agent-work`·문서·리뷰·소스 변경이 섞이지 않고, 원본 working tree 에도 보이지 않는다.
+  부트스트랩(`scripts/feature-worktree.sh`)은 원본의 지문 → `snapshot_worktree_tree` → 지문 재확인으로 일관된 snapshot 만 쓰고(다르면 worktree 를 만들지 않고 실패), `git worktree add --no-checkout` + 임시 index 의 `read-tree`/`checkout-index` 로 materialize 한 뒤 worktree 에서 다시 snapshot 해 같은 tree 인지 검증한다.
+  worktree 의 index 는 HEAD 이므로 원본의 미커밋 변경은 unstaged 로 보인다. 원본에서 러너가 실행 중이거나(`.agent-work/.runner.lock/pid` 생존) dirty submodule 이 있으면 거부한다. 러너는 진입 시 `.agent-work/.runner.lock` 을 `mkdir` + pid 기록 한 단위로 원자적으로 잡아 같은 트리에 두 러너가 들어오지 못하게 하고, 종료 시 푼다.
+  pid 가 있고 죽은 stale 락만 회수하며 pid 가 아직 없는 락은 초기화 중으로 보고 훔치지 않는다(그런 락이 확실히 죽은 것이면 사용자가 직접 지운다). gitignore 된 `.codex/`·`.claude/settings.json`·`.claude/hooks/` 는 worktree 에 없으면 원본에서 복사해 훅 게이트를 유지한다(복사 실패는 부트스트랩 실패).
+  worktree 로 들어간 뒤 `PROJECT_ROOT`·`CORE_RULES_FILE`·`CONVENTIONS_FILE` 은 그 worktree 로 재바인딩되고 하위 루프에도 `FEATURE_PROJECT_ROOT` 로 상속된다 — 규칙·conventions·프로젝트 로컬 워커 스킬을 원본이 아니라 snapshot 시점의 사본에서 읽는다(실행 엔진 위치 `SKILL_DIR` 는 그대로).
+  피처 worktree 밖의 파일은 워커·수정자·리뷰·승인 대상이 아니며, 다른 세션은 원래 디렉터리에서 계속 작업한다. 완료 후 merge·commit·rebase·worktree 삭제는 자동으로 하지 않는다 — 사용자에게 branch/worktree 결과를 보고하고 finalize 여부를 묻는다. 유일한 예외는 **사용자 승인에 따른 명시적 finalize 명령**(`--feature <id> --finalize`, Phase 2)이며, 그때도 원본에는 working tree 변경만 들어가고
+  커밋은 별도 요청이 있어야 한다. 부트스트랩은 finalize 의 기준선 B 를 `feature.json.bootstrap_tree`(version 2) 로 영구 기록한다 — 신규 snapshot 경로는 그 snapshot tree, 기존 브랜치 체크아웃(`new-from-branch`)은 생성 직후 worktree 의 snapshot 이다.
+  수동 `--worktree <디렉터리> --branch <이름>` 도 그대로 동작한다.
+
+권장 구성: `--feature <id>` 전용 worktree + `feature-scope.json` 필수 + write-set 검사 + 범위 밖 변경 자동 원복 금지 + main 자동 반영 금지. `--feature` 없이 공유 worktree 에서 돌리는 것은 호환용이며, 그때는 앞의 원복 금지·범위 한정이 최소 안전장치다.
+부트스트랩·finalize 회귀는 `tests/smoke-feature-worktree.sh`(LLM 호출 없음): clean 생성 / dirty tracked·untracked·권한·symlink 동일 materialize / `.agent-work`·ignored 제외 / 원본 HEAD·branch·index·working tree 불변 / 피처 간·원본 간 격리 / snapshot 도중 원본 변경 시 실패 / 동일 피처 재실행 재사용 / 수동 `--worktree` 호환 / 러너 실행
+중·dirty submodule 거부, 그리고 finalize(러너 대신 run-state `DONE` + 승인 지문을 파일로 재현): clean 원본 반영·커밋 없음·index 불변·worktree/브랜치 제거·archive / 재실행 already finalized·delta 중복 없음 / bootstrap 당시 dirty X 중복 적용 없음·untracked 신규 전달 / 원본 별도 변경·staged 상태 보존 / 같은 파일 비충돌 자동 병합 / 같은 hunk 충돌 →
+`FINALIZE_CONFLICT` 전부 보존 / binary·실행 권한·symlink / archive 실패 시 불변 / 브랜치 삭제 실패 → `APPLIED_CLEANUP_INCOMPLETE` 후 정리만 재시도 / 기준선 없는 이전 metadata 거부 / 러너 실행 중·DONE 아님·승인 stale·잘못된 cwd·검증 뒤 원본 변경 거부.
+
+이 정책의 회귀는 저장소 루트의 `tests/smoke-foreign-change.sh` 다(실제 LLM 호출 없음, mock claude, 임시 저장소). 다섯 사례: ① 기준선 기록 후 워커 역할이 범위 안 파일을, 다른 세션 역할이 범위 밖 파일을 고친 상태에서 리뷰어가 `OUT_OF_SCOPE_CHANGE` 를 내면 exit 2 / `FOREIGN_WORKTREE_CHANGE` / 수정자 호출 0회 / 두 파일과 index 불변 / 리뷰어 diff 가 실제로 캡처됐고 범위 안 파일은 있고
+범위 밖 파일은 없음 ② 수정자의 범위 밖 쓰기 → `SCOPE_VIOLATION`, 원복 없음 ③ 승인 지문 양방향 — 범위 밖 외부 변경은 승인 유지·재사용, 범위 안 내용·실행 권한·범위 정의 변경은 승인 무효 ④ 범위 밖 파일을 범위 안 경로로 rename 하면 출발지가 위반으로 잡힘(`--no-renames`) ⑤ manifest 가 있는데 잘못되면 전체 트리 지문으로 조용히 돌아가지 않고 실패 ⑥ manifest canonical 규칙과 roots-only 유효 ⑦ 기본 설정에서 워커
+스킬 미주입 ⑧ 수정자가 manifest 를 넓혀도 `SCOPE_MANIFEST_CHANGED`, 원복·재호출 없음, lock≠원본이면 진행 불가 ⑨ `new_file_roots` 아래 기준선 파일 수정은 위반·신규 생성은 허용, 지문은 신규 엔트리만 ⑩ 이전 호출이 만든 root 파일의 후속 수정은 허용 ⑪ APPROVE 뒤 lock 은 그대로 두고 원본 manifest 만 바뀌면 승인 지문 실패(원본·lock 일치 검사가 `compute_approval_fingerprint` 안에 있다) ⑫
+피처가 만든 root 파일의 삭제·symlink 화(D/T)는 위반 ⑬ 수정자가 `worker-baseline.tree` 를 빈 tree 로 바꾸고 root 아래 기존 파일을 고치면 `SCOPE_BASELINE_CHANGED`, 파일·기준선 모두 자동 복구 없음, 복구 없이 재실행하면 모델 호출 0회로 다시 중단, 복구 후에만 재개 ⑭ 기준선과 manifest 를 함께 바꾸면 `SCOPE_MANIFEST_CHANGED` 로 먼저 멈추더라도 가드가 남아, manifest 만 고친 재실행은
+`SCOPE_BASELINE_CHANGED` 로 모델 0회 재중단. `tests/install-smoke.sh` 8절은 필수 워커 스킬이 없으면 `run_worker` 가 실제로 중단하고 codex 를 부르지 않음, worker 단계 진입 시 원본≠lock 이면 `NEED_USER`/`SCOPE_MANIFEST_CHANGED` 가 실제로 기록되고 codex 를 부르지 않음, 11d 절은 verify 단계의 worker-fix 가 기준선과 범위 밖 파일을 바꿔 멈춘 뒤 테스트가 통과하도록 바뀐
+재실행이 테스트·codex·리뷰어 호출 0회로 다시 멈추고 기준선 복구 후에만 DONE 에 이르는지 본다. 그리고 워커가 `worker-baseline.tree` 를 빈 tree 로 바꾸고 root 아래 기존 파일을 고치면 `SCOPE_BASELINE_CHANGED` 로 review 에 들어가지 않고 원복도 하지 않으며, 복구 없이 재실행하면 codex 호출 0회로 다시 멈추고 복구 후에만 워커가 재개됨을 본다.
+리뷰 루프·수정자 프롬프트·범위 함수(`config.sh`)를 바꾸면 돌린다. 범위 지문은 `snapshot_worktree_tree` 의 tree 엔트리(모드·유형·blob·경로)와 manifest 자체를 해시하므로 내용뿐 아니라 실행 권한·symlink 목적지·생성/삭제까지 잡는다.
+
+## 토큰 절약 구조 (스크립트에 내장)
+
+- 오케스트레이터는 러너 호출 1회당 턴 1회만 소비한다. 러너 내부의 라운드 진행·재진입은 상위 세션 API 호출을 발생시키지 않는다.
+- claude 로 라우팅된 역할은 역할별 세션 유지: `designer-doc`, `validator`, `feature-worker`(모든 워커 호출 — unit·test-fix·verify 의 worker-fix·review-gap), `reviewer`, `fixer`. 첫 호출이 `--session-id`, 이후 `--resume`.
+  `reviewer`와 `fixer`는 절대 같은 세션으로 합치지 않는다. 합의 루프의 검증자도 예외다 — 호출마다 fresh 세션(`validator-<target>-round-NN-<invocation id>`)이며, 종결 검토는 직전 blocker 의 구조화된 주장·증거(`reviews/prev-blockers-*.json`, `why_blocks_now` 제외)와 문서 diff 만 받고 이전 검증자 대화·디자이너의 ACCEPT/REJECT 사유는 받지 않는다(디자이너 세션은 stage 단위로
+  유지). 검증자는 `decisions.md` 원본 대신 러너가 `[USER-QUESTION][scope=…]` 줄만 추린 `reviews/user-decisions-<target>.md` 를 확정 사용자 결정으로 읽는다. 워커 세션은 Feature 단위다 — unit 마다 세션을 만들지 않고 같은 `feature-worker` 세션을 턴으로 이어 가며(최초 턴만 전체 규칙·참조 코드, 후속 턴은 짧은 재명시 + unit 명세
+  — 규칙 원문은 재전달 경계에서 다시 싣는다), 전제는 `worker-session.json` 저널이 고정하고 임계치 도달 시 unit 경계에서만 `worker-handoff.json` 검증을 거쳐 fresh 세대로 교체한다. 세션 정책은 CLI 와 독립이다 — codex 로 라우팅된 역할도 같은 key 정책을 따른다:
+  호출자가 결과를 수용한 key(`role_session_accept` — 현재 리뷰어·수정자, attempt 단위)는 세션 원장 `.session-<key>.codex.json` 의 `thread_id` 로 `codex exec resume` 을 하고, 새 attempt·검증자(고유 key)·수용되지 않은 호출은 항상 새 `codex exec` 다.
+  thread id 는 최초 실행 이벤트 JSONL 의 `thread.started` 에서만 취득하며(`--last`·자동 검색 금지), resume 실패 시 새 세션으로 조용히 대체하지 않고 중단한다(결과 수용이 불확실하면 `.session-<key>.resume-pending.json` marker 가 재전송을 막는다).
+  리뷰어 모델을 Claude↔Codex 로 바꿔도 attempt 단위 재사용 의미는 같고 CLI 플래그만 다르다. 세션 재사용은 비용 최적화일 뿐 판정 근거가 아니다 — 승인은 계속 리뷰 JSON·diff·지문으로만 검증한다.
+- 사용량은 `$WORK_DIR/usage.jsonl`에 CLI invocation 한 번당 행 1개(세션 누계 아님, `--resume` 해도 invocation 별). 필드: `role`/`cli`/`model`/`label`/`invocation_id`, `input_uncached`(cache 제외 입력)·`cache_read`·`cache_write`·`output`·`input_effective`(셋의 합, 진단용 파생값), `reasoning_output`(codex 만, output 의
+  부분집합 — total/cost 에 다시 더하지 않음), `num_turns`·`duration_ms`, `exit_code`/`success`. 비용은 provenance 로 나뉜다: `cost_usd` = provider 가 직접 보고한 실제 비용(claude `total_cost_usd`, codex 는 항상 `null`), `estimated_cost_usd` = codex 토큰 관측값 × 명시적 가격표(`config.sh` `codex_model_pricing`
+  — OpenAI API Standard, 2026-10-30 조회, USD/1M tokens, 컬럼 입력 / 캐시 입력 / 30분 캐시 쓰기 / 12시간 캐시 쓰기 / 출력: `gpt-6-astra` 10/1/12.5/25/50(장문 20/2/25/50/75), `gpt-5.6-sol` 4/0.4/5/10/20(장문 8/0.8/10/20/30
+  — 2026-11-21 까지 최소 유지 예정인 프로모션 단가), `gpt-6-sol` 2/0.2/2.5/5/10(장문 4/0.4/5/10/15), `gpt-5.6-luna` 0.2/0.02/0.25/0.5/1.2(장문 0.4/0.04/0.5/1/1.8), `gpt-6-luna` 0.1/0.01/0.125/0.25/0.5(장문 0.2/0.02/0.25/0.5/0.75).
+  규칙: 장문 = 요청 입력 > 272,000(정확히 272,000 은 단문)이면 **요청 전체**에 적용, 장문 단가 = 입력·캐시 입력·캐시 쓰기 단문×2 / 출력 ×1.5, 30분 캐시 쓰기 = 입력×1.25, 12시간 = ×2.5(캐시 쓰기는 입력 단가 위의 할증이 아니라 배타적 입력 토큰 분류).
+  정확한 모델 ID 만 매칭하며(`gpt-6-sol` ≠ `gpt-6.1-sol`) 가격표에 없는 모델은 `null`), `cost_kind` = `reported|estimated|unknown`, `pricing_basis`, `pricing_assumptions`(판단할 수 없는 과금 조건을 명시한 가정 목록), `long_context_turns`.
+  codex 추정(schema_version 4)은 turn(`turn.completed`)마다 `(uncached × input + cache_read × cached + cache_write_30m 토큰 × 30분 단가 + cache_write_12h 토큰 × 12시간 단가 + output × output) / 1,000,000` 을 더한 값이다
+  — `uncached = max(0, input_tokens − cached − cache_write)`(음수 방지, 캐시 쓰기 토큰을 일반 입력으로 다시 과금하지 않음), `reasoning_output_tokens` 는 output 의 부분집합이라 다시 더하지 않는다. 12시간 캐시 쓰기 토큰이 이벤트에 분리 관측될 때(`cache_write_12h_input_tokens`)만 12시간 단가를 쓰고, 관측되지 않으면 전부 30분으로 보고 `cache_write_ttl=30m(assumed…)`
+  가정을 남긴다. 장문 기준은 API 요청 단위이지만 codex 이벤트는 요청 단위 입력을 주지 않으므로 **turn 별 입력**(`turn.completed.usage.input_tokens`)을 proxy 로 쓰고 `long_context_tier=turn_proxy(…)` 로 한계를 명시한다 — invocation 누적 토큰으로는 판정하지 않는다(작은 turn 여럿의 합이 272K 를 넘어도 장문이 아니다).
+  service tier(Flex/Batch/Fast)·리전 할증은 관측 못 하므로 standard 가정. 이 값은 ChatGPT/Codex 구독 결제액·크레딧 차감이 아니라 **API 표준 요금 기준 환산 추정치**다. 실제로 시작한 모든 child invocation 은 `invocation_id` 기준 행 1개를 남긴다
+  — 결과를 판정할 수 없거나(claude result 0개/복수/파싱 실패) usage 이벤트가 없으면 비용·토큰을 0 이 아니라 `null` 로 둔 `cost_kind: unknown` 행에 `usage_observation_status`(partial|unavailable)·`usage_error`(진단 코드)·`raw_log` 를 남기고, `usage_summary` 의 `cost_unknown_invocations`/`usage_unobserved_invocations` 가 그 수를
+  센다(원본 로그·invocation id 보존, 모델 재호출 없음, CLI 실행 전 preflight 실패는 invocation 이 아님). 완료 판정과 telemetry 오류는 분리된다. 러너는 DONE 뿐 아니라 NEED_USER/NEED_DOCS/ENV_ERROR 로 멈출 때도, 그리고 명시적 종료 함수를 거치지 않은 예기치 않은 종료(`set -e`·시그널
+  — EXIT trap 이 상태가 아직 ENV_ERROR 가 아닐 때만 1회)에도(`report_usage_on_exit`) `usage_summary` 의 같은 숫자로 "Claude 보고 비용 + Codex 추정 비용(API 요금 기준 환산) + 합계 추정(실제 청구액 아님) + 추정 불가 건수(사용량 미관측 건수) + by_cli" 한 줄을 `live.log` 에 남기고 `usage-summary.json` 을 쓴다(usage.jsonl 이 없으면 "child invocation 없음" 으로
+  표시, 이중 카운트 없음) — 오케스트레이터는 최종 보고에 이 줄을 그대로 옮기고 `reported + estimated` 를 청구액처럼 적지 않는다. 과거 행은 소급 수정하지 않으며 요약의 `pricing_bases` 로 요금표 버전 차이를 구분한다. codex 행은 `codex exec --json` 이벤트 JSONL(`<raw>.events.jsonl`, stderr 는 `<raw>.stderr.log` 로 분리)의 `turn.completed.usage` 를 invocation 안에서
+  합산한다(input_total = uncached + cache_read + cache_write = `input_effective`, `tokens_total` = input_total + output). plain "tokens used" 텍스트는 읽지 않는다. telemetry 는 best effort
+  — 작업은 그대로 성공하며 같은 invocation 을 재실행하지 않지만, 행은 생략하지 않는다: 이벤트 JSONL 에 JSON 으로 읽을 수 없는 줄이 하나라도 있으면(`USAGE_EVENTS_CORRUPT` — 정상 turn 만 합산해 complete 로 적으면 과소 집계다) · `turn.completed.usage` 에 필수 필드(`input_tokens`/`output_tokens` 숫자)가 없는 이벤트가 있으면(`USAGE_FIELDS_INCOMPLETE`
+  — `usage:{}` 를 0 으로 읽지 않는다) · `turn.completed` 가 없으면(`USAGE_EVENTS_MISSING`) 비용·토큰 `null` 의 `unknown` 행(`usage_observation_status` partial|unavailable)으로 남긴다. `cache_read` 는 invocation 안의 turn 누계일 수 있으니 `num_turns` 와 함께 읽는다.
+  집계는 `usage_summary`(config.sh) 로 별도 계산한다 — 전체와 `by_role`/`by_label`/`by_session`/`by_cli`/`by_model` 마다 `invocations`·`reported_cost_usd`(= 옛 `cost_usd`, 의미 불변)·`estimated_cost_usd`·`combined_cost_usd_estimate`(reported + estimated, 추정치)·`cost_unknown_invocations`(둘 다
+  null)·`cache_read`·`num_turns`·`output`·`reasoning_output`·`cache_read_per_turn` 을 내며, legacy 행(`in`/`out`, v2 codex `tokens_total` 만 있는 행)도 읽는다. 임계치나 자동 판단은 두지 않는다. `usage.jsonl` 은 child invocation 만 담으므로 interactive 오케스트레이터 자체의 cache read 는 측정하지 못한다
+  — 변경 전후 비교는 상위 오케스트레이터는 CodeBurn, 하위 역할은 `usage_summary` 로 각각 보고, 세션 분리로 `cache_write`·`input_uncached` 가 늘 수 있으므로 성공 기준은 `cache_read` 단독 감소가 아니라 동일 피처 A/B 실행의 총비용·calls/turns·cache_read 를 함께 비교하는 것이다.

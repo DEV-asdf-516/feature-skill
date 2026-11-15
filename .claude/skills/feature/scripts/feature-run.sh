@@ -76,6 +76,38 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$SKILL_DIR/config.sh"
 ROOT="$(git rev-parse --show-toplevel)"
 
+# ---------- [Added: GOAL-44] 참조 문서(references/) — SKILL.md 가 분기 직전에 읽으라고 가리키는 상세 지침 ----------
+# SKILL.md 는 압축 뒤에도 남는 짧은 진입 문서이고 상세 절차·계약 원문은 references/ 에 있다. 하나라도 없으면 오케스트레이터가 이전 세션 기억이나
+# 요약만으로 진행하게 되므로, 어떤 단계(부트스트랩·finalize 포함)도 시작하기 전에 거부한다. 목록은 install.sh 가 SKILL.md 에서 뽑아 검사하는 것과 같아야 한다
+# (tests/install-smoke.sh 가 SKILL.md 언급 = references/ 실제 파일 = 이 목록을 대조한다).
+SKILL_REFERENCE_FILES="phase0-design.md impl-docs.md exit-states-resume.md done-finalize.md pipeline-contracts.md"
+missing_refs=""
+for ref_name in $SKILL_REFERENCE_FILES; do
+  [ -s "$SKILL_DIR/references/$ref_name" ] || missing_refs="$missing_refs references/$ref_name"
+done
+if [ -n "$missing_refs" ]; then
+  echo "[FAIL] 필수 참조 문서 누락:$missing_refs (위치: $SKILL_DIR) — SKILL.md 가 분기 직전에 읽도록 지시하는 상세 지침이 없다. 이전 세션 기억이나 SKILL.md 요약만으로 진행하지 말고, install.sh 를 다시 실행해 스킬을 온전히 설치한 뒤 재실행하라." >&2
+  exit 1
+fi
+# 종료 상태 → 오케스트레이터가 다음 행동 전에 읽을 참조 문서(절대 경로). 압축·재개 뒤에도 러너 출력만 보면 어느 파일을 읽을지 알 수 있다.
+skill_reference_for() { # status reason
+  case "$1:$2" in
+    NEED_DOCS:DESIGN_MISSING) echo phase0-design.md;;
+    NEED_DOCS:*) echo impl-docs.md;;
+    NEED_USER:WORKER_SESSION_*) echo "pipeline-contracts.md exit-states-resume.md";;
+    NEED_USER:*) echo exit-states-resume.md;;
+    DONE:*|FINALIZE:*) echo done-finalize.md;;
+    ENV_ERROR:*) echo exit-states-resume.md;;
+  esac
+}
+skill_reference_hint() { # status reason — 한 줄 출력(없으면 무출력)
+  local names name paths=""
+  names="$(skill_reference_for "$1" "${2:-}")"
+  [ -n "$names" ] || return 0
+  for name in $names; do paths="$paths${paths:+ , }$SKILL_DIR/references/$name"; done
+  echo "[SKILL REFERENCE] $1${2:+($2)} — 다음 행동 전에 반드시 읽는다(전에 읽었어도 디스크에서 다시): $paths"
+}
+
 # ---------- 인자 ----------
 NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0; NEW_REVIEW_ATTEMPT=0
 while [ $# -gt 0 ]; do
@@ -101,10 +133,10 @@ if [ "$FINALIZE" = 1 ]; then
   [ "$NEW" = 0 ] || { echo "[FAIL] --finalize 와 --new 는 함께 쓸 수 없다" >&2; exit 1; }
   source "$SKILL_DIR/scripts/feature-worktree.sh"
   exec </dev/null
-  if feature_worktree_finalize "$FEATURE_ID" "$BRANCH" "$WORKTREE"; then exit 0; else rc=$?; fi
+  if feature_worktree_finalize "$FEATURE_ID" "$BRANCH" "$WORKTREE"; then skill_reference_hint FINALIZE FINALIZED; exit 0; else rc=$?; fi
   case "$rc" in
-    2) exit 2;;
-    *) echo "[FAIL] finalize 실패 (--feature $FEATURE_ID) — 원본·worktree 는 위 사유대로 보존됨" >&2; exit 1;;
+    2) skill_reference_hint FINALIZE NEED_USER; exit 2;;
+    *) echo "[FAIL] finalize 실패 (--feature $FEATURE_ID) — 원본·worktree 는 위 사유대로 보존됨" >&2; skill_reference_hint FINALIZE REJECTED; exit 1;;
   esac
 fi
 
@@ -231,6 +263,7 @@ stop_need_user() { # reason detail
   log "NEED_USER ($1): $2"
   write_state "$STAGE" NEED_USER "$1" "$2"
   report_usage_on_exit
+  skill_reference_hint NEED_USER "$1"
   exit 2
 }
 # 오케스트레이터가 문서를 쓰기 직전에 읽는 유일한 출력이 이 반환이다. 그래서 설계·구현 문서 요청(DESIGN_MISSING / IMPL_DOCS_MISSING)에는
@@ -253,6 +286,7 @@ stop_need_docs() {
   log "NEED_DOCS ($1): $2"
   write_state "$STAGE" NEED_DOCS "$1" "$2"
   report_usage_on_exit
+  skill_reference_hint NEED_DOCS "$1"
   print_conventions_for_docs "$1"
   exit 3
 }
@@ -260,6 +294,7 @@ env_error() {
   log "ENV_ERROR: $*"
   write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "$*"
   report_usage_on_exit
+  skill_reference_hint ENV_ERROR ""
   exit 1
 }
 # [Modified: 리뷰 3] 예기치 않은 종료(set -e·시그널 등 명시적 종료 함수를 거치지 않은 경로)에도 비용 보고를 남긴다. 명시적 경로(DONE/stop_need_user/
@@ -467,7 +502,7 @@ if [ -f "$STATE" ]; then
   STALE_COUNT="$(jq -r '.stale_count // 0' "$STATE")"
   hinted="$(jq -r '.stage' "$STATE")"
   hinted_status="$(jq -r '.status' "$STATE")"
-  [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; exit 0; }
+  [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; skill_reference_hint DONE ""; exit 0; }
   # doc-gap 힌트인데 체크포인트가 더 이상 pending 이 아니면(RESOLVED 직후 죽음) worker 부터 — 완료 unit 은 건너뛰고 review 로 간다
   case "$hinted" in preflight|"") STAGE=design;; doc-gap) STAGE=worker;; *) STAGE="$hinted";; esac
 fi
@@ -949,6 +984,7 @@ while :; do
       # reported+estimated 는 실제 청구액이 아니다. interactive 오케스트레이터 자체 비용은 usage.jsonl 범위 밖이라 섞지 않는다. (중단 경로도 같은 함수)
       report_usage_on_exit
       log "DONE"
+      skill_reference_hint DONE ""
       exit 0;;
 
     *) env_error "알 수 없는 stage: $STAGE";;
