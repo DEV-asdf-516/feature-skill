@@ -101,6 +101,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 
 - `implementation-units.json` 은 implementation.md/approach.md 가 확정된 뒤 그 범위를 **기능 단위**(접수+담당자 지정 / Drop 요청+상태 조회 / …)로 자른 것이다. 레이어(Repository/Service/Controller)로 나누지 않는다. 같은 파일을 여러 unit 이 순차 수정해도 된다. impl 합의의 입력이라 바꾸면 impl PASS 가 무효가 된다. 워커 진입 시에는 `implementation-units.lock.json` 으로 확정된다(원본≠lock 이면 사람에게).
 - 러너는 배열 순서대로 직렬로만 돈다. Feature 전체를 **하나의 Worker 세션**(claude 라우팅: 최초 `--session-id`, 이후 `--resume`; 저널 `worker-session.json` 이 cli·모델·effort·규칙 지문·세션 ID 를 고정 — 불일치 시 자동 resume·자동 fresh 없이 중단)이 unit 턴으로 이어 간다 → unit 턴마다 targeted test(다음 unit 이 깨진 코드 위에 쌓이지 않게 하는 장치, 실패 시 같은 세션에 unit 범위 수정 → 재테스트) → `units/<id>/done.json`. unit 별 리뷰·수정자·설계는 없다. 컨벤션·설계 일치 판정은 모든 unit 뒤의 기존 전체 review 한 번이 맡는다. **완료 판정은 unit JSON 해시만 보지 않는다** — 러너는 unit 마다 `references` 가 가리키는 문서 절의 본문·그 unit 의 사용자 결정(`[worker-gap=<unit>#N]`)·unit JSON 을 최초 워커 호출 직전에 스냅샷하고(`units/<id>/contract/`), ① 완료 체크포인트를 건너뛰기 전 ② 과거 워커 결과로 테스트부터 재개하기 전 ③ `done.json` 확정 전 ④ review/verify/DONE 진입 전에 같은 지문을 대조한다. 계약이 바뀐 unit 만 stale 이 되어 워커가 `[UNIT TURN]`(kind=FIRST\|RESUME — 러너 상태로 결정)·`[CHANGED CONTRACT]`(실제 unified diff, `units/<id>/changed-contract.diff`)를 받아 기존 구현을 다시 대조하고 targeted test 를 통과해야 새 `done.json` 이 생긴다. 다른 unit 의 독립 절만 바뀌면 앞 unit 의 완료는 유지된다. 전역 입력만 바뀐 경우처럼 영향 unit 을 코드가 정할 수 없으면 추가 LLM 분석 없이 `UNIT_CONTRACT_IMPACT_REQUIRED` 로 멈춘다. unit scope 는 전체 범위의 부분집합이다. write-set 검사를 전체 범위·unit 범위 두 번 통과해야 한다(원복 없음). 병렬·DAG·우선순위·worker pool 은 넣지 않았다. 세션이 임계치(`WORKER_SESSION_ROTATE_INPUT_TOKENS`, 창 크기를 알면 `context_last_turn / context_window ≥ WORKER_SESSION_ROTATE_CONTEXT_RATIO`(기본 0.8), 모르면 고정 임계치 기본 1,000,000; 실측이 없으면 `input_per_turn` 근사를 쓰고 그 사실을 로그에 남긴다; claude·codex 모두)에 닿으면 unit 완료 직후에만 `worker-handoff.json`(스키마·계약 지문·git tree 검증)을 거쳐 fresh 세대로 교체한다 — 논리적 워커는 하나, 물리적 CLI 세션만 결정론적으로 바뀐다.
+- **워커 규칙 원문의 재전달 경계**: 같은 세션을 잇는 턴이라도 ① 러너 (재)실행 뒤 첫 워커 턴 ② 작업 단위가 바뀌는 턴(새 unit 의 첫 턴, unit → verify worker-fix / review-gap) ③ 직전 워커 호출의 이벤트 로그에서 컨텍스트 압축이 관측된 다음 턴에는 `core_rules.md` + 현재 worktree 의 `conventions.md` + `WORKER_SKILLS` 원문을 `[RULES RECHECK]` 블록으로 다시 싣는다(최초 턴의 블록을 모델 기억만으로 신뢰하지 않는다). 같은 unit 의 test-fix 반복 같은 그 밖의 턴은 짧은 필수 불변식 + 규칙 원문 경로만 받는다. handoff 뒤 fresh 세대는 종전대로 최초 턴 전문이다. 재전달은 프롬프트 본문일 뿐이다 — 세션·저널·handoff·계약 지문·Shell 게이트의 의미는 바뀌지 않고, 규칙이 바뀌었다는 이유로 fresh 세션을 만들지 않는다(규칙 변경은 기존 `WORKER_SESSION_MISMATCH`/`UNIT_CONTRACT_IMPACT_REQUIRED` 게이트가 그대로 멈춘다). 전달 범위는 `live.log` 의 `워커 규칙 전달 … full|short, N bytes` 줄로 확인한다.
 - 재실행은 첫 미완료 unit 부터(완료 체크포인트 + spec 지문 대조). 모든 unit 완료 후 **기존 전체 review 와 verify(TEST_CMD/LINT_CMD)를 그대로** 수행한다. unit gate 는 조기 품질 장치이고 최종 승인은 이 전체 review 가 한다.
 
 ## 신뢰성 장치
@@ -145,9 +146,16 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 ├── hooks/
 │   ├── core_rules.md            # 워커에게만 주입되는 필수 구현 규칙 (프로젝트에 맞게 수정)
 │   ├── inject_conventions.sh    # UserPromptSubmit: 선택적 프로젝트 규범을 세션당 1회 주입 (파이프라인 child 는 제외)
+│   ├── compact_recovery.sh      # SessionStart(compact): 컨텍스트 압축 직후 SKILL.md·references·conventions 재확인 지침(경로만, 본문 미주입 — child 는 제외)
 │   └── pre_bash_guard.sh        # 지시 없는 git commit/push 차단 (ALLOW_COMMIT 플래그)
 └── skills/feature/
-    ├── SKILL.md                 # 파이프라인 정의 (Phase 0 ~ 4, 강제 규칙)
+    ├── SKILL.md                 # 진입 문서 — 필수 불변식·실행 명령·종료 상태 요약·"어느 참조 문서를 언제 읽는가" (압축 뒤에도 남도록 짧게 유지)
+    ├── references/              # 상세 절차·계약 원문 — 해당 분기 직전에만 읽는다 (SKILL.md 가 시점을 지정, 러너가 [SKILL REFERENCE] 줄로 경로 안내)
+    │   ├── phase0-design.md         # 최초 진입 / NEED_DOCS(DESIGN_MISSING): 사전 조건·worktree 초기화·request.md·design.md 작성
+    │   ├── impl-docs.md             # NEED_DOCS(IMPL_DOCS_MISSING / SCOPE_MISSING): implementation.md·approach.md·feature-scope.json·implementation-units.json
+    │   ├── exit-states-resume.md    # NEED_USER 전 reason 의 행동·decisions.md 태그·재합의 우회 조건·체크포인트/지문 재개 규칙
+    │   ├── done-finalize.md         # DONE 보고·finalize 승인/실행·커밋 경계
+    │   └── pipeline-contracts.md    # 구현 단위 직렬 실행·강제 규칙(역할 경계)·변경 소유권·세션/사용량 기록
     ├── config.sh                # 모델/effort/라운드 한도/프로젝트 명령 + 가드 + 헬퍼
     ├── prompts/                 # 역할별 페르소나 템플릿 (10개, envsubst 변수 치환 — unit 워커·unit 테스트 수정 포함)
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
@@ -203,6 +211,16 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    (`session_id` 별 마커, `$TMPDIR/claude-conventions-injected/`), 파이프라인 child Claude(`FEATURE_ROLE_CHILD=1`)에는 주입하지 않는다.
    child 는 `run_readonly_json_role`/`run_edit_role` 이 conventions 를 이미 명시 전달하므로 훅까지 넣으면 turn 마다 중복 cache read 가 생긴다.
    커스터마이즈가 없으면 `.new` 로 덮어쓰면 된다.
+   `install.sh` 는 `SKILL.md`·`prompts/`·`schemas/`·`scripts/`·`references/` 를 한 단위로 스테이징한 뒤 교체한다. `SKILL.md` 가 가리키는
+   `references/*.md` 가 소스에 하나라도 없거나 비어 있으면 아무것도 교체하지 않고 실패한다(성공 메시지 없음). `references/` 가 없던 구버전 설치는
+   업데이트 때 새로 배포되며 `config.sh`·`core_rules.md`·훅 스크립트 보존 정책은 그대로다. 설치 뒤 참조 문서가 사라지면 러너가 exit 1 로 시작을 거부한다.
+   **압축 복구 훅**: `.claude/hooks/compact_recovery.sh` 를 `SessionStart` 의 `"matcher": "compact"` 로 등록한다(기본 `settings.json` 에 포함). 기존
+   `settings.json` 은 덮어쓰지 않으므로, 미등록이면 `install.sh` 가 `[WARN]` 과 추가할 항목을 출력한다 — 등록하지 않으면 압축 뒤 복구 지침이 주입되지 않는다.
+   이 훅은 `inject_conventions.sh` 의 세션당 1회 정책을 바꾸지 않고, 압축 직후 1회만 "SKILL.md 와 현재 단계의 참조 문서를 디스크에서 다시 읽으라" 는
+   지침을 넣는다. conventions 는 **본문을 싣지 않고 경로만** 알려 준다 — 훅 출력이 10,000자를 넘으면 전체 대신 파일 경로와 앞부분 미리보기만 전달되므로
+   긴 conventions 가 조용히 잘리지 않게 크기와 무관하게 다시 읽게 한다. 피처 worktree(`feature/*`)가 없으면 프로젝트 루트 파일 경로를, 있으면 worktree 사본
+   경로(최대 20개)를 알려 준다(어느 피처가 진행 중인지는 훅이 고르지 않는다). `install.sh` 는 이 훅이 `SessionStart` 에 있어도 `matcher` 가 `compact` 가
+   아니면 미등록으로 본다. 별도 `CLAUDE.md`/`AGENTS.md` 는 필요 없다.
 2. `.claude/skills/feature/config.sh` 의 `CHANGE_ME` 를 채운다.
    ```bash
    DESIGN_REVISION_MODEL="<설계 수정 모델>"   # 검증자 BLOCK 뒤 합의 문서를 고치는 하위 실행(DESIGNER 역할). 오케스트레이터 세션의 모델은 여기서 제어하지 않는다
