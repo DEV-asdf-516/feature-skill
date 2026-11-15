@@ -302,6 +302,27 @@ unit_resolved_gap_context() { # resolved-gaps-json → 프롬프트 블록 텍�
   printf '%s' "$1" | jq -r '.[] | "- [\(.key)] (\(.location)) 질문: \(.question)\n  선택지: \(.options | join(" | "))\n  사용자 결정(decisions.md 원문): \(.answer)\n  approach.md: 이 결정이 반영돼 있다 — 해당 절을 다시 읽고 그대로 구현한다"'
 }
 
+# ---------- [Added: GOAL-44] 워커 규칙 원문 위치 · 압축 관측 ----------
+# 짧은 재명시에 싣는 규칙 원문 경로(현재 worktree 기준) — 워커가 턴 도중 압축을 겪어도 기억 대신 디스크에서 다시 읽을 수 있게 한다.
+worker_rules_source_paths() {
+  local out="$CORE_RULES_FILE" name file
+  [ -f "$CONVENTIONS_FILE" ] && out="$out, $CONVENTIONS_FILE"
+  if [ "${#WORKER_SKILLS[@]}" -gt 0 ]; then
+    for name in "${WORKER_SKILLS[@]}"; do file="$(worker_skill_file "$name")" && out="$out, $file"; done
+  fi
+  printf '%s' "$out"
+}
+# 워커 CLI 이벤트 로그에 컨텍스트 압축 이벤트가 있는가(claude stream-json 의 system/compact_boundary, codex 이벤트의 *compact* type).
+# 도구 출력 안의 같은 문자열은 JSON 문자열로 escape 돼 있어 맞지 않는다. 오탐은 다음 턴 규칙 원문 1회 재전달일 뿐이다(세션·게이트 무영향).
+worker_log_shows_compaction() { # raw-log-path
+  local f
+  for f in "$1.stream.jsonl" "$1.events.jsonl" "$1"; do
+    [ -f "$f" ] || continue
+    grep -Eq '"subtype"[[:space:]]*:[[:space:]]*"compact_boundary"|"type"[[:space:]]*:[[:space:]]*"[A-Za-z_.]*compact[A-Za-z_.]*"' "$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 run_worker() { # prompt-file [unit-dir]
   local prompt_file="$1" unit_dir="${2:-}" tag="${RUN_TAG:-worker}"
   local prompt worker_rules reference_code result out_dir tree_prefix unit_json="" unit_id="" unit_scope=""
@@ -337,11 +358,36 @@ run_worker() { # prompt-file [unit-dir]
   # unit 템플릿 본문(턴별 필수 계약)은 매 턴 그대로 간다.
   local resumed_turn=0
   session_exists "$FEATURE_WORKER_SESSION" && resumed_turn=1
+  # [Added: GOAL-44] 규칙 원문 재전달 경계 — 최초 턴에 넣은 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 를 모델 기억만으로 신뢰하지 않는다.
+  # 같은 세션을 잇는 턴이라도 아래 경계에서는 지금 디스크의 원문(load_worker_rules — worktree 의 현재 파일)을 다시 싣는다:
+  #   ① 이 러너 실행의 첫 워커 턴(중단 뒤 재실행·장기 재개)  ② 작업 단위가 바뀜(새 unit 시작, unit → verify worker-fix / review-gap)
+  #   ③ 직전 워커 호출의 이벤트 로그에서 컨텍스트 압축이 관측됨
+  # 같은 unit 의 test-fix 반복처럼 경계가 아닌 턴은 짧은 필수 불변식 + 원문 경로만 받는다(매 턴 전문 중복 삽입 없음).
+  # 판단 근거는 프로세스 메모리뿐이다(새 상태 파일 없음) — 러너가 다시 뜨면 ① 이 되므로 과소 전달 방향으로는 틀리지 않는다.
+  # 세션·저널·handoff·계약 지문·Shell 게이트는 건드리지 않는다: 재전달은 프롬프트 본문일 뿐이고 fresh 세션을 만들지 않는다.
+  local rules_epoch="${unit_id:-$tag}" rules_recheck=""
+  if [ "$resumed_turn" -eq 1 ]; then
+    if [ -z "${_WORKER_RULES_EPOCH:-}" ]; then rules_recheck="러너 (재)실행 뒤 첫 워커 턴"
+    elif [ "$_WORKER_RULES_EPOCH" != "$rules_epoch" ]; then rules_recheck="작업 단위 변경 ($_WORKER_RULES_EPOCH → $rules_epoch)"
+    elif [ "${_WORKER_COMPACTION_SEEN:-0}" = 1 ]; then rules_recheck="직전 워커 호출에서 컨텍스트 압축 관측"
+    fi
+  fi
   if [ "$resumed_turn" -eq 1 ]; then
     worker_rules="[CORE RULES]
-(이 Feature Worker 세션의 최초 턴에 전달된 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 블록이 이 턴에도 그대로 계약이다. 필수 제약 재명시: 현재 unit scope 밖 편집 금지 · 이후 unit 선행 구현 금지 · 범위 밖 리팩터링·cleanup 금지 · git commit/push 금지 · git index 조작 금지 · 파일 삭제 금지 · 전체 테스트 스위트 실행 금지 · 최종 출력은 결과 JSON 스키마로만. 세션 기억이 문서·현재 코드와 충돌하면 합의 문서 → 현재 코드 → 세션 기억 순서로 판단하고, 컨텍스트가 압축·재개됐으면 $WORK_DIR/implementation-context.json 과 합의 문서를 다시 읽는다.)"
+(이 Feature Worker 세션의 최초 턴에 전달된 [CORE RULES]/[PROJECT CONVENTIONS]/[WORKER SKILL] 블록이 이 턴에도 그대로 계약이다. 필수 제약 재명시: 현재 unit scope 밖 편집 금지 · 이후 unit 선행 구현 금지 · 범위 밖 리팩터링·cleanup 금지 · git commit/push 금지 · git index 조작 금지 · 파일 삭제 금지 · 전체 테스트 스위트 실행 금지 · 최종 출력은 결과 JSON 스키마로만. 세션 기억이 문서·현재 코드와 충돌하면 합의 문서 → 현재 코드 → 세션 기억 순서로 판단하고, 컨텍스트가 압축·재개됐으면 $WORK_DIR/implementation-context.json 과 합의 문서를 다시 읽는다. 규칙 원문이 기억나지 않거나 불확실하면 추측하지 말고 디스크에서 다시 읽는다: $(worker_rules_source_paths))"
+    if [ -n "$rules_recheck" ]; then
+      # 경계 턴: 현재 파일 원문 전체. conventions 가 기준선과 달라졌어도 여기 실리는 것이 현재 파일이므로 아래 drift 블록은 따로 붙이지 않는다.
+      local rules_full drift_note=""
+      rules_full="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
+      if conventions_drifted_from_contract; then drift_note=" 이 피처가 conventions.md 를 변경했다 — [PROJECT CONVENTIONS — 현재 파일 전문] 은 아래 [PROJECT CONVENTIONS] 블록이며 최초 턴의 블록을 대체한다."; fi
+      worker_rules="$worker_rules
+
+[RULES RECHECK — 규칙 원문 재전달: $rules_recheck]
+(아래는 지금 디스크에 있는 규칙 원문이다. 최초 턴의 블록이나 세션 기억과 다르면 아래가 이 턴의 계약이다.$drift_note 작업을 시작하기 전에 끝까지 읽는다.)
+$rules_full
+[/RULES RECHECK]"
     # 범위 안 conventions.md 를 이 피처가 바꿨으면 최초 턴의 [PROJECT CONVENTIONS] 블록은 옛 내용이다 — 현재 파일 전문을 다시 싣는다(세션 지문은 기준선 내용이라 그대로)
-    if conventions_drifted_from_contract; then
+    elif conventions_drifted_from_contract; then
       worker_rules="$worker_rules
 
 [PROJECT CONVENTIONS — 현재 파일 전문]
@@ -354,6 +400,11 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
     worker_rules="$(load_worker_rules)" || env_error "워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패 — 워커를 실행하지 않음"
     reference_code="$(load_reference_code)" || env_error "REFERENCE CODE 로드 실패"
   fi
+  # 전달 범위를 로그에 남긴다(비용 점검·회귀 근거): full = 규칙 원문 전체, short = 필수 불변식 재명시(+ conventions drift 블록)
+  local rules_mode="short — 같은 작업 단위의 후속 턴"
+  if [ "$resumed_turn" -eq 0 ]; then rules_mode="full — fresh 세션 최초 턴"; elif [ -n "$rules_recheck" ]; then rules_mode="full — $rules_recheck"; fi
+  log "워커 규칙 전달${unit_id:+ (unit $unit_id)} [$tag]: $rules_mode, $(printf '%s' "$worker_rules" | wc -c | tr -d ' ') bytes"
+  _WORKER_RULES_EPOCH="$rules_epoch"; _WORKER_COMPACTION_SEEN=0
   # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
   local impl_context=""
   if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
@@ -413,6 +464,11 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   local cli_rc="${RUN_EDIT_ROLE_CLI_RC:-$worker_rc}" result_diag="${RUN_EDIT_ROLE_RESULT_DIAG:-}"
   # 세션 교체 판단이 '이 unit 의 이 호출' usage 행만 보도록 label 을 남긴다(usage.jsonl 의 마지막 WORKER 행 = 이전 unit 일 수 있다)
   [ -z "$unit_dir" ] || printf '%s\n' "$tag-$stamp" > "$unit_dir/last-usage-label"
+  # [Added: GOAL-44] 이 호출 중 컨텍스트가 압축됐으면 다음 워커 턴(같은 러너 실행)에서 규칙 원문을 다시 싣는다
+  if worker_log_shows_compaction "$raw"; then
+    _WORKER_COMPACTION_SEEN=1
+    log "워커 호출 $tag-$stamp 에서 컨텍스트 압축 관측 — 다음 워커 턴에 규칙 원문 재전달"
+  fi
   # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 그 불확실성이 해소됐다.
   # 결과를 수용할지는 아래 게이트·가드(index·manifest·기준선·write-set·결과 계약·worker-outcome)가 따로 판정하고,
   # 게이트 중단 뒤 사용자가 복구하고 재실행하는 재호출은 같은 스레드에 보내는 '의도된 새 턴'이다 — marker 로 막지 않는다.

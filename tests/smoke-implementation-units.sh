@@ -32,6 +32,9 @@
 #      X-E. remove 된 fact 는 다음 워커에게 가지 않는다
 #      X-F. 01/02 완료 후 03 부터 재개해도 01/02 의 rolling context 가 03 에 전달된다
 #      X-G. spec_hash 로 무효화된 unit 체크포인트의 context-updates 는 조용히 재사용되지 않는다
+#   P. 워커 규칙 원문 전달 범위(GOAL-44) — 최초 unit(fresh)=전문 / 같은 unit 의 test-fix=짧은 불변식+원문 경로만 / 후속 unit 첫 턴=전문 재전달 /
+#      러너 재실행 뒤 첫 턴=전문 재전달 / 압축 관측 뒤 다음 턴=전문 재전달 / handoff 뒤 fresh 세대=전문 / conventions 변경=현재 파일 내용.
+#      어느 경우에도 세션은 그대로 resume(재전달 때문에 fresh 세션을 만들지 않음), 규칙 변경은 기존 게이트대로 멈춘다
 #   D2. 앞 unit(02) 이 무효화됐는데 뒤 unit(03) 완료 체크포인트가 있으면 UNIT_CHECKPOINT_CHAIN_STALE (워커 0회, 원복 없음);
 #       사용자가 02 의 before.tree 로 되돌리고 03 체크포인트를 치우면 02→03 순서로 다시 돈다
 # =============================================================
@@ -122,6 +125,8 @@ emit() { # 결과 JSON 을 호출된 CLI 의 규약대로 돌려준다
     # 실제 claude stream-json: model 호출마다 assistant 메시지(usage), 마지막에 result(= json 출력과 같은 객체). 사례 R2 가 context_last_turn 을 본다
     # stream-ctx: "<context_last_turn> [context_window]" — 창 크기가 있으면 result.modelUsage 에 contextWindow 로 싣는다(실제 claude result 형태)
     read -r sc_ctx sc_win < "$MOCK_STATE/stream-ctx"
+    # 사례 P: 실제 claude stream-json 은 컨텍스트 압축 때 system/compact_boundary 이벤트를 낸다 — 플래그가 있으면 이 호출에서 1회 방출
+    if [ -f "$MOCK_STATE/compact-next" ]; then rm -f "$MOCK_STATE/compact-next"; printf '{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto"}}\n'; fi
     printf '{"type":"assistant","message":{"usage":{"input_tokens":%s,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}\n' "$sc_ctx"
     if [ -n "$sc_win" ]; then printf '{"type":"result","structured_output":%s,%s,"modelUsage":{"mock-model":{"contextWindow":%s}}}\n' "$1" "$usage" "$sc_win"
     else printf '{"type":"result","structured_output":%s,%s}\n' "$1" "$usage"; fi
@@ -163,6 +168,13 @@ if [ "$cli" = codex ]; then   # 사례 Y 전용 계측
 fi
 sleep 0.2
 n="${unit%%-*}"
+# 사례 P: 워커 프롬프트 전문과 규칙 전달 형태(recheck=경계 재전달 / short=짧은 재명시 / fresh=최초 턴 전문)를 호출 순서대로 남긴다
+printf '%s' "$prompt" > "$MOCK_STATE/prompt-$kind-$n.txt"
+rules_mode=fresh
+if printf '%s' "$prompt" | grep -q '^\[RULES RECHECK — '; then rules_mode=recheck
+elif printf '%s' "$prompt" | grep -q '최초 턴에 전달된 \[CORE RULES\]'; then rules_mode=short; fi
+echo "$kind $n $rules_mode" >> "$MOCK_STATE/rules-seq.log"
+[ ! -f "$MOCK_STATE/compact-$kind-$n" ] || { rm -f "$MOCK_STATE/compact-$kind-$n"; : > "$MOCK_STATE/compact-next"; }
 # 프롬프트의 [IMPLEMENTATION CONTEXT] 블록을 보존해 사례 X 가 검사한다
 printf '%s' "$prompt" | sed -n '/^\[IMPLEMENTATION CONTEXT\]$/,/^\[\/IMPLEMENTATION CONTEXT\]$/p' > "$MOCK_STATE/ctx-$kind-$n.txt"
 ctx='{"upsert":[],"remove":[]}'
@@ -643,5 +655,86 @@ rc="$(run_runner)"
 grep -q '^worker ' "$MOCK_LOG" && fail "Z: 이관 검증 실패인데 워커가 호출됨"
 sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
 pass "Z: codex 워커 임계치 교체 — 원장 세대 은퇴·새 exec·handoff 검증, 교체 세대 handoff 부재 시 fresh 거부"
+
+# ===== 사례 P: 워커 규칙 원문 전달 범위 (GOAL-44) — 경계에서만 전문, 그 밖에는 짧은 불변식. 세션·게이트는 그대로 =====
+# 워커 CLI 는 명시 고정(claude) — 모델 이름 추론에 의존하지 않는다. conventions.md 는 범위 밖 파일이라 합의 PASS 를 다시 만든다.
+sed -i.bak 's/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
+printf '# conventions\n- CONV-SENTINEL-V1 규칙\n' > conventions.md
+printf '\n- CORE-SENTINEL 워커 규칙\n' >> .claude/hooks/core_rules.md
+fake_pass design; fake_pass impl
+rules_seq() { paste -sd'|' "$MOCK_STATE/rules-seq.log"; }
+p_reset() { reset_tree; rm -f "$MOCK_STATE"/prompt-*.txt "$MOCK_STATE/rules-seq.log" "$MOCK_STATE/compact-next" "$MOCK_STATE"/compact-worker-* "$MOCK_STATE"/compact-test-fix-*; }
+has_full_rules() { grep -q 'CORE-SENTINEL' "$1" && grep -q 'CONV-SENTINEL-V1' "$1"; }
+# P-1: 01(fresh) → 01 test-fix(short) → 02(recheck) → 03(recheck), 세션 1개
+p_reset; touch "$MOCK_STATE/fail-test-01"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/run.log"; fail "P-1: exit 0 기대, 실제 $rc ($(reason))"; }
+[ "$(rules_seq)" = "worker 01 fresh|test-fix 01 short|worker 02 recheck|worker 03 recheck" ] || fail "P-1: 규칙 전달 형태 순서 불일치: $(rules_seq)"
+has_full_rules "$MOCK_STATE/prompt-worker-01.txt" || fail "P-1: 최초 unit 워커가 core_rules·conventions 원문을 받지 못함"
+grep -q 'RULES RECHECK' "$MOCK_STATE/prompt-worker-01.txt" && fail "P-1: fresh 세션 최초 턴에 재전달 블록이 붙음(중복)"
+grep -q 'CORE-SENTINEL\|CONV-SENTINEL-V1' "$MOCK_STATE/prompt-test-fix-01.txt" && fail "P-1: 같은 unit 의 test-fix 턴에 규칙 전문이 중복 삽입됨"
+grep -q '필수 제약 재명시' "$MOCK_STATE/prompt-test-fix-01.txt" && grep -q "디스크에서 다시 읽는다: .*core_rules.md, .*conventions.md" "$MOCK_STATE/prompt-test-fix-01.txt" \
+  || fail "P-1: test-fix 턴에 짧은 필수 불변식·규칙 원문 경로가 없음"
+for u in 02 03; do
+  has_full_rules "$MOCK_STATE/prompt-worker-$u.txt" || fail "P-1: 후속 unit $u 첫 턴에 규칙 원문이 재전달되지 않음"
+  grep -q '^\[RULES RECHECK — 규칙 원문 재전달: 작업 단위 변경' "$MOCK_STATE/prompt-worker-$u.txt" && grep -q '필수 제약 재명시' "$MOCK_STATE/prompt-worker-$u.txt" \
+    || fail "P-1: 후속 unit $u 첫 턴의 재전달 사유(작업 단위 변경)·짧은 불변식이 없음"
+done
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 1 ] && [ "$(grep -c -- '--resume' "$MOCK_LOG.sessions")" -eq 3 ] \
+  || fail "P-1: 규칙 재전달이 세션을 바꿈(기대: 세션 1개, resume 3회): $(cat "$MOCK_LOG.sessions")"
+[ "$(grep -c '워커 규칙 전달' "$TMP/run.log")" -eq 4 ] && grep -q '워커 규칙 전달 (unit 01-intake) \[test-fix-01\]: short' "$TMP/run.log" \
+  && grep -q '워커 규칙 전달 (unit 02-drop) \[worker\]: full — 작업 단위 변경' "$TMP/run.log" || fail "P-1: 전달 범위 로그 불일치: $(grep '워커 규칙 전달' "$TMP/run.log")"
+short_bytes="$(sed -n 's/.*\[test-fix-01\]: short.*, \([0-9]*\) bytes$/\1/p' "$TMP/run.log")"; full_bytes="$(sed -n 's/.*(unit 02-drop) \[worker\]: full.*, \([0-9]*\) bytes$/\1/p' "$TMP/run.log")"
+[ -n "$short_bytes" ] && [ -n "$full_bytes" ] && [ "$short_bytes" -lt "$full_bytes" ] || fail "P-1: short($short_bytes) 가 full($full_bytes) 보다 작지 않음"
+pass "P-1: 최초 unit 전문 / 같은 unit test-fix 는 짧은 불변식+원문 경로(${short_bytes}B) / 후속 unit 첫 턴 전문 재전달(${full_bytes}B) / 세션 1개 유지"
+# P-2: 러너 재실행(03 재개) — 같은 세션 resume 이지만 이 실행의 첫 워커 턴이라 원문 재전달
+prep_rerun_03; rm -f "$MOCK_STATE/rules-seq.log" "$MOCK_STATE"/prompt-*.txt
+sid_before="$(cat .agent-work/.session-feature-worker)"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/run.log"; fail "P-2: exit 0 기대, 실제 $rc ($(reason))"; }
+[ "$(rules_seq)" = "worker 03 recheck" ] && grep -q '^\[RULES RECHECK — 규칙 원문 재전달: 러너 (재)실행 뒤 첫 워커 턴' "$MOCK_STATE/prompt-worker-03.txt" && has_full_rules "$MOCK_STATE/prompt-worker-03.txt" \
+  || fail "P-2: 재개 뒤 첫 워커 턴에 규칙 원문이 재전달되지 않음: $(rules_seq)"
+[ "$(cat "$MOCK_LOG.sessions")" = "claude-worker 03-reassign --resume $sid_before" ] || fail "P-2: 재개가 같은 세션 resume 이 아님: $(cat "$MOCK_LOG.sessions")"
+pass "P-2: 러너 재실행 뒤 첫 워커 턴 — 같은 세션 resume + 규칙 원문 재전달"
+# P-3: 압축 관측 — 02 워커 호출의 stream 에 compact_boundary → 같은 unit 의 다음 턴(test-fix)이 원문을 다시 받는다(압축 없던 P-1 의 test-fix 는 short)
+p_reset; echo "7" > "$MOCK_STATE/stream-ctx"; touch "$MOCK_STATE/compact-worker-02" "$MOCK_STATE/fail-test-02"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/run.log"; fail "P-3: exit 0 기대, 실제 $rc ($(reason))"; }
+[ "$(rules_seq)" = "worker 01 fresh|worker 02 recheck|test-fix 02 recheck|worker 03 recheck" ] || fail "P-3: 압축 뒤 규칙 전달 순서 불일치: $(rules_seq)"
+grep -q '^\[RULES RECHECK — 규칙 원문 재전달: 직전 워커 호출에서 컨텍스트 압축 관측' "$MOCK_STATE/prompt-test-fix-02.txt" && has_full_rules "$MOCK_STATE/prompt-test-fix-02.txt" \
+  || fail "P-3: 압축 관측 뒤 턴에 규칙 원문이 재전달되지 않음"
+grep -q '컨텍스트 압축 관측 — 다음 워커 턴에 규칙 원문 재전달' "$TMP/run.log" || fail "P-3: 압축 관측 로그가 없음"
+[ "$(awk '{print $4}' "$MOCK_LOG.sessions" | sort -u | grep -c .)" -eq 1 ] || fail "P-3: 압축 관측이 세션을 바꿈: $(cat "$MOCK_LOG.sessions")"
+rm -f "$MOCK_STATE/stream-ctx"
+pass "P-3: 직전 호출에서 압축 관측 → 다음 턴(test-fix 포함) 규칙 원문 재전달, 세션 유지"
+# P-4: handoff — 교체된 fresh 세대의 첫 턴은 전문(재전달 블록 없이 최초 턴 형태), 세션은 unit 마다 새로
+p_reset
+sed -i.bak 's/^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*/WORKER_SESSION_ROTATE_INPUT_TOKENS=1/' "$CFG" && rm -f "$CFG.bak"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/run.log"; fail "P-4: exit 0 기대, 실제 $rc ($(reason))"; }
+[ "$(rules_seq)" = "worker 01 fresh|worker 02 fresh|worker 03 fresh" ] || fail "P-4: handoff 뒤 fresh 세대가 최초 턴 전문을 받지 않음: $(rules_seq)"
+for u in 02 03; do has_full_rules "$MOCK_STATE/prompt-worker-$u.txt" || fail "P-4: handoff 뒤 unit $u 가 규칙 원문을 받지 못함"; done
+[ "$(grep -c -- '--session-id' "$MOCK_LOG.sessions")" -eq 3 ] && [ -f .agent-work/worker-handoff.json ] || fail "P-4: handoff 세션 교체가 일어나지 않음: $(cat "$MOCK_LOG.sessions")"
+sed -i.bak 's|^WORKER_SESSION_ROTATE_INPUT_TOKENS=.*|WORKER_SESSION_ROTATE_INPUT_TOKENS="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-1000000}"|' "$CFG" && rm -f "$CFG.bak"
+pass "P-4: handoff 뒤 fresh 세대 첫 턴은 규칙 전문(최초 턴 형태)"
+# P-5: 범위 밖 conventions.md 가 피처 도중 바뀌면 기존 게이트대로 멈춘다 — 규칙이 바뀌었다는 이유로 조용히 fresh 세션을 만들거나 재전달로 넘어가지 않는다
+p_reset
+rc="$(run_runner)"; [ "$rc" -eq 0 ] || fail "P-5: 전제 실행 실패 ($rc)"
+prep_rerun_03; rm -f "$MOCK_STATE/rules-seq.log"
+sid_before="$(cat .agent-work/.session-feature-worker)"; journal_before="$(cat .agent-work/worker-session.json)"
+printf '# conventions\n- CONV-SENTINEL-V2 바뀐 규칙\n' > conventions.md
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] || { tail -30 "$TMP/run.log"; fail "P-5: conventions 변경 뒤 exit 2 기대, 실제 $rc ($(reason))"; }
+case "$(reason)" in WORKER_SESSION_MISMATCH|UNIT_CONTRACT_IMPACT_REQUIRED) ;; *) fail "P-5: 기존 게이트 사유가 아님: $(reason)";; esac
+[ ! -f "$MOCK_STATE/rules-seq.log" ] || fail "P-5: 규칙이 바뀌었는데 워커가 호출됨: $(rules_seq)"
+[ "$(cat .agent-work/.session-feature-worker)" = "$sid_before" ] && [ "$(cat .agent-work/worker-session.json)" = "$journal_before" ] || fail "P-5: 세션 파일·저널이 바뀜(조용한 fresh 세션)"
+p5_reason="$(reason)"
+# 되돌리면(피처 시작 시점의 규칙) 같은 세션으로 재개되고, 재개 턴은 현재 파일 원문을 받는다
+printf '# conventions\n- CONV-SENTINEL-V1 규칙\n' > conventions.md
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/run.log"; fail "P-5: 규칙 복구 뒤 exit 0 기대, 실제 $rc ($(reason))"; }
+[ "$(rules_seq)" = "worker 03 recheck" ] && has_full_rules "$MOCK_STATE/prompt-worker-03.txt" && [ "$(grep '^claude-worker' "$MOCK_LOG.sessions")" = "claude-worker 03-reassign --resume $sid_before" ] \
+  || fail "P-5: 복구 뒤 같은 세션 재개·규칙 원문 재전달이 아님: $(rules_seq) / $(cat "$MOCK_LOG.sessions")"
+pass "P-5: 범위 밖 conventions 변경 → 기존 게이트($p5_reason, 워커 0회·세션 불변), 복구 뒤 같은 세션 재개 + 현재 규칙 원문 재전달"
 
 echo "[SMOKE] 전부 통과 — 임시 저장소: $TMP (필요 없으면 직접 정리)"

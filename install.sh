@@ -8,7 +8,7 @@
 #    누락된 hook 항목은 감지해서 "추가해야 할 내용"만 출력한다.
 #  - 프로젝트별 편집 파일(config.sh, core_rules.md)은 보존한다.
 #    새 버전과 다르면 <파일>.new 로 옆에 두고 병합을 안내한다.
-#  - 스킬 코드(scripts/, prompts/, schemas/, SKILL.md, 훅 스크립트)는 갱신한다.
+#  - 스킬 코드(scripts/, prompts/, schemas/, references/, SKILL.md, 훅 스크립트)는 갱신한다.
 # =============================================================
 set -euo pipefail
 
@@ -78,18 +78,36 @@ fi
 # 스테이징 후 교체 — 복사 실패(소스 누락·디스크 부족)가 기존 설치를 파괴하지 않게 한다
 mkdir -p "$TARGET_SKILL_DIR"
 trap 'rm -rf "$TARGET_SKILL_DIR"/.install-stage-* 2>/dev/null' EXIT
-# 1단계: 네 항목 전부 스테이징 성공 후에만 2단계 교체 시작 (혼합 버전 방지)
-for skill_entry in SKILL.md prompts schemas scripts; do
+# 1단계: 다섯 항목 전부 스테이징 성공 후에만 2단계 교체 시작 (혼합 버전 방지)
+# references/ 는 SKILL.md 가 분기 직전에 읽으라고 가리키는 상세 지침이다 — SKILL.md 만 새 버전이고 references/ 가 없거나 일부만 있으면
+# 오케스트레이터가 요약만으로 진행하게 되므로 같은 스테이징 단위로 묶는다(구버전 설치의 업데이트에서는 references/ 가 새로 생긴다).
+SKILL_ENTRIES="SKILL.md prompts schemas scripts references"
+for skill_entry in $SKILL_ENTRIES; do
   stage_path="$TARGET_SKILL_DIR/.install-stage-$skill_entry"
   rm -rf "$stage_path"
+  [ -e "$SOURCE_ROOT/.claude/skills/feature/$skill_entry" ] \
+    || { echo "[FAIL] 소스에 스킬 항목 없음: .claude/skills/feature/$skill_entry — 설치하지 않음(활성 코드는 변경하지 않았음)" >&2; exit 1; }
   cp -R "$SOURCE_ROOT/.claude/skills/feature/$skill_entry" "$stage_path"
 done
-for skill_entry in SKILL.md prompts schemas scripts; do
+# 교체 전 완전성 검사: 스테이징된 SKILL.md 가 언급하는 references/<이름>.md 가 스테이징된 references/ 에 전부(비어 있지 않게) 있어야 한다.
+# 하나라도 없으면 상세 지침이 누락된 설치이므로 교체하지 않고 실패한다 — 성공 메시지를 내지 않는다.
+missing_references=""
+for reference_name in $(grep -oE 'references/[A-Za-z0-9._-]+\.md' "$TARGET_SKILL_DIR/.install-stage-SKILL.md" | sort -u); do
+  [ -s "$TARGET_SKILL_DIR/.install-stage-references/${reference_name#references/}" ] || missing_references="$missing_references $reference_name"
+done
+if [ -n "$missing_references" ]; then
+  echo "[FAIL] SKILL.md 가 참조하는 상세 지침 문서가 소스에 없음:$missing_references" >&2
+  echo "       참조 문서 없이 SKILL.md 만 설치하면 오케스트레이터가 요약만으로 진행한다. 소스 저장소를 온전히 받은 뒤 다시 실행하세요. (활성 코드는 변경하지 않았음)" >&2
+  exit 1
+fi
+[ -n "$(grep -oE 'references/[A-Za-z0-9._-]+\.md' "$TARGET_SKILL_DIR/.install-stage-SKILL.md")" ] \
+  || { echo "[FAIL] 소스 SKILL.md 가 references/ 문서를 하나도 가리키지 않음 — 진입 문서와 참조 문서의 버전이 맞지 않는다. (활성 코드는 변경하지 않았음)" >&2; exit 1; }
+for skill_entry in $SKILL_ENTRIES; do
   rm -rf "$TARGET_SKILL_DIR/${skill_entry:?}"
   mv "$TARGET_SKILL_DIR/.install-stage-$skill_entry" "$TARGET_SKILL_DIR/$skill_entry"
 done
 chmod +x "$TARGET_SKILL_DIR/scripts/"*.sh
-echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/)"
+echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/, references/)"
 install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_SKILL_DIR/config.sh"
 
 # ---------- 2. Claude 훅 스크립트 + core_rules.md ----------
@@ -97,7 +115,8 @@ install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_S
 # 대상에 이 파이프라인 외의 훅이 있어도 일절 건드리지 않는다 (지정 파일만 다룸).
 TARGET_CLAUDE_HOOKS="$TARGET_ROOT/.claude/hooks"
 mkdir -p "$TARGET_CLAUDE_HOOKS"
-for hook_script in inject_conventions.sh pre_bash_guard.sh; do
+# compact_recovery.sh: SessionStart(compact) — 컨텍스트 압축 직후 스킬 참조 문서·conventions 재확인 지침(inject_conventions.sh 의 세션당 1회 정책 보완)
+for hook_script in inject_conventions.sh pre_bash_guard.sh compact_recovery.sh; do
   install_user_editable "$SOURCE_ROOT/.claude/hooks/$hook_script" "$TARGET_CLAUDE_HOOKS/$hook_script"
 done
 # 마이그레이션: 옛 inject_conventions.sh 는 매 UserPromptSubmit 마다 conventions.md 전체를 주입하고 파이프라인 child Claude 에도
@@ -108,6 +127,7 @@ if ! grep -q 'FEATURE_ROLE_CHILD' "$TARGET_CLAUDE_HOOKS/inject_conventions.sh"; 
   echo "       (커스터마이즈가 없다면 그대로 덮어써도 됩니다: 세션당 1회 주입 + FEATURE_ROLE_CHILD=1 이면 미주입)."
   manual_steps=1
 fi
+chmod +x "$TARGET_CLAUDE_HOOKS/compact_recovery.sh"
 install_user_editable "$SOURCE_ROOT/.claude/hooks/core_rules.md" "$TARGET_CLAUDE_HOOKS/core_rules.md"
 
 # ---------- 3. .claude/settings.json — 없으면 복사, 있으면 검사만 ----------
@@ -124,15 +144,25 @@ else
   fi
   # 이벤트 + 실제 command 문자열이 소스와 정확히 일치해야 등록으로 인정
   # (contains 검사는 "echo disabled ...guard.sh" 같은 비활성 문자열도 통과시킨다)
-  for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh"; do
+  # SessionStart:compact_recovery.sh — 미등록이면 압축 뒤 복구 지침이 주입되지 않는다. 조용히 정상으로 보고하지 않고 추가할 항목을 출력한다.
+  for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh" "SessionStart:compact_recovery.sh"; do
     hook_event="${hook_entry%%:*}"; hook_script="${hook_entry#*:}"
     # 같은 이벤트에 훅이 여러 개일 수 있으므로 스크립트 이름으로 해당 항목 하나만 고른다(여러 줄 비교로 항상 실패하던 버그 수정).
     expected_command="$(jq -r --arg event "$hook_event" --arg script "/$hook_script" \
       '[.hooks[$event][].hooks[] | select(.type == "command" and (.command | endswith($script))) | .command][0]' "$SOURCE_ROOT/.claude/settings.json")"
-    if ! jq -e --arg event "$hook_event" --arg cmd "$expected_command" \
-        '[.hooks[$event][]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length > 0' \
+    # 소스가 matcher 를 지정한 훅은 대상의 matcher 도 그 값을 포함해야 한다("a|b" 대안 목록 허용, 소스에 matcher 가 없으면 검사하지 않는다). command 만 보면 compact_recovery.sh 가
+    # "matcher": "startup" 으로 잘못 등록돼도 정상으로 판정된다 — 그 훅은 압축 뒤에 실행되지 않는다.
+    expected_matcher="$(jq -r --arg event "$hook_event" --arg script "/$hook_script" \
+      '[.hooks[$event][] | select(any(.hooks[]; .type == "command" and (.command | endswith($script)))) | (.matcher // "")][0]' "$SOURCE_ROOT/.claude/settings.json")"
+    if ! jq -e --arg event "$hook_event" --arg cmd "$expected_command" --arg matcher "$expected_matcher" \
+        '[.hooks[$event][]? | select($matcher == "" or ((.matcher // "") | split("|") | index($matcher) != null)) | .hooks[]? | select(.type == "command" and .command == $cmd)] | length > 0' \
         "$TARGET_SETTINGS" >/dev/null; then
-      echo "[WARN] $TARGET_SETTINGS 의 $hook_event 에 $hook_script 미등록. 아래를 hooks 에 직접 추가하세요:"
+      if jq -e --arg event "$hook_event" --arg cmd "$expected_command" \
+          '[.hooks[$event][]?.hooks[]? | select(.type == "command" and .command == $cmd)] | length > 0' "$TARGET_SETTINGS" >/dev/null; then
+        echo "[WARN] $TARGET_SETTINGS 의 $hook_event 에 $hook_script 가 있지만 matcher 가 \"$expected_matcher\" 가 아닙니다. 아래와 같은 matcher 로 고치세요:"
+      else
+        echo "[WARN] $TARGET_SETTINGS 의 $hook_event 에 $hook_script 미등록. 아래를 hooks 에 직접 추가하세요:"
+      fi
       jq --arg event "$hook_event" --arg script "/$hook_script" \
         '{hooks: {($event): [.hooks[$event][] | select(any(.hooks[]; .type == "command" and (.command | endswith($script))))]}}' "$SOURCE_ROOT/.claude/settings.json"
       manual_steps=1
