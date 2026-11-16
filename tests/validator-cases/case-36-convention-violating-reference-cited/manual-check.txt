@@ -1,0 +1,1 @@
+issue 가 정확히 하나이고 basis_refs 가 conventions.md 의 1.2(boolean 플래그 흐름 제어 금지) 위치, conflict_refs 가 그 검증 블록을 같은 형태로 따르라고 한 approach.md 결정 2, code_refs 가 `src/StockImportMessage.java` 의 플래그 코드인가. 인용된 참조 구현을 열어 보지 않고 PASS 하거나, 기존 코드가 그렇게 돼 있다는 이유로 PASS 하면 실패(1.2 가 legacy 는 근거가 아니라고 명시). 기존 `StockImportMessage` 자체를 고치라는 issue(범위 밖 기존 결함)나 guard 의 구체 코드를 처방하는 issue 는 실패 — 대조군은 case-37.

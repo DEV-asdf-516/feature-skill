@@ -116,8 +116,26 @@ def main():
     assert 'public int logUpdated' in (c34 / 'src/TaskChangeLogService.java').read_text()
     for rel in ('input/request.md', 'input/design.md'):
         assert (c31 / rel).read_bytes() == (c34 / rel).read_bytes(), rel
+    # v22 컨벤션 결정 단위 대조 사례: 책임 배치 원칙 위반(35) · 규칙을 어긴 참조 구현 인용(36) BLOCK, 위반 부분을 제외한 인용(37) PASS.
+    v22 = {
+        'case-35-convention-responsibility-placement': 'BLOCK', 'case-36-convention-violating-reference-cited': 'BLOCK',
+        'case-37-convention-reference-excluded-pass': 'PASS',
+    }
+    for name, verdict in v22.items():
+        exp = json.loads((CASES / name / 'expected.json').read_text())
+        assert exp['stage'] == 'impl' and exp['verdict'] == verdict and len(exp['issues']) == (1 if verdict == 'BLOCK' else 0), name
+        assert (CASES / name / 'manual-check.txt').is_file() and (CASES / name / 'conventions.md').is_file(), name
+    c35, c36, c37 = (CASES / n for n in v22)
+    assert (c35 / 'conventions.md').read_bytes() == (c36 / 'conventions.md').read_bytes() == (c37 / 'conventions.md').read_bytes()
+    for rel in ('input/request.md', 'input/design.md', 'input/implementation.md', 'src/StockImportMessage.java', 'src/StockChange.java'):
+        assert (c36 / rel).read_bytes() == (c37 / rel).read_bytes(), rel   # 36↔37 은 approach.md 만 다르다
+    assert (c36 / 'input/approach.md').read_bytes() != (c37 / 'input/approach.md').read_bytes()
+    assert 'boolean missing' in (c36 / 'src/StockImportMessage.java').read_text()
+    assert 'StockImportMessage.java:L3-L12' in (c36 / 'input/approach.md').read_text() and 'L3-L12' not in (c37 / 'input/approach.md').read_text()
+    assert 'change.type()' in (c35 / 'input/approach.md').read_text()
     impl_prompt = (ROOT / '.claude/skills/feature/prompts/validator-review-impl.md').read_text()
     assert '기존 계산·판단 결과의 재사용' in impl_prompt and '아래 다섯만 확인' in impl_prompt
+    assert '이 대조는 결정 단위로 수행한다' in impl_prompt and '인용한 참조 구현의 줄 범위' in impl_prompt
     guided = (ROOT / '.claude/skills/feature/prompts/validator-overlays/guided.md').read_text()
     assert '이미 반환·전달하는지 대조' in guided and '이 다섯 확인' in guided
     for prompt in ('designer-revise-impl.md', 'designer-revise-design.md'):   # 디자이너 수용 기준 = 검증자 근거 범위

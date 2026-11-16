@@ -534,7 +534,17 @@ grep -q 'implementation.md·approach.md 작성 직전' "$LOG_TARGET/.need-docs-i
   || fail "NEED_DOCS conventions 주입: 대상 문서 안내(implementation.md·approach.md)가 없음"
 ref_hint_ok "$LOG_TARGET/.need-docs-impl.out" 'NEED_DOCS(IMPL_DOCS_MISSING)' impl-docs.md \
   || fail "로딩 경로: IMPL_DOCS_MISSING 반환에 references/impl-docs.md 안내가 없음: $(grep 'SKILL REFERENCE' "$LOG_TARGET/.need-docs-impl.out")"
-grep -q 'phase0-design.md' "$LOG_TARGET/.need-docs-impl.out" && fail "로딩 경로: IMPL_DOCS_MISSING 반환이 다른 분기 문서(phase0-design.md)를 가리킴"
+# impl-docs.md 는 conventions 재대조·material decision 확인 절차를 phase0-design.md(3번·4번)에 위임한다 — 구현 문서 분기도 그 파일을 함께 안내해야 한다
+ref_hint_ok "$LOG_TARGET/.need-docs-impl.out" 'NEED_DOCS(IMPL_DOCS_MISSING)' phase0-design.md \
+  || fail "로딩 경로: IMPL_DOCS_MISSING 반환에 references/phase0-design.md(conventions 대조 절차) 안내가 없음: $(grep 'SKILL REFERENCE' "$LOG_TARGET/.need-docs-impl.out")"
+# 출력을 head/grep 으로 줄여 읽어도 살아남는 [SKILL REFERENCE] 줄에 worktree conventions.md 경로와 직접 Read 지시가 있어야 한다(본문 블록은 잘릴 수 있다)
+grep '^\[SKILL REFERENCE\] NEED_DOCS(IMPL_DOCS_MISSING)' "$LOG_TARGET/.need-docs-impl.out" | grep -Fq "[CONVENTIONS]" \
+  || fail "로딩 경로: IMPL_DOCS_MISSING 의 [SKILL REFERENCE] 줄에 conventions.md 직접 Read 지시가 없음"
+grep '^\[SKILL REFERENCE\] NEED_DOCS(IMPL_DOCS_MISSING)' "$LOG_TARGET/.need-docs-impl.out" | grep -Fq "/conventions.md" \
+  || fail "로딩 경로: IMPL_DOCS_MISSING 의 [SKILL REFERENCE] 줄에 worktree conventions.md 경로가 없음"
+# conventions.md 가 없던 DESIGN_MISSING 반환에는 그 지시가 붙지 않는다(없는 파일을 읽으라고 하지 않는다)
+grep '^\[SKILL REFERENCE\] NEED_DOCS(DESIGN_MISSING)' "$LOG_TARGET/.need-docs-design.out" | grep -Fq "[CONVENTIONS]" \
+  && fail "로딩 경로: conventions.md 가 없는데 DESIGN_MISSING 의 [SKILL REFERENCE] 줄에 Read 지시가 붙음"
 consensus_start_count="$(grep -c 'consensus-loop design 시작' "$LOG_TARGET/.agent-work/live.log")"
 [ "$consensus_start_count" = 1 ] \
   || fail "중첩 tee: consensus-loop 시작 로그가 ${consensus_start_count}회 기록됨 (1회여야 함)"

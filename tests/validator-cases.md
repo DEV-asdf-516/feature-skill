@@ -74,6 +74,18 @@ v16 부터 종결 검증자는 fresh 세션이고 입력은 `prev-blockers-*.jso
 
 a 쪽은 08a 와 같은 역할의 Round 1 대조군이다(실패하면 b 의 유료 호출 생략). 23 쌍은 "같은 blocker 가 다시 성립하는가" 를 보는 사례라 category 는 06 보다 넓게 허용한다(REQUIREMENT_MISSING 포함 — v16 실모델에서 관측). category 분류 감도는 06 이 본다.
 
+## 35~37: 컨벤션 결정 단위 대조(v22)
+
+v22 는 명시 컨벤션을 어긴 REQUIRED 결정 여러 건이 구현 문서 검증자를 한 번에 PASS 한 실제 실행에 대응한다(교차 검증 ① 의 수행 방식만 바꾼다 — 새 category·스키마 필드·라운드 없음). 사례는 실제 피처가 아니라 같은 유형을 가상의 재고 예제로 줄인 것이다. 세 사례는 같은 `conventions.md` 를 쓴다.
+
+| 사례 | 차이 | 기대 |
+|---|---|---|
+| 35 convention-responsibility-placement | `conventions.md` 1.1(Tell, Don't Ask). approach.md 결정 2·제어 흐름 절이 Service 가 값 객체의 `type()` 을 꺼내 분기·생성하도록 REQUIRED 로 고정. 문서는 "적용 conventions: 1.1, 1.2" 를 나열했고 결과 수량은 같다 | impl BLOCK / REVISE_DOC / REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH (원칙 형태의 규칙이라는 이유로 PASS 면 실패) |
+| 36 convention-violating-reference-cited | `conventions.md` 1.2(boolean 플래그 흐름 제어 금지, 기존 코드는 legacy). 결정 2 가 플래그를 쓰는 기존 검증 블록을 "같은 형태로" 따르라고 줄 범위로 인용 | impl BLOCK / 같은 분류 (인용 범위를 열어 보지 않으면 놓친다) |
+| 37 convention-reference-excluded-pass | 36 과 같은 request·design·implementation·src·conventions. 결정 2 가 guard 를 REQUIRED 로 적고 플래그 방식은 따르지 않는다고 명시, 인용은 예외 줄 하나 | impl PASS (legacy 파일 인용·범위 밖 기존 위반을 이유로 BLOCK 이면 과잉 BLOCK 회귀) |
+
+**v22 실모델 회귀는 실행하지 않았다**(유료, 사용자 승인 필요 — 1회용 승인 파일 정책 그대로). 기대값은 fixture 구조 검사(`validator-fixture-smoke.py`)만 통과한 상태다.
+
 ## 31~34: 기존 계산·판단 결과의 재사용(v21)
 
 v21 은 문서가 기존 코드의 반환값을 두고 같은 판단을 다시 계산하도록 REQUIRED 로 고정해도 구현 문서 검증자가 통과시키던 문제를 다룬다(교차 검증 ⑤). 새 category·스키마 필드·라운드는 없고 기존 `REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH` 로 낸다. 네 사례는 같은 피처(작업 항목 수정 알림 — `TaskChangeLogService.logUpdated` 가 이미 변경 항목을 계산·반환하고 `TaskService.update` 가 그 직접 호출부)이며 31·32·33 은 request·design·src 가 바이트 단위로 같다(`validator-fixture-smoke.py` 가 검사).

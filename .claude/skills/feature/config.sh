@@ -57,7 +57,10 @@ FIXER_CLI=""
 #     그 반복이 적용되는 명시 convention(Memoization 류)·명시된 재사용/비용 계약·직접 건드리는 기존 코드의 책임 계약과 직접 충돌할 때만 기존 category
 #     (REQUIREMENT_CONTRADICTION / DIRECT_MISMATCH, code_refs = 기존 생산·전달 경로)로 막는다. 새 category·스키마 필드·라운드 없음(schema_version 만 21).
 #     디자이너 수용 기준(designer-revise-impl/-design)에 적용 가능한 명시 convention·직접 변경하는 기존 코드 계약을 포함 — 요구 문서에 반복되지 않았다는 이유만으로 REJECT 하지 않는다.
-VALIDATOR_CONTRACT_VERSION=21
+# 22: 교차 검증 ① 을 결정 단위 대조로 명시 — REQUIRED 결정·제어 흐름 절·계약을 하나씩 적용 규칙과 맞춰 보고, 대조 대상에 책임 배치·이름과 종류·상태/흐름 제어 방식·
+#     '같은 형태로 따르라' 고 인용한 참조 구현의 줄 범위(범위 안 코드가 명시 규칙을 어기면 그 인용 결정이 충돌)를 포함한다. 설계 원칙 형태의 명시 규칙도 대상.
+#     컨벤션을 어긴 REQUIRED 결정 여러 건이 PASS 된 실제 실행에 대한 대응. 새 category·스키마 필드·라운드 없음(schema_version 만 22). 회귀 사례 35~37.
+VALIDATOR_CONTRACT_VERSION=22
 
 # --- 리뷰어 계약 버전 ---
 # 리뷰어 프롬프트·수정자 프롬프트·impl-review 스키마·impl-review-loop 의 연계 검사 중 하나라도 바뀌면 올린다.

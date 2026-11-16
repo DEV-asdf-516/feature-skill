@@ -1,10 +1,10 @@
 # 구현 문서 작성 (`IMPL_DOCS_MISSING` / `SCOPE_MISSING`)
 
-> feature 스킬 참조 문서(`SKILL.md` 에서 분리한 원문). 읽는 시점: `NEED_DOCS(IMPL_DOCS_MISSING)`·`NEED_DOCS(SCOPE_MISSING)` 반환 직후, 그리고 implementation.md·approach.md·feature-scope.json·implementation-units.json 을 쓰거나 고치기 직전. 본문의 "Phase 0 3번/4번" 은 `references/phase0-design.md` 다.
+> feature 스킬 참조 문서(`SKILL.md` 에서 분리한 원문). 읽는 시점: `NEED_DOCS(IMPL_DOCS_MISSING)`·`NEED_DOCS(SCOPE_MISSING)` 반환 직후, 그리고 implementation.md·approach.md·feature-scope.json·implementation-units.json 을 쓰거나 고치기 직전. 본문의 "Phase 0 3번/4번" 은 `references/phase0-design.md` 다 — **구현 문서를 쓰기 전에 그 파일의 3번(conventions 재대조)·4번(material decision 확인 세 가지)도 함께 읽는다.** 이 파일만 읽고 쓰면 컨벤션 대조 절차 없이 쓰는 것이다.
 
 ### 구현 문서 작성 (`IMPL_DOCS_MISSING` 반환 시)
 
-합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다. `IMPL_DOCS_MISSING` 반환 출력 끝의 `[PROJECT CONVENTIONS]` 블록(worktree 사본)과 대조해 적용 규칙을 REQUIRED 로 반영한다(Phase 0 3번과 같은 절차). material decision 마다 Phase 0 4번의 세 가지(요구 출처 · 컨벤션 대조 · 실제 코드 경로)를 확인한 뒤에 적는다 — design 에 없는 제품 동작을 구현 문서에서 새로 추가하지 않는다.
+합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다. 쓰기 직전에 피처 worktree 의 `conventions.md` 를 Read 도구로 처음부터 끝까지 직접 읽고(경로: 러너 `[SKILL REFERENCE]` 줄의 `[CONVENTIONS]` 뒤 — 출력 끝의 `[PROJECT CONVENTIONS]` 블록은 같은 내용의 사본이지만 출력을 `head`/`grep`/백그라운드 로그로 받으면 보이지 않는다) 대조해 적용 규칙을 REQUIRED 로 반영한다(Phase 0 3번과 같은 절차). `REQUIRED` 로 정하는 구조·호출 흐름·이름과 참조 구현으로 인용하는 기존 코드를 규칙별로 대조한다 — 인용하려는 기존 코드가 규칙과 다르면 그 부분을 선례로 삼지 않고 규칙을 따르는 형태를 적는다(Phase 0 4번 B). material decision 마다 Phase 0 4번의 세 가지(요구 출처 · 컨벤션 대조 · 실제 코드 경로)를 확인한 뒤에 적는다 — design 에 없는 제품 동작을 구현 문서에서 새로 추가하지 않는다.
 
 1. `.agent-work/implementation.md` — **무엇을** 구현하는가(도메인 지식)를 **material implementation contract** 수준으로 확정한다. 계획서가 아니지만 코드 blueprint 도 아니다 — 워커가 제품·아키텍처·책임 경계·재사용 관계·비용 특성을 새로 선택하지 않을 만큼만 구체화한다.
    구현 대상마다 필요한 것만 확정한다: 변경·생성 대상 / material public·package symbol 과 signature / 입력·출력 계약 / 책임 경계(누가 판단·조립하는가) / 외부 상태 변경 / 중요한 호출 관계 / 중요한 상태 변경 순서 / 테스트할 observable behavior / 테스트 계약.
@@ -48,7 +48,7 @@
      "아무렇게나" 가 아니다 — 워커는 명시적 project convention → 이미 선택된 material contract → 직접 범위의 명백한 기존 표현 → 언어·플랫폼 관용 표현 → 가장 단순한 직접 구현 순으로 정하며, 새 abstraction 을 만들어 자유도를 소비하는 것은 DELEGATED 의 기본 권한이 아니다.
      DELEGATED 결정에는 기법을 적지 않으며, 워커는 결과 JSON 의 `delegated_choices` 에 material contract 에 가까워 리뷰어가 확인할 가치가 있는 선택만 보고한다. 리뷰어는 그 목록을 참고만 하고 코드 위치로 판정한다.
    - **단순성 의무.** 문서가 새 production structure(type·record·enum·context·result·helper layer·interface)를 직접 요구하려 할 때는 먼저 묻는다 — 이 구조가 요구사항·책임 경계·상태 모델 때문에 필요한가, 아니면 워커 선택을 제거하기 위해 만든 구조인가? 후자라면 만들지 않는다. `SendOutcome`/`Kind`/`ResultContext`/`private resultOf(...)` 같은 것을 branch 결과를 사전에 타입으로 고정하려고 발명하지 않는다 — 직접 값·기존 타입·local 변수로 충분하면 더 직접적인 쪽을 택한다.
-   - **REQUIRED 의 선택 품질.** material 접근법을 REQUIRED 로 확정할 때는 요구와 기존 계약을 만족하는 후보 중 **가장 단순한 통상 해법**을 고른다. 우선순위: 직접 범위의 명백한 precedent → 언어·플랫폼·표준 라이브러리의 표준 기능 → 직접적인 최소 구현. 새 추상화·새 의존성·별도 상태 구조는 앞선 방법보다 요구·기존 계약·필요한 비용 특성을 더 직접적이고 단순하게 만족한다는 구체적 이유가 있을 때만 고르고 그 이유를 적는다.
+   - **REQUIRED 의 선택 품질.** material 접근법을 REQUIRED 로 확정할 때는 요구와 기존 계약을 만족하는 후보 중 **가장 단순한 통상 해법**을 고른다. 우선순위: 사용자가 지목한 선례가 같은 문제를 푸는 방식(Phase 0 4번 A-2 — 먼저 확인하는 후보이지 복제 의무는 아니다) → 직접 범위의 명백한 precedent → 언어·플랫폼·표준 라이브러리의 표준 기능 → 직접적인 최소 구현. 새 추상화·새 의존성·별도 상태 구조는 앞선 방법보다 요구·기존 계약·필요한 비용 특성을 더 직접적이고 단순하게 만족한다는 구체적 이유가 있을 때만 고르고 그 이유를 적는다.
    - **재사용 탐색(REUSE / EXTEND / NEW).** **새 responsibility boundary** 를 만드는 결정 — 같은 책임의 repository/service/helper 신설, 기존 공용 converter·query path 와 경쟁하는 새 경로, 공유 abstraction/interface, infrastructure component, 새 cross-domain/shared responsibility
      — 는 같은 모듈·직접 의존 코드에서 같은 책임의 기존 구현을 먼저 찾고 `REUSE`(기존 symbol 호출) / `EXTEND`(기존 symbol 에 메서드·분기 추가) / `NEW` 중 하나를 명시한다. `NEW` 에는 ① 확인한 기존 symbol/path ② 가장 가까운 기존 후보 ③ REUSE/EXTEND 가 요구를 만족하지 못하는 이유가 있어야 하며, 없는 NEW 는 검증자가 `REUSE_DISCOVERY_GAP` 으로 막는다(어느 구현이 나은지는 정하지 않는다).
      요구에서 거의 자명하게 파생되는 feature-local 구조 — 새 DB table 에 대응하는 entity/row model, 새 API 계약에 대응하는 DTO/command, design 이 존재를 확정한 feature-local value carrier, 기존 책임과 경쟁하지 않는 단순 feature-local model

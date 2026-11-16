@@ -93,7 +93,9 @@ fi
 skill_reference_for() { # status reason
   case "$1:$2" in
     NEED_DOCS:DESIGN_MISSING) echo phase0-design.md;;
-    NEED_DOCS:*) echo impl-docs.md;;
+    # 구현 문서 분기는 impl-docs.md 가 "Phase 0 3번(conventions 재대조)·4번(material decision 확인 세 가지)" 을 절차로 참조한다 —
+    # 그 원문은 phase0-design.md 에만 있으므로 함께 안내한다(impl-docs.md 만 읽으면 컨벤션 대조 절차 없이 문서를 쓰게 된다).
+    NEED_DOCS:*) echo "impl-docs.md phase0-design.md";;
     NEED_USER:WORKER_SESSION_*) echo "pipeline-contracts.md exit-states-resume.md";;
     NEED_USER:*) echo exit-states-resume.md;;
     DONE:*|FINALIZE:*) echo done-finalize.md;;
@@ -105,7 +107,16 @@ skill_reference_hint() { # status reason — 한 줄 출력(없으면 무출력)
   names="$(skill_reference_for "$1" "${2:-}")"
   [ -n "$names" ] || return 0
   for name in $names; do paths="$paths${paths:+ , }$SKILL_DIR/references/$name"; done
-  echo "[SKILL REFERENCE] $1${2:+($2)} — 다음 행동 전에 반드시 읽는다(전에 읽었어도 디스크에서 다시): $paths"
+  echo "[SKILL REFERENCE] $1${2:+($2)} — 다음 행동 전에 반드시 읽는다(전에 읽었어도 디스크에서 다시): $paths$(conventions_read_hint "$1")"
+}
+# 문서를 쓰거나 고칠 수 있는 반환(NEED_DOCS 전부, NEED_USER 의 문서 동기화)에는 worktree conventions.md 의 경로를 같은 줄에 싣는다.
+# NEED_DOCS 출력 끝의 [PROJECT CONVENTIONS] 본문 블록만으로는 전달이 보장되지 않는다 — 오케스트레이터는 러너를 백그라운드 로그로 돌리거나
+# 출력을 head/grep 으로 줄여 읽는다(실제 실행에서 본문 블록을 한 번도 읽지 않은 채 문서를 써 컨벤션 위반 구조가 REQUIRED 로 확정된 적이 있다).
+# 그때 살아남는 것은 이 [SKILL REFERENCE] 한 줄이다. 그래서 본문이 아니라 "파일을 Read 도구로 직접 읽으라" 는 지시를 이 줄에 둔다.
+conventions_read_hint() { # status — 한 줄에 이어 붙일 문구(해당 없으면 무출력)
+  case "$1" in NEED_DOCS|NEED_USER) ;; *) return 0;; esac
+  [ -n "${CONVENTIONS_FILE:-}" ] && [ -f "$CONVENTIONS_FILE" ] || return 0
+  printf ' || [CONVENTIONS] 설계·구현 문서를 쓰거나 고치기 전에 이 파일을 Read 도구로 처음부터 끝까지 직접 읽고 규칙별로 대조한다(러너 출력의 블록·세션 기억·절 번호 나열로 대신하지 않는다): %s' "$CONVENTIONS_FILE"
 }
 
 # ---------- 인자 ----------

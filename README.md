@@ -150,7 +150,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 │   └── pre_bash_guard.sh        # 지시 없는 git commit/push 차단 (ALLOW_COMMIT 플래그)
 └── skills/feature/
     ├── SKILL.md                 # 진입 문서 — 필수 불변식·실행 명령·종료 상태 요약·"어느 참조 문서를 언제 읽는가" (압축 뒤에도 남도록 짧게 유지)
-    ├── references/              # 상세 절차·계약 원문 — 해당 분기 직전에만 읽는다 (SKILL.md 가 시점을 지정, 러너가 [SKILL REFERENCE] 줄로 경로 안내)
+    ├── references/              # 상세 절차·계약 원문 — 해당 분기 직전에만 읽는다 (SKILL.md 가 시점을 지정, 러너가 [SKILL REFERENCE] 줄로 경로 안내 — 문서 작성 분기는 worktree conventions.md 경로도 같은 줄에)
     │   ├── phase0-design.md         # 최초 진입 / NEED_DOCS(DESIGN_MISSING): 사전 조건·worktree 초기화·request.md·design.md 작성
     │   ├── impl-docs.md             # NEED_DOCS(IMPL_DOCS_MISSING / SCOPE_MISSING): implementation.md·approach.md·feature-scope.json·implementation-units.json
     │   ├── exit-states-resume.md    # NEED_USER 전 reason 의 행동·decisions.md 태그·재합의 우회 조건·체크포인트/지문 재개 규칙
