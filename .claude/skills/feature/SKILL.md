@@ -17,19 +17,19 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 | 시점 | 읽을 파일 |
 |---|---|
-| 피처 최초 진입 · `NEED_DOCS(DESIGN_MISSING)` · request.md/design.md 작성·수정 전 | `references/phase0-design.md` + worktree `conventions.md` |
-| `NEED_DOCS(IMPL_DOCS_MISSING)`·`(SCOPE_MISSING)` · implementation.md/approach.md/feature-scope.json/implementation-units.json 작성·수정 전 | `references/impl-docs.md` + `references/phase0-design.md`(3번 conventions 대조·4번 material decision 확인·지목된 선례 확인 — 구현 문서도 이 절차를 쓴다) + worktree `conventions.md` |
+| 피처 최초 진입 · `NEED_DOCS(DESIGN_MISSING)` · request.md/design.md 작성·수정 전 | `references/phase0-design.md` + worktree `conventions.md`(파일이 있는 경우) |
+| `NEED_DOCS(IMPL_DOCS_MISSING)`·`(SCOPE_MISSING)` · implementation.md/approach.md/feature-scope.json/implementation-units.json 작성·수정 전 | `references/impl-docs.md` + `references/phase0-design.md`(3번 conventions 대조·4번 material decision 확인·지목된 선례 확인 — 구현 문서도 이 절차를 쓴다) + worktree `conventions.md`(파일이 있는 경우) |
 | exit 2 `NEED_USER`(모든 reason) · exit 1 · 사용자 답을 기록하거나 문서를 고쳐 재실행하기 전 | `references/exit-states-resume.md` — 제목에 그 reason 이 든 절(`### … <reason> …`) 전체. 두 reason 이 한 절을 같이 쓰는 경우가 있다(`DEADLOCK`/`MAX_ROUNDS`, `TEST_RETRIES_EXHAUSTED`/`APPROVAL_STALE_REPEATED`). `WORKER_SESSION_*` 는 그 절에 더해 `references/pipeline-contracts.md` 의 worker stage 절도 읽는다 |
 | exit 0 `DONE` · `--finalize` 실행 전과 결과 처리 · 커밋 요청 | `references/done-finalize.md` |
 | worker 단계(unit·워커 세션), 역할 경계, `decisions.md` 태그·scope, 범위·변경 소유권, 계약 버전, 비용 보고, `WORKER_SESSION_*` | `references/pipeline-contracts.md` |
 
-- 러너는 멈출 때 `[SKILL REFERENCE]` 줄로 지금 읽을 파일의 절대 경로를 알려 준다(문서를 쓰는 반환에는 같은 줄의 `[CONVENTIONS]` 뒤에 worktree `conventions.md` 경로가 붙는다). 러너를 백그라운드 로그로 돌렸거나 출력을 `head`/`grep` 으로 줄여 읽었으면 이 줄을 반드시 찾아 그 파일들을 읽는다.
+- 러너는 멈출 때 `[SKILL REFERENCE]` 줄로 지금 읽을 파일의 절대 경로를 알려 준다(문서를 쓰는 반환에는 같은 줄의 `[CONVENTIONS]` 뒤에 worktree `conventions.md` 경로가 붙는다 — 그 파일이 없으면 붙지 않는다). 러너를 백그라운드 로그로 돌렸거나 출력을 `head`/`grep` 으로 줄여 읽었으면 이 줄을 반드시 찾아 그 파일들을 읽는다.
 - **파일이 없거나 읽히지 않으면 진행하지 않는다.** 이전 세션 기억이나 이 요약으로 대신하지 않고, 누락 경로를 사용자에게 보고해 `install.sh` 재실행을 요청한다(러너도 references 가 빠지면 exit 1 로 시작을 거부한다).
-- **압축·재개 뒤 복구.** 컨텍스트가 압축됐거나 세션을 재개했으면, 전에 읽었어도 현재 단계의 참조 문서를 디스크에서 다시 읽는다. 현재 단계를 모르면 같은 명령으로 러너를 재실행해 종료 상태로 확인한다(`run-state.json` 은 힌트). 설계·구현 문서를 쓰기 전에는 원본 저장소가 아니라 **피처 worktree 의** `conventions.md` 를 다시 읽는다. 어느 worktree 인지 확신할 수 없으면 고르지 말고 러너 출력의 `피처 worktree:` 줄로 확인한다.
+- **압축·재개 뒤 복구.** 컨텍스트가 압축됐거나 세션을 재개했으면, 전에 읽었어도 현재 단계의 참조 문서를 디스크에서 다시 읽는다. 현재 단계를 모르면 같은 명령으로 러너를 재실행해 종료 상태로 확인한다(`run-state.json` 은 힌트). 설계·구현 문서를 쓰기 전에는 원본 저장소가 아니라 **피처 worktree 의** `conventions.md` 를(파일이 있는 경우) 다시 읽는다. 어느 worktree 인지 확신할 수 없으면 고르지 말고 러너 출력의 `피처 worktree:` 줄로 확인한다.
 
 ## 필수 불변식 (어길 수 없음 — 원문은 참조 문서)
 
-- **문서를 쓰거나 고치기 전에 conventions 를 직접 읽고 대조한다.** design.md·implementation.md·approach.md 를 쓰거나 고칠 때마다(DOC_GAP·에스컬레이션 답 동기화 포함), 그 직전에 피처 worktree 의 `conventions.md` 를 **Read 도구로 처음부터 끝까지** 읽는다. 세션 첫 프롬프트의 주입분·러너 출력 끝의 `[PROJECT CONVENTIONS]` 블록(출력을 자르면 사라진다)·이전에 읽은 기억으로 대신하지 않는다. 문서에 적는 material decision 마다, 그리고 `REQUIRED` 참조로 인용하는 기존 코드마다 적용 규칙과 실제로 대조한다 — 기존 코드가 규칙과 다르면 규칙이 우선이고 그 코드를 따를 선례로 인용하지 않는다. 절 번호 나열은 대조가 아니다(절차 원문: `references/phase0-design.md` 3번·4번 B).
+- **문서를 쓰거나 고치기 전에 conventions 를 직접 읽고 대조한다.** design.md·implementation.md·approach.md 를 쓰거나 고칠 때마다(DOC_GAP·에스컬레이션 답 동기화 포함), 그 직전에 피처 worktree 의 `conventions.md` 를 **Read 도구로 처음부터 끝까지** 읽는다. `conventions.md` 는 선택 파일이다 — worktree 에 파일이 없으면(러너도 `[CONVENTIONS]` 경로를 붙이지 않는다) 이 읽기·대조 의무는 없고 그대로 진행한다. 세션 첫 프롬프트의 주입분·러너 출력 끝의 `[PROJECT CONVENTIONS]` 블록(출력을 자르면 사라진다)·이전에 읽은 기억으로 대신하지 않는다. 문서에 적는 material decision 마다, 그리고 `REQUIRED` 참조로 인용하는 기존 코드마다 적용 규칙과 실제로 대조한다 — 기존 코드가 규칙과 다르면 규칙이 우선이고 그 코드를 따를 선례로 인용하지 않는다. 절 번호 나열은 대조가 아니다(절차 원문: `references/phase0-design.md` 3번·4번 B).
 - **막히면 사용자에게 묻는다.** 모호한 요구·갈리는 설계 판단·교착·라운드 초과·`UNDECIDED`·재시도 소진은 추측하거나 다른 에이전트에게 다시 묻지 않는다. 러너·검증자·리뷰어·워커의 질문과 선택지는 **그대로** 전달한다(우열 선택·임의의 '영향 없음' 금지).
 - **사용자 결정은 `decisions.md` 에 추가만 한다.** `- [USER-QUESTION][scope=design|impl] <질문> → <답>`. scope = 그 결정이 처음 영향을 주는 단계(요구·외부 동작·설계 → `design`, 구현 수단만 → `impl`). 에스컬레이션·gap 의 답은 러너 detail 이 준 셋째 태그(`[escalation=…]`/`[review-issue=…]`/`[worker-gap=…]`)를 표기 그대로 붙인다. 기존 줄 수정·삭제, 빈 답·플레이스홀더 금지. 유일한 예외: `DECISION_SCOPE_REQUIRED` 로 멈췄을 때 detail 이 가리킨 scope 없는 옛 `- [USER-QUESTION] …` 줄에, 사용자와 확인한 `[scope=design|impl]` 태그만 붙인다(질문·답 문구는 그대로, 이미 scope 가 있는 줄은 대상 아님). 요구 자체가 바뀌면 gap 답으로 우회하지 않고 request.md `## 요구 변경/추가` 에 append 한다.
 - **`USER_RESOLVED` 는 검증자 PASS 가 아니다.** 사용자 결정으로 단계를 넘어가도 리뷰 JSON 의 BLOCK 과 review/verify/DONE 게이트는 그대로다.

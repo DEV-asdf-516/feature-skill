@@ -4,7 +4,7 @@
 
 ### 구현 문서 작성 (`IMPL_DOCS_MISSING` 반환 시)
 
-합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다. 쓰기 직전에 피처 worktree 의 `conventions.md` 를 Read 도구로 처음부터 끝까지 직접 읽고(경로: 러너 `[SKILL REFERENCE]` 줄의 `[CONVENTIONS]` 뒤 — 출력 끝의 `[PROJECT CONVENTIONS]` 블록은 같은 내용의 사본이지만 출력을 `head`/`grep`/백그라운드 로그로 받으면 보이지 않는다) 대조해 적용 규칙을 REQUIRED 로 반영한다(Phase 0 3번과 같은 절차). `REQUIRED` 로 정하는 구조·호출 흐름·이름과 참조 구현으로 인용하는 기존 코드를 규칙별로 대조한다 — 인용하려는 기존 코드가 규칙과 다르면 그 부분을 선례로 삼지 않고 규칙을 따르는 형태를 적는다(Phase 0 4번 B). material decision 마다 Phase 0 4번의 세 가지(요구 출처 · 컨벤션 대조 · 실제 코드 경로)를 확인한 뒤에 적는다 — design 에 없는 제품 동작을 구현 문서에서 새로 추가하지 않는다.
+합의된 `design.md` 기반으로 네 파일을 쓴다. 설계 합의를 재해석·번복하지 않는다. 쓰기 직전에 피처 worktree 의 `conventions.md` 를(파일이 존재하는 경우 — 선택 파일이며, 없으면 `[CONVENTIONS]` 경로가 붙지 않고 이 읽기·대조 없이 진행한다) Read 도구로 처음부터 끝까지 직접 읽고(경로: 러너 `[SKILL REFERENCE]` 줄의 `[CONVENTIONS]` 뒤 — 출력 끝의 `[PROJECT CONVENTIONS]` 블록은 같은 내용의 사본이지만 출력을 `head`/`grep`/백그라운드 로그로 받으면 보이지 않는다) 대조해 적용 규칙을 REQUIRED 로 반영한다(Phase 0 3번과 같은 절차). `REQUIRED` 로 정하는 구조·호출 흐름·이름과 참조 구현으로 인용하는 기존 코드를 규칙별로 대조한다 — 인용하려는 기존 코드가 규칙과 다르면 그 부분을 선례로 삼지 않고 규칙을 따르는 형태를 적는다(Phase 0 4번 B). material decision 마다 Phase 0 4번의 세 가지(요구 출처 · 컨벤션 대조 · 실제 코드 경로)를 확인한 뒤에 적는다 — design 에 없는 제품 동작을 구현 문서에서 새로 추가하지 않는다.
 
 1. `.agent-work/implementation.md` — **무엇을** 구현하는가(도메인 지식)를 **material implementation contract** 수준으로 확정한다. 계획서가 아니지만 코드 blueprint 도 아니다 — 워커가 제품·아키텍처·책임 경계·재사용 관계·비용 특성을 새로 선택하지 않을 만큼만 구체화한다.
    구현 대상마다 필요한 것만 확정한다: 변경·생성 대상 / material public·package symbol 과 signature / 입력·출력 계약 / 책임 경계(누가 판단·조립하는가) / 외부 상태 변경 / 중요한 호출 관계 / 중요한 상태 변경 순서 / 테스트할 observable behavior / 테스트 계약.
