@@ -44,6 +44,11 @@
 #            DOC_GAP → 사용자(REVIEW_DOC_GAP, doc-gap-resume.json), DEADLOCK/MAX_ROUNDS → 사용자
 #            리뷰어 출력 계약 위반 → 사용자(REVIEW_OUTPUT_INVALID, reviews/invalid-review.json) — 일반 재실행은 리뷰어 0회로 같은 진단(검사기를 고쳤으면 저장된 출력을
 #            로컬 재검증), 새 리뷰는 --new-review-attempt 로만. CLI 결과 불확실(결과 JSON 없음 — ENV_ERROR, codex resume marker 유지)과 다른 상태다.
+#            프로젝트 빠른 검사(선택 — config.sh FAST_CHECK_CMD, scripts/fast-check.sh): 리뷰 루프가 리뷰어를 부르기 직전마다(첫 리뷰 전·수정자 뒤·재개·승인 재사용 전)
+#            한 번 실행한다. 미설정이면 생략 로그만 남고 종전 흐름이다. 규칙 위반(루프 exit 5) → 리뷰어 0회로 돌아오고 기존 워커 수정 1회
+#            (worker-check-fix.md, 한도 MAX_TEST_RETRIES — 피처 누적) → review 재진입(검사부터) → 통과한 코드만 리뷰. 한도 소진 → 사용자(FAST_CHECK_RETRIES_EXHAUSTED).
+#            실행 오류(루프 exit 6: 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반) → 자동 수정 없이 사용자(FAST_CHECK_ERROR).
+#            설정돼 있으면 verify 로 바로 재개하는 실행도 review 를 지난다(승인 재사용 전에 검사를 다시 돌린다 — 리뷰어 호출은 없다).
 #   doc-gap: 구현 후 DOC_GAP 재개 경로(doc-gap-resume.json 이 pending 인 동안 impl 지문 추론보다 우선). impl consensus 는 최초 워커 진입 전
 #            사전 게이트일 뿐이고, 워커·리뷰어가 구현 중 발견한 DOC_GAP/USER_DECISION 은 사용자 결정이 최종이다 — 검증자·디자이너 재호출 없음.
 #            WAITING_USER(답 전 — 모델 0회) → 답·approach 동기화·source tree 불변 확인 → WORKER_PENDING(unit 이면 그 unit 부터 worker stage,
@@ -57,6 +62,7 @@
 #   2 NEED_USER   사용자 판단 필요 (reason: ASK_USER | DEADLOCK | MAX_ROUNDS | UNDECIDED(워커 DOC_GAP/USER_DECISION) | REVIEW_DOC_GAP | DOC_GAP_SOURCE_CHANGED | DOC_GAP_SCOPE_EXCEEDED |
 #                 DOC_GAP_LOCATION_UNRESOLVED(gap 위치를 파일 경로로 확정할 수 없음 — 범위 위반과 구분, 체크포인트는 WAITING_USER 유지) |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | REVIEW_OUTPUT_INVALID |
+#                 FAST_CHECK_RETRIES_EXHAUSTED(빠른 검사 규칙 위반이 자동 수정 한도 뒤에도 남음) | FAST_CHECK_ERROR(빠른 검사 실행 오류 — 자동 수정 없음) |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
 #                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | UNIT_CONTRACT_IMPACT_REQUIRED | UNIT_CONTRACT_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
 #                 RESOLVED_GAP_REPEATED(이미 사용자가 결정한 unit 미결정을 워커가 같은 질문으로 재반환 — 자동 재시도 없음) |
@@ -66,7 +72,8 @@
 #
 # 자동 복구 금지: 여기서 허용하는 자동 루프는 성공 조건이 기계적으로 명확한
 # 두 가지뿐이다 — (리뷰 이슈 → 수정자 → 재리뷰), (테스트 실패 → 워커 1회 수정 →
-# 재리뷰 → 재테스트). unit 단계의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째 형태와
+# 재리뷰 → 재테스트). 리뷰 전 프로젝트 빠른 검사의 (규칙 위반 → 워커 수정 → 재검사 → 리뷰)는 두 번째 형태와 같고
+# 같은 한도(MAX_TEST_RETRIES)를 따로 센다(실행 오류는 이 루프에 넣지 않는다). unit 단계의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째 형태와
 # 같고 같은 한도(MAX_TEST_RETRIES)를 쓴다. "무슨 뜻인지 모르겠다", "둘 중 골라야 한다", "같은 이슈가
 # 반복된다"는 추가 추론 없이 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구를
 # 추가하지 마라 — 이 스킬의 목적을 거꾸로 훼손한다.
@@ -251,9 +258,9 @@ write_state() { # stage status reason detail
   local history='[]'
   [ -f "$STATE" ] && history="$(jq -c '.history // []' "$STATE")"
   jq -n --arg stage "$1" --arg status "$2" --arg reason "$3" --arg detail "$4" --arg now "$now" \
-    --argjson retries "${TEST_RETRIES:-0}" --argjson stale "${STALE_COUNT:-0}" --argjson history "$history" \
+    --argjson retries "${TEST_RETRIES:-0}" --argjson stale "${STALE_COUNT:-0}" --argjson fast_check_retries "${FAST_CHECK_RETRIES:-0}" --argjson history "$history" \
     '{version:1, stage:$stage, status:$status, reason:(if $reason=="" then null else $reason end),
-      detail:(if $detail=="" then null else $detail end), test_retries:$retries, stale_count:$stale,
+      detail:(if $detail=="" then null else $detail end), test_retries:$retries, stale_count:$stale, fast_check_retries:$fast_check_retries,
       updated_at:$now, history:($history + [{stage:$stage,status:$status,reason:(if $reason=="" then null else $reason end),at:$now}])}' \
     > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
 }
@@ -435,8 +442,11 @@ for f in consensus-loop.sh impl-review-loop.sh; do
 done
 [ -f "$SKILL_DIR/scripts/worker-invoke.sh" ] || env_error "스크립트 없음: worker-invoke.sh (run_worker)"
 [ -f "$SKILL_DIR/scripts/notify-done.sh" ] || env_error "스크립트 없음: notify-done.sh (notify_feature_done)"
+# 프로젝트 빠른 검사 연결(선택 기능): 실행은 리뷰 루프가 하고, 러너는 설정 여부(fast_check_configured)와 결과 처리만 쓴다. 파일이 없으면 혼합 설치다.
+[ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+source "$SKILL_DIR/scripts/fast-check.sh"
 [ -f "$WORKER_SCHEMA" ] || env_error "스키마 없음: $WORKER_SCHEMA"
-for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
+for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md worker-check-fix.md; do
   [ -f "$SKILL_DIR/prompts/$p" ] || env_error "프롬프트 없음: $p"
 done
 
@@ -452,7 +462,7 @@ if [ "$NEW" = 1 ]; then
   done
   [ "$moved" = 1 ] && log "이전 산출물 → $archive_dir"
   : > "$WORK_DIR/decisions.md"
-  TEST_RETRIES=0; STALE_COUNT=0
+  TEST_RETRIES=0; STALE_COUNT=0; FAST_CHECK_RETRIES=0
   write_state preflight RUNNING "" ""
 fi
 [ -f "$WORK_DIR/decisions.md" ] || : > "$WORK_DIR/decisions.md"
@@ -507,9 +517,10 @@ if [ -x "$ROOT/feature-live" ] && claim_live_launch_lock; then
 fi
 
 # ---------- 재개 지점 결정: state 힌트 + 산출물 교차 확인 ----------
-TEST_RETRIES=0; STALE_COUNT=0; STAGE=design
+TEST_RETRIES=0; STALE_COUNT=0; FAST_CHECK_RETRIES=0; STAGE=design
 if [ -f "$STATE" ]; then
   TEST_RETRIES="$(jq -r '.test_retries // 0' "$STATE")"
+  FAST_CHECK_RETRIES="$(jq -r '.fast_check_retries // 0' "$STATE")"   # 필드 없는 옛 run-state = 0
   STALE_COUNT="$(jq -r '.stale_count // 0' "$STATE")"
   hinted="$(jq -r '.stage' "$STATE")"
   hinted_status="$(jq -r '.status' "$STATE")"
@@ -567,7 +578,13 @@ esac
 if [ "$STAGE" = verify ] && ! impl_approval_current; then
   log "구현 승인이 현재 작업 트리·계약에 대해 유효하지 않음 — review 부터"; STAGE=review
 fi
-log "시작 stage: $STAGE (test_retries=$TEST_RETRIES)"
+# 프로젝트 빠른 검사가 설정돼 있으면 verify 로 바로 재개하지 않는다. 승인이 유효해도 그 승인 뒤에 검사 명령이 새로 설정됐거나 규칙 입력이 바뀌었을 수 있고,
+# 과거 검사 PASS 를 캐시하지 않으므로(명령·설정·검사기·규칙 입력을 전부 지문에 넣어야 안전하다) 리뷰 루프를 지나게 한다 —
+# 루프가 승인 재사용 직전에 검사를 다시 돌리고, 통과하면 리뷰어 호출 없이 승인을 재사용해 verify 로 온다. 미설정이면 종전 그대로다.
+if [ "$STAGE" = verify ] && fast_check_configured; then
+  log "프로젝트 빠른 검사 설정됨 — verify 로 바로 가지 않고 review 를 지난다(승인 재사용 전 검사 재실행, 승인이 유효하면 리뷰어 호출 없음)"; STAGE=review
+fi
+log "시작 stage: $STAGE (test_retries=$TEST_RETRIES, fast_check_retries=$FAST_CHECK_RETRIES)"
 
 # ---------- 워커 호출 ----------
 # run_worker 는 scripts/worker-invoke.sh 에 있다(본문 그대로 분리 — tests/worker-regression.sh 가 같은 경로로 production 워커 1회를 호출한다).
@@ -577,6 +594,109 @@ source "$SKILL_DIR/scripts/worker-invoke.sh"
 # notify_feature_done 은 scripts/notify-done.sh — done stage 의 write_state done DONE 직후 1회.
 # 미설정·발송 실패는 DONE(exit 0)을 바꾸지 않고, 재발송은 notify-done.sent 마커와 "이미 DONE" 조기 종료가 막는다.
 source "$SKILL_DIR/scripts/notify-done.sh"
+
+# ---------- 프로젝트 빠른 검사 수정 턴(check-fix)의 진행 기록 · 재개 판정 ----------
+# 수정 턴은 run_worker 가 돌아왔을 때만 끝난 것이다(index·manifest·기준선·write-set 게이트 + 결과 계약 + 세션 수용). 호출 도중 러너가 죽거나 게이트에서 멈춘 뒤
+# 그대로 재실행하면, 리뷰 루프는 지금의 코드로 검사부터 다시 할 뿐이라 그 턴이 남긴 변경(범위 밖 수정 포함)이 사후 검사 없이 리뷰·DONE 까지 갈 수 있고,
+# 위반이 남아 있으면 같은 수정 턴이 반쯤 적용된 편집 위에 다시 돈다. 그래서 호출 직전에 진행 기록($CHECK_FIX_PENDING, active)을 남기고,
+# 러너를 시작할 때마다 stage 와 무관하게 모델 호출 0회로 판정한다(unit 워커의 재개 판정과 같은 근거: 결과 JSON + 실제 tree):
+#   호출 전 tree 기록 없음 / 현재 tree == 호출 전 tree       → 그 턴은 아무것도 바꾸지 않았다. 기록을 닫는다(위반이 남아 있으면 같은 턴을 다시 불러도 안전).
+#   tree 가 바뀌었는데 호출 후 tree 기록 없음(CLI 도중 중단)   → WORKER_OUTCOME_UNCERTAIN (자동 재호출·자동 원복 없음, 호출 전 tree 로 되돌린 뒤 재실행)
+#   호출 전 tree → 현재 tree 사이에 feature-scope 밖 경로 변경 → SCOPE_VIOLATION (run_worker 의 write-set 검사를 재실행마다 다시 한다 — 원복 없음)
+#   범위 안 변경 + 이번 호출의 유효한 결과 JSON               → DONE 이면 끝난 턴으로 확정(한도 계산·결과 합치기).
+#                                                              UNDECIDED 면 이 턴의 미결정 체크포인트(doc-gap-resume.json)가 실제로 있는지 확인한다 — 있으면 사용자 결정 경로가 이어 받고,
+#                                                              없으면(체크포인트 기록 전에 중단) 결과 JSON 에서 다시 기록해 NEED_USER(UNDECIDED) 로 멈춘다. 다시 기록할 수 없으면 WORKER_OUTCOME_UNCERTAIN
+#   범위 안 변경 + 결과 없음/깨짐(undecided paths 무효 포함)   → WORKER_OUTCOME_UNCERTAIN
+# 확정은 멱등이다: 진행 기록이 호출 전 한도 값(retries_before)을 들고, 리뷰 입력 병합은 호출 전 worker-result.json 사본(<tag>-merge-base.json)에서 다시 만든다 —
+# 확정 도중(한도 저장 뒤·기록 닫기 전) 러너가 죽어 같은 DONE 을 다시 확정해도 한도와 병합 결과는 한 번 반영한 것과 같다.
+# 기록은 지우지 않고 active=false 로 닫는다. 이 파일을 지우거나 고쳐서 넘어가는 것은 복구가 아니다.
+CHECK_FIX_PENDING="$WORK_DIR/check-fix.pending.json"
+check_fix_pending_active() { [ -f "$CHECK_FIX_PENDING" ] && jq -e '.active==true' "$CHECK_FIX_PENDING" >/dev/null 2>&1; }
+check_fix_pending_close() { # outcome
+  jq --arg o "$1" --arg now "$(date '+%FT%T%z')" '.active=false | .outcome=$o | .closed_at=$now' "$CHECK_FIX_PENDING" > "$CHECK_FIX_PENDING.tmp" \
+    && mv "$CHECK_FIX_PENDING.tmp" "$CHECK_FIX_PENDING" || env_error "check-fix.pending.json 갱신 실패"
+}
+check_fix_session_accept() { # tag — run_worker 의 '결과 수용'(세션 확정 + 저널 동기화)을 재개 판정에서 마저 한다. 세 호출 모두 이미 끝났으면 아무것도 바꾸지 않는다
+  role_session_accept WORKER "$FEATURE_WORKER_SESSION" "$1 (재개 확정)" \
+    || env_error "워커 세션 수용(role_session_accept) 실패 — 빠른 검사 수정 턴($1)의 세션을 확정하지 못했다. 자동 fresh 전환 없음"
+  worker_session_sync_id || env_error "worker-session.json 세션 ID 동기화 실패"
+  worker_session_mark_bound || env_error "worker-session.json 세션 결속(session_bound) 기록 실패"
+}
+check_fix_turn_accept() { # tag — 끝난 수정 턴 확정: 한도 계산 + 결과를 리뷰 입력에 합치기 + 진행 기록 닫기 (멱등 — 몇 번 불러도 한 번 반영한 것과 같다)
+  local tag="$1" base="$WORK_DIR/$1-merge-base.json" retries_before
+  # 한도는 '끝난 수정 턴'만 센다. 사람에게 멈춘 턴(UNDECIDED·범위 위반·결과 불확실·실행 실패)은 자동 순환이 아니다 —
+  # 거기서 한도를 쓰면 사용자가 미결정에 답한 뒤 그 결정을 구현할 수정 턴이 남지 않는다.
+  # 지금 값에 1 을 더하지 않고 '이 턴의 호출 전 값 + 1' 로 정한다: 한도를 저장한 뒤 진행 기록을 닫기 전에 러너가 죽으면 재실행이 같은 턴을 다시 확정한다.
+  retries_before="$(jq -r --arg t "$tag" 'select(.tag==$t) | .retries_before // "" | tostring' "$CHECK_FIX_PENDING" 2>/dev/null)"
+  case "$retries_before" in ''|*[!0-9]*) env_error "check-fix.pending.json 에 수정 턴($tag)의 호출 전 한도 값(retries_before)이 없다 — 이 턴을 몇 번째로 셀지 확정할 수 없다(기록을 손으로 고치지 않는다)";; esac
+  [ -f "$base" ] || env_error "빠른 검사 수정 턴($tag)의 호출 전 worker-result.json 사본이 없다: $base"
+  FAST_CHECK_RETRIES=$((retries_before + 1))
+  write_state "$STAGE" RUNNING "" "$tag done ($FAST_CHECK_RETRIES/$MAX_TEST_RETRIES)"
+  # 이 수정의 delegated_choices·tests 를 리뷰 입력(worker-result.json)에 덧붙인다 — 결과 파일($WORK_DIR/$tag-result.json)은 unit 결과를 합친 파일을 덮어쓰지 않는다.
+  # 병합의 왼쪽은 지금의 worker-result.json 이 아니라 호출 전 사본이다(다시 확정해도 같은 항목이 두 번 붙지 않는다).
+  jq -s '.[0] + {delegated_choices:(.[0].delegated_choices + .[1].delegated_choices), tests:(.[0].tests + .[1].tests)}' "$base" "$WORK_DIR/$tag-result.json" > "$WORKER_RESULT.tmp" \
+    && mv "$WORKER_RESULT.tmp" "$WORKER_RESULT" || env_error "빠른 검사 수정 결과를 worker-result.json 에 합치지 못함"
+  check_fix_pending_close DONE
+}
+# 이 수정 턴이 남긴 미결정 체크포인트인가: 워커 기원 · unit 아님 · 같은 결과 파일 · 그 턴의 호출 후 tree · 이 턴이 시작된 뒤에 기록됨(같은 tag 의 이전 시도가 남긴 기록과 구분)
+check_fix_gap_checkpoint_recorded() { # result after_tree
+  [ -n "$(doc_gap_next_step)" ] || return 1
+  jq -e --arg result "$1" --arg tree "$2" --arg started "$(jq -r '.started_at // ""' "$CHECK_FIX_PENDING")" \
+    '.origin=="worker" and (.unit_id // "")=="" and .result==$result and .source_tree==$tree and $started != "" and (.recorded_at // "") >= $started' "$DOC_GAP_RESUME" >/dev/null 2>&1
+}
+check_fix_pending_resolve() {
+  check_fix_pending_active || return 0
+  local tag before_file after_file result before after cur baseline violations path_violations
+  tag="$(jq -r '.tag' "$CHECK_FIX_PENDING")"
+  before_file="$WORK_DIR/$tag-before.tree"; after_file="$WORK_DIR/$tag-after.tree"; result="$WORK_DIR/$tag-result.json"
+  if [ ! -f "$before_file" ]; then check_fix_pending_close NOT_STARTED; return 0; fi
+  before="$(cat "$before_file")"
+  cur="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패(빠른 검사 수정 턴 재개 판정)"
+  # 코드를 바꾸지 않은 턴이라도 미결정(UNDECIDED)을 돌려줬으면 '아무 일도 없었다'로 닫지 않는다 — 그 질문은 아래에서 사용자 결정 경로로 보낸다
+  if [ "$cur" = "$before" ] && ! { [ -f "$after_file" ] && worker_result_valid "$result" && [ "$(jq -r '.status' "$result")" = UNDECIDED ]; }; then
+    log "직전 빠른 검사 수정 턴($tag)은 작업 트리를 바꾸지 않았다 — 진행 기록을 닫는다"
+    check_fix_pending_close NO_CHANGE; return 0
+  fi
+  [ -f "$after_file" ] \
+    || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 빠른 검사 수정 턴($tag)이 워커 CLI 호출 중에 중단됐고(호출 후 tree 기록 없음) 작업 트리가 호출 전 tree($before)와 다르다(현재 $cur) — 수정이 어디까지 적용됐는지 알 수 없고 범위·결과 검사도 끝나지 않았다. 그 변경을 검사·리뷰로 넘기지 않고, 같은 수정 턴을 자동 재호출하지도 원복하지도 않는다(모델 호출 0회). 변경을 확인한 뒤(git diff $before $cur) 작업 트리를 호출 전 tree 로 명시적으로 되돌리고 재실행하면 검사부터 다시 돈다. 변경을 유지하려면 사용자가 정리 방식을 명시하라(근거: $CHECK_FIX_PENDING — 이 파일을 지우거나 고쳐서 넘기지 않는다)"
+  if feature_scope_present && feature_scope_valid; then
+    baseline="$(read_worker_baseline_tree)" || env_error "worker-baseline.tree 가 유효한 tree 를 가리키지 않음"
+    violations="$(feature_scope_violations "$before" "$cur" "$baseline")"
+    [ -z "$violations" ] \
+      || stop_need_user SCOPE_VIOLATION "빠른 검사 수정 턴($tag) 재개 검사: 그 턴의 호출 전 tree 이후 feature-scope 밖 경로가 바뀌어 있다($(printf '%s' "$violations" | paste -sd, -)) — 리뷰로 넘기지 않는다(모델 호출 0회). 워커 과잉 변경이면 되돌릴지 범위를 넓힐지 사용자가 결정, 다른 세션 변경이면 보존. 자동 원복 금지. 범위 밖 변경이 정리되면 재실행 시 이 턴의 결과로 이어간다"
+  fi
+  # 결과 계약은 run_worker 와 같은 두 검사다(구조 + undecided paths 가 실재/범위 안) — 지어낸 경로의 미결정으로 체크포인트를 만들지 않는다
+  if worker_result_valid "$result"; then
+    path_violations="$(worker_undecided_path_violations "$result")" || env_error "undecided paths 검사 실패: $result"
+    after="$(cat "$after_file")"
+    if [ -z "$path_violations" ]; then
+      case "$(jq -r '.status' "$result")" in
+        DONE)
+          log "직전 빠른 검사 수정 턴($tag)의 유효한 DONE 결과 확인 — 범위 안 변경, 워커 재호출 없이 끝난 턴으로 확정하고 검사부터 다시 한다"
+          check_fix_session_accept "$tag"
+          check_fix_turn_accept "$tag"; return 0;;
+        UNDECIDED)
+          # 한도는 쓰지 않는다. 진행 기록은 '사용자 결정 경로가 이 미결정을 실제로 들고 있다'가 확인된 뒤에만 닫는다 —
+          # 결과 JSON 만 보고 닫으면, 체크포인트 기록 전에 중단된 턴의 질문이 사라진 채 검사 → 리뷰 → DONE 으로 간다.
+          if check_fix_gap_checkpoint_recorded "$result" "$after"; then
+            check_fix_session_accept "$tag"
+            check_fix_pending_close UNDECIDED; return 0   # 이어서 doc-gap 경로가 맡는다(답 전이면 모델 0회로 다시 NEED_USER)
+          fi
+          # 체크포인트가 없다(결과·호출 후 tree 저장 뒤, 체크포인트 기록 전에 중단). 그 턴의 호출 후 tree 가 그대로일 때만 run_worker 가 하려던 기록을 마저 한다.
+          [ "$cur" = "$after" ] \
+            || stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 빠른 검사 수정 턴($tag)이 미결정(UNDECIDED)을 반환했지만 사용자 결정 체크포인트(doc-gap-resume.json)를 남기기 전에 중단됐고, 작업 트리가 그 턴의 호출 후 tree($after)와 다르다(현재 $cur) — 미결정을 어느 코드 상태 위의 질문으로 기록할지 확정할 수 없다. 미결정을 버리고 진행하지 않으며 자동 재호출·자동 원복도 없다(모델 호출 0회). 미결정 항목: $(jq -c '[.undecided[] | {location, decision_needed, options}]' "$result"). 작업 트리를 $after 로 명시적으로 되돌리고 재실행하면 미결정을 다시 기록해 사용자 결정으로 간다(근거: $CHECK_FIX_PENDING, $result — 지우거나 고쳐서 넘기지 않는다)"
+          check_fix_session_accept "$tag"
+          doc_gap_record_worker "$result" "" "" "$after" || env_error "doc-gap-resume.json 기록 실패(빠른 검사 수정 턴 $tag 의 미결정 복구)"
+          check_fix_pending_close UNDECIDED
+          log "직전 빠른 검사 수정 턴($tag)의 미결정이 체크포인트 없이 남아 있었다 — 결과 JSON 에서 다시 기록했다. 사용자 결정 필요:"; doc_gap_report
+          stop_need_user UNDECIDED "빠른 검사 수정 턴($tag) 워커의 undecided 항목(중단된 실행에서 복구)을 사용자에게 질문 → 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][worker-gap=<key>] <질문> → <답>' 으로 기록 → approach.md 에 결정 반영 → 재실행(검증자·디자이너 없이 검사 → 수정 턴 재개). 단, 답이 구현 수단이 아니라 요구·외부 동작·설계 자체를 바꾸면 gap 답이 아니라 새 제품 요구다 — request.md 에 '요구 변경/추가' 를 append 하고 design.md 를 고친 뒤 '[USER-QUESTION][scope=design]' 로 기록한다. 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); tag: \(.tag))"] | join(" ; ")')";;
+      esac
+    fi
+  fi
+  stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 빠른 검사 수정 턴($tag)이 작업 트리를 바꿨지만(호출 전 $before → 현재 $cur) 유효한 결과 JSON($result)이 없다 — 완료 여부를 알 수 없으므로 그 변경을 검사·리뷰로 넘기지 않고, 같은 수정 턴을 자동 재호출하지도 원복하지도 않는다(모델 호출 0회). 변경을 확인한 뒤 작업 트리를 호출 전 tree 로 명시적으로 되돌리고 재실행하면 검사부터 다시 돈다(근거: $CHECK_FIX_PENDING — 이 파일을 지우거나 고쳐서 넘기지 않는다)"
+}
+# 재개 지점이 어디든(review 든 doc-gap 이든) 모델·검사 호출 전에 판정한다
+check_fix_pending_resolve
 
 # ---------- 구현 단위 하나 실행 ----------
 # Feature Worker 세션의 워커 턴 → targeted test(실패 시 같은 세션에 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json.
@@ -877,7 +997,11 @@ while :; do
           fi
           if [ -z "$gap_review" ]; then
             # verify 의 worker-fix 가 낸 미결정: 결정이 approach.md 에 반영됐으므로 verify 로 돌아가 테스트 → 필요하면 worker-fix 가 다시 돈다
-            doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"; STAGE=verify; continue
+            # 빠른 검사가 설정돼 있으면 review 로 간다 — 이 미결정은 리뷰 전 빠른 검사 수정(worker-check-fix)이 낸 것일 수 있고(아직 승인이 없다),
+            # verify 의 worker-fix 가 낸 것이어도 수정된 코드는 검사 → 리뷰를 다시 지나야 한다. 미설정이면 종전대로 verify(승인 지문이 stale 이면 거기서 review 로).
+            doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"
+            if fast_check_configured; then STAGE=review; else STAGE=verify; fi
+            continue
           fi
           # gap 해결(approach.md 반영)이 그 gap 과 연결되지 않은 unit 의 계약까지 바꿨으면 그 unit 의 완료는 더 이상 유효하지 않다(unit_contract_drift_covered) —
           # review-gap 워커는 그 unit 을 다시 구현하지 않으므로 워커·리뷰어를 부르기 전에 모델 0회로 멈춘다.
@@ -955,6 +1079,38 @@ while :; do
           # 리뷰어 출력 계약 위반: 승인도 수정 요청도 아니다. 루프가 원본·진단·입력 지문을 reviews/invalid-review.json 에 남겼고 재실행은 리뷰어 0회다.
           [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
           stop_need_user REVIEW_OUTPUT_INVALID "리뷰어 출력이 계약에 어긋나 수용하지 않음(attempt $(jq -r '.attempt' "$WORK_DIR/state.json") round $(jq -r '.round' "$WORK_DIR/state.json"), invocation $(jq -r '.invocation_id' "$WORK_DIR/state.json")) — $(jq -r '.why' "$WORK_DIR/state.json"). 위반: $(jq -r '[.errors[] | "[\(.rule_id)] issue=\(if .issue_id=="" then "-" else .issue_id end) field=\(.field) observed=\(.observed)"] | join(" ; ")' "$WORK_DIR/state.json"). 같은 프롬프트를 같은 세션에 재전송하지 않는다 — 그대로 재실행하면 모델 호출 0회로 같은 진단이 나온다. 복구: ① 검사기 버그였으면 고친 뒤 재실행(저장된 출력을 로컬 재검증) ② 새 리뷰가 필요하면 '--new-review-attempt' 를 붙여 재실행(새 attempt Round 1, 새 세션 — 이전 미수용 세션·resume marker 는 건드리지 않는다). 기록: $WORK_DIR/reviews/invalid-review.json, 원본: $(jq -r '.review' "$WORK_DIR/state.json")";;
+        5)
+          # 프로젝트 빠른 검사 규칙 위반: 리뷰어는 호출되지 않았다(리뷰 체크포인트 그대로). 리뷰 JSON 이 없으므로 수정자(입력 계약 = 리뷰 JSON)를 쓰지 않고,
+          # verify 실패와 같은 형태로 기존 워커 수정 1회(진단 로그 = TEST_LOG) → review 재진입 → 루프가 검사부터 다시 → 통과한 코드만 리뷰어로 간다.
+          # 한도는 MAX_TEST_RETRIES 를 재사용하되 verify 재시도와 따로, 피처 전체에 누적해 센다(통과해도 되돌리지 않는다 — 수정자가 위반을 반복해 만드는 순환을 끊는다). 끝난 수정 턴만 센다.
+          # 범위 밖 수정·index 변경·기준선 변조·미결정(UNDECIDED → 사용자)·결과 불확실은 run_worker 의 기존 게이트가 그대로 처리한다.
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
+          fc_log="$(jq -r '.log' "$WORK_DIR/state.json")"; fc_record="$(jq -r '.record' "$WORK_DIR/state.json")"
+          [ "$FAST_CHECK_RETRIES" -lt "$MAX_TEST_RETRIES" ] \
+            || stop_need_user FAST_CHECK_RETRIES_EXHAUSTED "프로젝트 빠른 검사($(fast_check_cmd))의 규칙 위반이 자동 수정 한도(MAX_TEST_RETRIES=$MAX_TEST_RETRIES, 피처 누적 — 이미 ${FAST_CHECK_RETRIES}회 사용) 뒤에도 남아 있다 — 리뷰어를 부르지 않았고 추가 자동 수정도 하지 않는다. 진단 원본: $fc_log (기록: $fc_record, 이전 실행: $WORK_DIR/fast-check/history.jsonl). 복구: 진단이 가리키는 위반을 feature-scope 범위 안에서 직접 고치거나, 규칙·검사 명령 쪽이 틀렸으면 프로젝트의 검사 설정을 고친 뒤 같은 명령으로 재실행 — 검사부터 다시 돌고 통과해야 리뷰로 간다. 규칙이 합의 문서·conventions 와 충돌하면 어느 쪽이 맞는지 사용자가 정한다. 체크포인트·run-state·지문을 지우거나 고쳐서 넘기지 않는다"
+          fc_tag="check-fix-$(printf '%02d' "$((FAST_CHECK_RETRIES + 1))")"
+          write_state review RUNNING "" "$fc_tag ($((FAST_CHECK_RETRIES + 1))/$MAX_TEST_RETRIES)"
+          log "빠른 검사 규칙 위반 → 워커 수정 $((FAST_CHECK_RETRIES + 1))/$MAX_TEST_RETRIES (진단 $fc_log) → 재검사"
+          # 같은 tag 의 이전 시도(사용자 결정으로 끝난 UNDECIDED 턴 등)가 남긴 tree 기록을 이번 시도의 것으로 오인하지 않게 옮겨 둔다(삭제하지 않는다)
+          fc_stamp="$(date '+%Y%m%d-%H%M%S')"
+          for fc_old in "$WORK_DIR/$fc_tag-before.tree" "$WORK_DIR/$fc_tag-after.tree" "$WORK_DIR/$fc_tag-merge-base.json"; do
+            [ ! -f "$fc_old" ] || mv "$fc_old" "$fc_old.prev-$fc_stamp" || env_error "이전 수정 턴 기록 보존 실패: $fc_old"
+          done
+          # 호출 직전에 진행 기록을 남긴다 — 이 뒤 어디서 멈추든(러너 강제 종료 포함) 다음 실행이 check_fix_pending_resolve 로 이 턴의 완료·범위를 먼저 판정한다
+          # 확정을 멱등하게 만드는 두 입력을 함께 남긴다: 호출 전 한도 값(retries_before)과 호출 전 worker-result.json 사본(병합의 왼쪽)
+          cp "$WORKER_RESULT" "$WORK_DIR/$fc_tag-merge-base.json.tmp" && mv "$WORK_DIR/$fc_tag-merge-base.json.tmp" "$WORK_DIR/$fc_tag-merge-base.json" \
+            || env_error "호출 전 worker-result.json 사본 기록 실패: $WORK_DIR/$fc_tag-merge-base.json"
+          jq -n --arg tag "$fc_tag" --arg log "$fc_log" --arg now "$(date '+%FT%T%z')" --argjson retries_before "$FAST_CHECK_RETRIES" \
+            '{version:1, active:true, tag:$tag, check_log:$log, retries_before:$retries_before, started_at:$now}' > "$CHECK_FIX_PENDING.tmp" \
+            && mv "$CHECK_FIX_PENDING.tmp" "$CHECK_FIX_PENDING" || env_error "check-fix.pending.json 기록 실패"
+          TEST_LOG="$fc_log" RUN_TAG="$fc_tag" run_worker worker-check-fix.md
+          check_fix_turn_accept "$fc_tag"
+          STAGE=review; continue;;   # 수정된 코드는 검사부터 다시 — 수정 전 승인·리뷰는 지문이 달라져 재사용되지 않는다
+        6)
+          # 프로젝트 빠른 검사 실행 오류: 통과도 위반도 아니다. 코드 수정으로 풀 수 없으므로 워커·수정자를 부르지 않고 사용자에게 돌려보낸다(재실행 = 검사부터).
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
+          stop_need_user FAST_CHECK_ERROR "프로젝트 빠른 검사($(fast_check_cmd))를 끝까지 실행하지 못했다 — $(jq -r '.kind' "$WORK_DIR/state.json"): $(jq -r '.detail' "$WORK_DIR/state.json"). 통과·생략·규칙 위반 어느 것으로도 처리하지 않았고 리뷰어·수정자·워커를 부르지 않았다(자동 코드 수정 없음). 로그: $(jq -r '.log' "$WORK_DIR/state.json"), 기록: $(jq -r '.record' "$WORK_DIR/state.json"). 복구(kind 별): COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 확인 / TIMEOUT = 검사 범위를 줄이거나(FAST_CHECK_CHANGED_FILES) config.sh 의 FAST_CHECK_TIMEOUT_SEC 조정 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 명령이 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약을 따르도록 프로젝트 어댑터를 고친다 / INVALID_CONFIG = FAST_CHECK_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED·INDEX_MODIFIED = 검사가 파일이나 index 를 바꿨다: 기록의 modified_paths 를 확인해 되돌릴지 유지할지 사용자가 정하고(자동 원복 없음) 명령에서 자동 수정·포매팅을 뺀다. 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다. FAST_CHECK_CMD 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만"
+          ;;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
 

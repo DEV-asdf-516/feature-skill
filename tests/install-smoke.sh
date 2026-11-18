@@ -96,6 +96,22 @@ grep -q '커스텀 규칙' "$TARGET/.claude/hooks/core_rules.md" || fail "수정
 [ -f "$TARGET_SKILL/config.sh.new" ] || fail "수정 보존: config.sh.new 미생성"
 echo "[OK] 3. 사용자 수정 보존 + .new"
 
+# ---------- 3a. 프로젝트 빠른 검사 설정 줄이 없는 기존 config.sh(이 기능 이전 설치) → 병합 없이 업데이트, 미설정으로 유지 ----------
+# 헬퍼는 scripts/fast-check.sh 에 있으므로 옛 config.sh 본문과 섞여도 혼합 설치가 아니다: 사전 검사(헬퍼 이름·버전 상수)를 통과하고,
+# 사용자 설정은 그대로이며, 설정 줄을 대신 써 넣지 않는다(미설정 = 검사 생략). 새 스크립트·프롬프트는 설치되고 안내는 INFO 한 번뿐이다.
+cp "$TARGET_SKILL/config.sh" "$SCRATCH/config.with-fast-check"
+grep -v '^FAST_CHECK_' "$SCRATCH/config.with-fast-check" > "$TARGET_SKILL/config.sh"
+legacy_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1)" || fail "빠른 검사 설정 줄이 없는 기존 config 에서 설치가 실패함: $legacy_output"
+grep -q 'npm test' "$TARGET_SKILL/config.sh" || fail "빠른 검사 미설정 config: 사용자 설정(TEST_CMD)이 보존되지 않음"
+grep -q '^FAST_CHECK_' "$TARGET_SKILL/config.sh" && fail "빠른 검사 미설정 config: 설치가 사용자 config 에 설정 줄을 써 넣음"
+grep -q '^FAST_CHECK_CMD=""$' "$TARGET_SKILL/config.sh.new" || fail "config.sh.new 에 FAST_CHECK_CMD 기본값(빈 값 = 미설정)이 없음"
+[ -x "$TARGET_SKILL/scripts/fast-check.sh" ] && [ -f "$TARGET_SKILL/prompts/worker-check-fix.md" ] || fail "빠른 검사 스크립트·프롬프트가 설치되지 않음"
+echo "$legacy_output" | grep -q "\[INFO\] 선택 기능 '프로젝트 빠른 검사' 미설정" || fail "빠른 검사 미설정 안내(INFO)가 없음"
+echo "$legacy_output" | grep -q '\[FAIL\]' && fail "빠른 검사 미설정 config 를 혼합 설치로 오판함"
+cp "$SCRATCH/config.with-fast-check" "$TARGET_SKILL/config.sh"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1 | grep -q "프로젝트 빠른 검사' 미설정" && fail "설정 줄이 있는 config 인데 미설정 안내가 나옴"
+echo "[OK] 3a. 빠른 검사 설정 줄 없는 기존 config — 병합 없이 업데이트·사용자 설정 보존·설정 줄 미삽입·INFO 안내"
+
 # ---------- 3b. 역할별 모델/effort + 선택 conventions 규칙 병합 ----------
 sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^WORKER_EFFORT=.*/WORKER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"

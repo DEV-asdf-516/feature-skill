@@ -19,6 +19,7 @@
 # run_worker <prompt-file> [unit-dir]
 #   unit-dir 없음: 전체 피처 호출. RUN_TAG 기본(worker, verify 의 worker-fix.md)은 결과 $WORKER_RESULT, tree 는 $WORK_DIR/worker-*.tree.
 #                  RUN_TAG=review-gap(worker-review-gap.md)은 결과 $WORK_DIR/review-gap-result.json, tree 는 $WORK_DIR/review-gap-*.tree.
+#                  RUN_TAG=check-fix-NN(worker-check-fix.md — 리뷰 전 프로젝트 빠른 검사 위반 수정, TEST_LOG = 검사 진단 로그)은 결과 $WORK_DIR/check-fix-NN-result.json.
 #   unit-dir 있음: 구현 단위 호출. unit-dir/unit.json 을 ${UNIT_JSON} 으로 렌더링하고, 결과·tree·원문 로그를 unit-dir/<RUN_TAG>-* 에 남기며,
 #                  전체 범위 검사 뒤에 unit-dir/scope.json 으로 같은 write-set 검사를 한 번 더 한다(UNIT_SCOPE_VIOLATION). units manifest 불변도 본다.
 #   RUN_TAG (기본 worker): 산출물 접두(unit 의 test-fix 호출은 test-fix-NN). TEST_LOG 는 템플릿 변수로만 쓰인다.
@@ -49,6 +50,12 @@ worker_contract_fingerprint() {
     for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md; do
       printf '%s\0' "$p"; cat "$SKILL_DIR/prompts/$p"; printf '\0'
     done
+    # worker-check-fix.md(프로젝트 빠른 검사 위반 수정)는 FAST_CHECK_CMD 가 설정된 설치에서만 워커에게 간다 — 그때만 세션 계약에 넣는다.
+    # 미설정 설치의 지문은 이 프롬프트가 생기기 전과 같아서, 진행 중인 피처가 스킬 업데이트만으로 WORKER_SESSION_MISMATCH 가 되지 않는다.
+    # (피처 도중 검사를 새로 설정하면 워커가 받을 수 있는 프롬프트 집합이 달라진 것이므로 기존 규칙대로 세션 전제 불일치다.)
+    if [ -n "${FAST_CHECK_CMD:-}" ] && [ -n "${FAST_CHECK_CMD//[[:space:]]/}" ]; then
+      printf '%s\0' worker-check-fix.md; cat "$SKILL_DIR/prompts/worker-check-fix.md"; printf '\0'
+    fi
     cat "$WORKER_SCHEMA"
   } | sha256_stdin
 }

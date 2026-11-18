@@ -7,7 +7,13 @@
 #                 대기 중인 무효 출력이 없으면 아무 효과가 없다(유료 리뷰를 강제로 다시 돌리는 스위치가 아니다).
 # 종료 코드: 0=승인, 2=사용자 판단(DEADLOCK | MAX_ROUNDS_EXCEEDED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED),
 #            3=리뷰어 DOC_GAP(사용자 결정 — doc-gap-resume.json 기록, 러너가 NEED_USER/REVIEW_DOC_GAP),
-#            4=리뷰어 출력 계약 위반(REVIEW_OUTPUT_INVALID — reviews/invalid-review.json, 러너가 NEED_USER/REVIEW_OUTPUT_INVALID), 1=환경·CLI 오류
+#            4=리뷰어 출력 계약 위반(REVIEW_OUTPUT_INVALID — reviews/invalid-review.json, 러너가 NEED_USER/REVIEW_OUTPUT_INVALID), 1=환경·CLI 오류,
+#            5=프로젝트 빠른 검사 규칙 위반(FAST_CHECK_VIOLATION — 리뷰어 호출 전 중단, 러너가 기존 워커 수정 1회 → 재검사, 한도 소진이면 NEED_USER/FAST_CHECK_RETRIES_EXHAUSTED),
+#            6=프로젝트 빠른 검사 실행 오류(FAST_CHECK_ERROR — 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반. 자동 수정 없이 러너가 NEED_USER/FAST_CHECK_ERROR)
+# 프로젝트 빠른 검사(선택, scripts/fast-check.sh): config.sh 의 FAST_CHECK_CMD 가 있으면 **리뷰어를 부르기 직전마다** 한 번 실행한다 — 첫 리뷰 전,
+#   수정자 완료 뒤 다음 리뷰 전, 재개로 리뷰어 차례가 된 때, 저장된 리뷰 출력·승인 체크포인트를 재사용하기 전. 통과한 코드만 리뷰어(또는 재사용)로 넘어간다.
+#   위반·실행 오류는 리뷰 체크포인트를 바꾸지 않고 멈춘다(exit 5/6) — 재실행은 같은 지점에서 검사부터 다시 한다. 미설정이면 "생략" 로그만 남기고 종전 흐름이다.
+#   과거 PASS 기록으로 검사를 건너뛰지 않는다(성공 캐시 없음).
 # 세 가지 중단은 서로 다른 상태다:
 #   REVIEW_OUTPUT_INVALID      리뷰어가 JSON 을 돌려줬지만 출력 계약(스키마 → 버전 → origin/ref → verdict 일관성)에 어긋남. 원본·이벤트·invocation id 를 보존하고
 #                              재실행은 모델 0회로 같은 진단을 돌려준다(같은 프롬프트 재전송 금지). 검사기를 고쳤으면 저장된 출력을 로컬 재검증한다.
@@ -60,6 +66,8 @@ for prompt_file in reviewer.md fixer.md; do
   [ -f "$SKILL_DIR/prompts/$prompt_file" ] || { echo "[FAIL] 프롬프트 없음: $SKILL_DIR/prompts/$prompt_file" >&2; exit 1; }
 done
 git rev-parse --verify -q HEAD >/dev/null || { echo "[FAIL] HEAD 커밋 없음 — diff 기준선이 필요하다." >&2; exit 1; }
+[ -f "$SKILL_DIR/scripts/fast-check.sh" ] || { echo "[FAIL] 스크립트 없음: $SKILL_DIR/scripts/fast-check.sh (프로젝트 빠른 검사 연결) — install.sh 를 다시 실행해 스킬을 온전히 설치하라" >&2; exit 1; }
+source "$SKILL_DIR/scripts/fast-check.sh"
 
 # ---------- round/substep 단위 체크포인트 ----------
 # 러너의 run-state.json 은 stage(review) 까지만 기억한다. 리뷰어가 REQUEST_CHANGES 를 정상 출력한 뒤
@@ -102,6 +110,32 @@ if ! require_baseline_guard_resolved; then
   reset_review_checkpoint
   exit 2
 fi
+
+# ---------- 프로젝트 빠른 검사 게이트 (선택 — FAST_CHECK_CMD 미설정이면 생략 로그만) ----------
+# 리뷰어 호출(또는 저장된 리뷰 출력·승인 재사용) 직전에 한 번 부른다. 통과·미설정이면 돌아오고, 규칙 위반은 exit 5, 실행 오류는 exit 6 으로 끝낸다.
+# 리뷰 체크포인트는 건드리지 않는다 — 이 중단은 리뷰 결과가 아니므로 리뷰 JSON 을 만들지 않고, 수정자(리뷰 JSON 이 입력 계약이다)도 부르지 않는다.
+# 재실행은 같은 체크포인트로 돌아와 검사부터 다시 한다(코드가 바뀌었으면 기존 재개 규칙이 새 attempt Round 1 로 보낸다).
+# 실행 오류를 위반으로 보내지 않는다: 도구가 못 돈 것을 코드 수정으로 풀 수 없고, 검사가 코드를 바꿨으면 그 진단은 지금의 코드에 대한 것이 아니다.
+fast_check_gated=0
+fast_check_gate() { # label
+  local fc_rc=0
+  fast_check_gated=1
+  fast_check_run "$1" || fc_rc=$?
+  case "$fc_rc" in
+    0|10) return 0;;
+    20)
+      echo "[STOP] FAST_CHECK_VIOLATION: 프로젝트 빠른 검사가 규칙 위반을 보고함($1) — 리뷰어를 부르지 않았다. 진단 원본: $FAST_CHECK_LOG, 기록: $FAST_CHECK_RECORD" >&2
+      jq -n --arg label "$1" --arg log "$FAST_CHECK_LOG" --arg record "$FAST_CHECK_RECORD" --arg rc "$FAST_CHECK_EXIT_CODE" \
+        '{phase:"impl", status:"FAST_CHECK_VIOLATION", label:$label, log:$log, record:$record, exit_code:($rc|tonumber)}' > "$WORK_DIR/state.json"
+      exit 5;;
+    30)
+      echo "[STOP] FAST_CHECK_ERROR($FAST_CHECK_KIND): 프로젝트 빠른 검사를 끝까지 실행하지 못했다($1) — $FAST_CHECK_DETAIL. 성공·생략·규칙 위반 어느 것으로도 처리하지 않았고 리뷰어·수정자를 부르지 않았다. 로그: $FAST_CHECK_LOG, 기록: $FAST_CHECK_RECORD" >&2
+      jq -n --arg label "$1" --arg log "$FAST_CHECK_LOG" --arg record "$FAST_CHECK_RECORD" --arg rc "$FAST_CHECK_EXIT_CODE" --arg kind "$FAST_CHECK_KIND" --arg detail "$FAST_CHECK_DETAIL" \
+        '{phase:"impl", status:"FAST_CHECK_ERROR", kind:$kind, detail:$detail, label:$label, log:$log, record:$record, exit_code:($rc|tonumber)}' > "$WORK_DIR/state.json"
+      exit 6;;
+    *) echo "[FAIL] 프로젝트 빠른 검사 헬퍼 실패(스냅샷·기록 불가, rc $fc_rc) — 검사 결과를 알 수 없으므로 진행하지 않는다" >&2; exit 1;;
+  esac
+}
 
 # ---------- 리뷰어 출력 계약 위반 기록 (REVIEW_OUTPUT_INVALID) ----------
 # reviews/invalid-review.json: {version, active, status, attempt, round, review(원본 결과 JSON 경로), result_sha256, invocation_id, label, session_key,
@@ -297,6 +331,9 @@ if [ "$invalid_resume" = 0 ] && [ -f "$RESUME_STATE" ]; then
           fi
         fi
         if [ "$approve_ok" = 1 ]; then
+          # 승인 재사용도 "통과한 코드만 넘긴다"의 예외가 아니다 — 승인 뒤 검사 명령이 새로 설정됐거나 규칙 입력이 바뀌었을 수 있다(과거 PASS 를 캐시하지 않는다).
+          # 위반·오류면 여기서 끝난다(exit 5/6). 승인 체크포인트는 그대로 두지만 이 실행은 승인으로 끝나지 않고, 다음 실행도 이 검사를 다시 지난다.
+          fast_check_gate "approve-reuse attempt $ck_attempt round $ck_round"
           echo "=== 기존 승인 체크포인트 재사용 (attempt $ck_attempt round $ck_round, 작업 트리 변경 없음) ==="
           printf '%s\n' "$ck_wt_fp" | tee "$ck_dir/approved.fingerprint" > "$WORK_DIR/approved.fingerprint"
           jq -n --arg r "$ck_round" --arg a "$ck_attempt" '{phase:"impl", status:"APPROVE", rounds:($r|tonumber), attempt:($a|tonumber)}' > "$WORK_DIR/state.json"
@@ -330,6 +367,12 @@ if [ "$invalid_resume" = 0 ] && [ -f "$RESUME_STATE" ]; then
   else
     echo "[WARN] 리뷰 체크포인트 계약 버전 불일치 — 현재 계약으로 새 attempt 부터 리뷰"
   fi
+fi
+
+# 리뷰어 차례로 들어가는 실행: attempt 디렉터리를 만들기 전에 검사한다(위반으로 멈춘 재실행이 빈 attempt 디렉터리를 쌓지 않게).
+# 무효 출력 재개(invalid_resume)는 그 판정(저장된 출력을 쓸 수 있는가)이 먼저다 — 아래 재개 판정을 지난 뒤 루프 진입 직전에 검사한다.
+if [ "$invalid_resume" = 0 ] && [ "$next_step" = REVIEWER_PENDING ]; then
+  fast_check_gate "before-review round $round"
 fi
 
 # Phase 4 재진입마다 attempt 디렉터리를 새로 잡아 이전 승인·리뷰 증거를 보존한다 (체크포인트 재개 시엔 기존 attempt 유지)
@@ -435,6 +478,11 @@ if [ "$invalid_resume" = 1 ]; then
   echo "=== 저장된 리뷰 출력이 현재 검사기로 유효 (attempt $attempt round $round, 입력 동일) — 리뷰어를 다시 부르지 않고 그 출력을 그대로 처리한다 ==="
   reuse_review=1; next_step="REVIEWER_PENDING"
   [ -z "$prev_review" ] || prev_fingerprint_issues=$(jq -Sc '[.issues[] | {id, category, code_refs, required_outcome}] | sort_by(.id)' "$prev_review")
+fi
+
+# 저장된 리뷰 출력을 재사용하는 재개(리뷰어 0회)도 검사를 지난 코드에만 적용한다 — 위에서 이미 검사한 실행은 다시 하지 않는다
+if [ "$next_step" = REVIEWER_PENDING ] && [ "$fast_check_gated" = 0 ]; then
+  fast_check_gate "before-review round $round (stored output)"
 fi
 
 while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
@@ -656,6 +704,9 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   round=$((round + 1))
   next_step="REVIEWER_PENDING"
   save_review_checkpoint "$attempt" "$round" "$next_step" "$prev_review" "$prev_tree" "$(compute_fixer_resume_fingerprint)"
+  # 수정자가 바꾼 코드는 다음 리뷰어 호출 전에 빠른 검사를 다시 지난다. 체크포인트(다음 라운드 REVIEWER_PENDING)를 남긴 뒤에 검사하므로
+  # 위반으로 멈춰도 재실행이 수정자를 다시 부르지 않고 검사부터 한다.
+  fast_check_gate "after-fixer round $round"
   fi # FIXER_PENDING
 done
 

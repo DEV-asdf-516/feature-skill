@@ -10,6 +10,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id>
 
 러너가 Phase 0 에서 확정한 worktree 로 들어가 `preflight → design → impl → worker → review → verify → done`을 연결한다. worker 는 전체 feature 를 워커 한 번에 맡기지 않고 `implementation-units.json` 의 구현 단위를 순서대로 직렬 실행한다(아래 "구현 단위 직렬 실행")
 — unit 사이에는 review/verify 가 없고, 모든 unit 이 끝난 뒤 기존 전체 review(`impl-review-loop.sh`) 를 한 번, 이어서 verify(`TEST_CMD` → `LINT_CMD`, 실패하면 워커 수정 → 재리뷰) 를 기존과 같은 의미로 수행한다. 복잡도·중복·dead code 분석은 프로젝트가 `LINT_CMD`에 구성한다
+— 프로젝트가 `FAST_CHECK_CMD`(선택)를 설정했으면 리뷰어를 부르기 직전마다 그 빠른 검사를 먼저 돌린다(계약·실행 시점·결과 처리는 `references/pipeline-contracts.md` 의 "프로젝트 빠른 검사", 미설정이면 생략 로그만 남는다)
 — 스킬은 언어 독립이라 자체 코드 검사를 갖지 않고, 커버리지 % 게이트도 두지 않는다(숫자 채우기 테스트 유발). 실시간 로그 창(`feature-live`)은 러너가 연다 — **오케스트레이터는 `feature-live` 를 직접 실행하지 않는다.** 러너가 `.agent-work/.feature-live.lock/viewer.pid` 의 PID 생존으로 이미 열려 있는지 확인하고 절대 경로로 새 터미널을 연다.
 열려 있는지 궁금하면 그 pid 파일만 본다(`kill -0 "$(cat .agent-work/.feature-live.lock/viewer.pid)"`). 사람이 수동으로 열 때만 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"` 를 쓴다(피처 worktree 에는 `feature-live` 가 gitignore 되지 않은 경우에만 snapshot 으로 복사된다
 — 없으면 원본 저장소 루트의 파일을 worktree 로 `cd` 한 뒤 절대 경로로 실행한다). 진행은 피처 worktree 의 `.agent-work/live.log`와 `run-state.json`으로 관찰한다. **종료 코드로만 다음 행동을 정한다.**
@@ -74,6 +75,31 @@ gap 과 무관한 절은 이 경로에서 고치지 않는다. 재실행은 검�
 ### `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` — exit 2 `NEED_USER`
 
 로그(`reviews/verify-*.log`)와 상황을 정리해 사용자 보고 후 멈춘다
+
+### `FAST_CHECK_RETRIES_EXHAUSTED` — exit 2 `NEED_USER`
+
+프로젝트 빠른 검사(`config.sh` 의 `FAST_CHECK_CMD`, 계약은 `references/pipeline-contracts.md` 의 "프로젝트 빠른 검사")가 규칙 위반(exit 1)을 보고했고, 워커 자동 수정 한도(`MAX_TEST_RETRIES`, 피처 누적 — 끝난 수정 턴만 센다) 뒤에도 위반이 남았다.
+리뷰어는 호출되지 않았고(위반이 남은 코드는 리뷰로 가지 않는다) 승인도 없다. 추가 자동 수정은 없다.
+
+- 진단: detail 의 `fast-check/check-NNNN.log`(검사 명령 출력 원본 — 규칙·파일·위치·내용), `fast-check/last.json`(명령·cwd·종료 코드·실행 시간·tree), `fast-check/history.jsonl`(이전 실행 전부), 워커 수정 결과 `check-fix-NN-result.json`.
+- 사용자에게 진단을 그대로 보고한다. 복구는 사용자가 정한다: ① 위반을 feature-scope 범위 안에서 직접 고친다 ② 규칙이나 검사 명령이 틀렸으면 프로젝트의 검사 쪽을 고친다 ③ 규칙이 합의 문서·conventions 와 충돌하면 어느 쪽이 맞는지 정한다(문서를 바꾸면 기존 합의 규칙대로 재합의).
+- 그 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다 — 통과해야 리뷰로 가고, 여전히 위반이면 모델 호출 0회로 같은 사유로 멈춘다.
+- 하지 않는 것: `run-state.json` 의 `fast_check_retries`·stage 수정, `fast-check/`·리뷰 체크포인트 삭제, 사용자 지시 없이 `FAST_CHECK_CMD` 를 비우기, 억제 주석으로 위반 숨기기.
+
+워커 수정(`worker-check-fix.md`)이 낸 미결정은 이 reason 이 아니라 `UNDECIDED`, 범위 밖 수정은 `SCOPE_VIOLATION` 으로 온다(기존 절 그대로).
+수정 턴이 도중에 중단됐거나 게이트에서 멈춘 뒤의 재실행은 러너가 `check-fix.pending.json` 으로 먼저 판정한다(모델·검사 호출 0회): 범위 밖 변경이 남아 있으면 다시 `SCOPE_VIOLATION`, 완료를 확인할 수 없는데 코드가 바뀌었으면 `WORKER_OUTCOME_UNCERTAIN` — 호출 전 tree(`check-fix-NN-before.tree`)로 되돌리거나 범위 밖 변경을 정리하는 것은 사용자가 한다. 그 턴이 미결정을 돌려줬는데 `doc-gap-resume.json` 이 남기 전에 중단됐으면 러너가 결과 JSON 에서 미결정을 다시 기록해 `UNDECIDED` 로 멈춘다(작업 트리가 그 턴의 호출 후 tree `check-fix-NN-after.tree` 와 다르면 기록하지 않고 `WORKER_OUTCOME_UNCERTAIN` — 그 tree 로 되돌린 뒤 재실행). 끝난 턴을 다시 확정해도 한도는 한 번만 센다. 사용자 결정 뒤 재실행은 검사 → 남은 한도 안의 수정 → 재검사 → 리뷰 순서다.
+
+### `FAST_CHECK_ERROR` — exit 2 `NEED_USER`
+
+프로젝트 빠른 검사를 끝까지 실행하지 못했다. 통과·생략·규칙 위반 어느 것도 아니다 — 리뷰어·수정자·워커를 부르지 않았고 자동 코드 수정도 없다(도구가 못 돈 것은 코드 수정으로 풀리지 않는다). detail 의 kind 로 원인을 구분한다.
+
+- `COMMAND_NOT_RUNNABLE`(exit 126/127): 도구 누락·경로 오류·실행 권한 없음. 명령은 피처 worktree 루트에서 실행된다 — 상대 경로의 스크립트가 worktree 에 있는지(커밋됐는지) 확인.
+- `TIMEOUT`: `FAST_CHECK_TIMEOUT_SEC`(기본 120초) 초과로 종료시켰다. 검사 범위를 줄이거나(`FAST_CHECK_CHANGED_FILES`) 제한을 조정.
+- `UNEXPECTED_EXIT`: 0(정상)·1(위반) 이외의 종료 코드. `NO_DIAGNOSTICS`: exit 1 인데 출력이 비어 있어 고칠 대상을 알 수 없다. 둘 다 프로젝트 어댑터가 종료 코드 계약을 따르게 고친다.
+- `INVALID_CONFIG`: `FAST_CHECK_TIMEOUT_SEC` 가 양의 정수가 아니다(명령은 실행되지 않았다).
+- `WORKTREE_MODIFIED` / `INDEX_MODIFIED`: 검사가 읽기 전용 계약을 어기고 파일이나 git index 를 바꿨다(자동 수정·포매팅·`git add`). 변경은 **원복하지 않고 그대로** 있다 — `fast-check/last.json` 의 `modified_paths`·`out_of_scope_paths` 를 보고하고, 되돌릴지 유지할지는 사용자가 정한다(자동 원복 금지). 명령에서 자동 수정을 뺀다.
+
+원인을 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다(고치지 않은 재실행은 모델 호출 0회로 같은 사유). 검사가 바꾼 코드를 유지하면 그 코드는 재검사·재리뷰를 지난다 — 이전 승인은 지문이 달라 재사용되지 않는다. `FAST_CHECK_CMD` 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만 한다.
 
 ### `REVIEW_OUTPUT_INVALID` — exit 2 `NEED_USER`
 
@@ -144,6 +170,7 @@ unit 의 `targeted_test` 가 `MAX_TEST_RETRIES` 회 수정 뒤에도 실패. `un
 `cli-anomalies.jsonl` 에 append, `usage.jsonl` 의 raw exit_code/success 는 그대로). **review-gap 워커 재개에서도 같은 사유를 쓴다**(가드 파일 없이 `doc-gap-resume.json` 의 `worker_run` 으로 판정, 모델 0회):
 기록된 실행의 식별자가 지금의 리뷰 내용·미결정·사용자 결정·계약과 다르거나, 시작만 기록됐는데(STARTED) 결과 파일이 시작 기록 당시와 다른 내용으로 남아 있거나(유효한 JSON 인지와 무관 — CLI 가 실제로 돌았다, 게이트·세션 수용 완료 여부 불명. 빈 파일·파일 없음은 결과가 아니므로 tree 가 그대로면 워커부터 다시 돈다), 완료 기록(DONE)의 결과 파일이 기록 당시와 다르다.
 **리뷰 대기(REVIEW_PENDING) 재개도 같은 증명을 요구한다** — `worker_run` 이 없거나 DONE 이 아니거나, 식별자·결과 파일 해시가 완료 기록과 다르면 리뷰로 들어가지 않는다(이 검증 이전에 만들어진 `worker_run` 없는 REVIEW_PENDING 체크포인트도 여기에 해당한다).
+**빠른 검사 수정 턴(check-fix) 재개에서도 같은 사유를 쓴다**(`check-fix.pending.json`, 모델 0회): 그 턴이 CLI 호출 중에 중단돼 호출 후 tree 기록이 없거나 유효한 결과 JSON 이 없는데 작업 트리가 호출 전 tree 와 다르다. 변경을 확인하고 호출 전 tree 로 명시적으로 되돌린 뒤 재실행하면 검사부터 다시 돈다.
 이때는 결과를 재사용하지도 워커를 자동 재호출하지도 않는다 — 사용자가 작업 트리와 `review-gap-result.json` 을 확인한 뒤, 그 호출을 버리고 새 리뷰부터 다시 하려면 `doc-gap-resume.json` 을 치우고 재실행한다(체크포인트를 손으로 고치지 않는다)
 
 ### `DOC_GAP_SCOPE_EXCEEDED` — exit 2 `NEED_USER`

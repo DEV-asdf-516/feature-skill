@@ -29,7 +29,7 @@ flowchart TD
     P1["설계 합의 (러너)\n검증자 검토 ↔ 디자이너 ACCEPT/REJECT\nPASS + blocking 0건까지"] --> P15
     P15["구현 문서 (러너가 NEED_DOCS 반환)\n오케스트레이터가 implementation.md(무엇)\n+ approach.md(어떻게, REQUIRED/DELEGATED)\n+ implementation-units.json(기능 단위 분할) 작성\n→ 검증자와 같은 루프로 합의"] --> P2
     P2["구현 (러너) — 구현 단위 직렬 실행\nFeature 당 단일 Worker 세션(--session-id → --resume)이 unit 턴을 이어 감\nunit 턴마다: 구현(material contract 는 그대로, local expression 은 워커가 선택)\n→ targeted test(실패 시 같은 세션에 unit 범위 수정→재테스트)\nunit 별 리뷰 없음. Unit N 완료 전에는 N+1 시작 안 함. 병렬 없음. 다음 unit 시작 권한은 러너만"] --> P3
-    P3["리뷰 수렴 (러너)\n리뷰어 게이트(읽기 전용) → 수정자는 FIX_CODE 만\nRound 2 는 종결 검토. APPROVE + 이슈 0건까지"] --> P4
+    P3["리뷰 수렴 (러너)\n리뷰어 게이트(읽기 전용) → 수정자는 FIX_CODE 만\nRound 2 는 종결 검토. APPROVE + 이슈 0건까지\n(선택) FAST_CHECK_CMD 설정 시 리뷰어 호출 직전마다 프로젝트 빠른 검사\n위반이면 리뷰어 0회 → 워커 수정 → 재검사"] --> P4
     P3 -.DOC_GAP → 사용자 결정 → review-gap 워커 → 리뷰.-> ESC
     P4["최종 검증 (러너)\n승인 지문 → TEST_CMD/LINT_CMD → 지문 재확인"] -->|통과| DONE["DONE → 오케스트레이터 보고\n(커밋은 사용자 지시 시 수정자에게 위임)"]
     P4 -->|실패| P2R["워커 1회 수정 → 재리뷰\n(MAX_TEST_RETRIES 회)"] --> P3
@@ -86,6 +86,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 | 2 | `NEED_USER` | `UNDECIDED`(워커 DOC_GAP/USER_DECISION) / `REVIEW_DOC_GAP`(리뷰어 DOC_GAP) / `DOC_GAP_SOURCE_CHANGED` / `DOC_GAP_SCOPE_EXCEEDED` / `DOC_GAP_LOCATION_UNRESOLVED`: 구현 중 드러난 미결정 solution shape — 사용자 결정이 최종. gap 해결이 그 gap 과 연결되지 않은 unit 의 계약을 바꿨는지는 **지문을 고정하기 전에** 검사하므로, 멈춘 뒤 절을 되돌리거나 gap tag 를 보완하면 같은 체크포인트로 재실행된다. 답을 `decisions.md` 에 `[USER-QUESTION][scope=impl][review-issue=<id>|worker-gap=<key>]` 태그로 기록하고 approach.md 에 동기화하면 검증자·디자이너·impl 재합의 없이 워커 → 리뷰로 이어진다(`doc-gap-resume.json`) |
 | 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS`(design·impl 합의): 사용자 결정이 최종. 마지막 리뷰의 **모든 blocker** 에 `- [USER-QUESTION][scope=design\|impl][escalation=<blocker id>] <쟁점> → <답>` 을 `decisions.md` 에 추가하고 결정 내용을 그 단계 문서에 반영한 뒤 재실행하면 그 단계 검증자·디자이너 호출 0회로 다음 단계(design → impl, impl → worker)로 간다(`user-escalation-resume-<target>.json`, `USER_RESOLVED` — 검증자 PASS 아님). 답이 없거나 일부만 있으면 모델 0회로 다시 멈춘다 |
 | 2 | `NEED_USER` | `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
+| 2 | `NEED_USER` | `FAST_CHECK_RETRIES_EXHAUSTED`(프로젝트 빠른 검사의 규칙 위반이 워커 자동 수정 한도 뒤에도 남음 — 리뷰어 0회, 직접 고친 뒤 재실행하면 검사부터) / `FAST_CHECK_ERROR`(검사 실행 오류: 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반 — 자동 수정 없음). 아래 "프로젝트 빠른 검사" |
 | 2 | `NEED_USER` | `REVIEW_OUTPUT_INVALID`: 리뷰어 출력이 계약(스키마 → 버전 → origin/`fix_ref` → verdict 일관성)에 어긋남 — 승인도 수정 요청도 아니고 수정자는 호출되지 않는다. 원본·진단·입력 지문은 `reviews/invalid-review.json`. 그대로 재실행하면 리뷰어 0회로 같은 진단, 새 리뷰는 `--new-review-attempt` 로만 |
 | 2 | `NEED_USER` | `UNIT_CONTRACT_IMPACT_REQUIRED`(전역 입력 변경·스냅샷 없는 과거 unit·해석 불가 references — `unit-contract-impact.json` 으로 영향 unit 확정. 확정 파일은 러너가 내준 `target_fingerprint`(판단 당시 계약 지문)를 들고, 확정 뒤 계약이 또 바뀌면 적용되지 않고 다시 멈춘다) / `UNIT_CONTRACT_STALE`(완료 확정·review/verify/DONE 진입 직전에 계약 변경이 드러남 — 재실행하면 stale unit 부터 변경 계약으로 다시 돈다) |
 | 1 | `ENV_ERROR` | CLI·환경 오류(결과 JSON 자체가 없는 CLI 실패 포함 — codex resume 이면 marker 가 남아 다음 실행도 모델 0회로 멈춘다) |
@@ -93,7 +94,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 `DONE` 뒤 별도 명령 `--feature <id> --finalize`(사용자 승인 뒤에만, 아래 "사용")의 종료 코드는 0 `FINALIZED`(또는 already finalized) / 2 `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE`(사용자 확인) / 1 거부·오류(원본·worktree 불변) 다.
 
 재실행은 항상 같은 명령. 러너는 `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물과 교차 확인해 재개 지점을 고른다. 대조하는 산출물은 합의 PASS 파일(또는 합의 에스컬레이션의 유효한 사용자 수리 `user-escalation-resume-<target>.json`), `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint` 다.
-러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째와 같은 형태·같은 한도다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
+러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)와 리뷰 전 프로젝트 빠른 검사의 (규칙 위반 → 워커 수정 → 재검사 → 리뷰)는 두 번째와 같은 형태·같은 한도다(빠른 검사의 실행 오류는 자동 수정으로 보내지 않는다). 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
 
 ### 구현 단위(implementation unit) 직렬 실행
 
@@ -157,13 +158,14 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
     │   ├── done-finalize.md         # DONE 보고·finalize 승인/실행·커밋 경계
     │   └── pipeline-contracts.md    # 구현 단위 직렬 실행·강제 규칙(역할 경계)·변경 소유권·세션/사용량 기록
     ├── config.sh                # 모델/effort/라운드 한도/프로젝트 명령 + 가드 + 헬퍼
-    ├── prompts/                 # 역할별 페르소나 템플릿 (10개, envsubst 변수 치환 — unit 워커·unit 테스트 수정 포함)
+    ├── prompts/                 # 역할별 페르소나 템플릿 (envsubst 변수 치환 — unit 워커·unit 테스트 수정·빠른 검사 위반 수정 포함)
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
     └── scripts/
         ├── feature-run.sh       # 러너 — 단계 연결·재개 지점·종료 코드 (--feature <id> 로 전용 worktree 확정)
         ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩(dirty 원본을 snapshot tree 로 materialize, 재실행 재사용) + finalize(B/O/F 3-way 무커밋 반영·archive·정리)
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
-        ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지
+        ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지 (리뷰어 호출 직전 프로젝트 빠른 검사 게이트)
+        ├── fast-check.sh        # 프로젝트 빠른 검사 연결(선택, FAST_CHECK_CMD) — worktree 루트 실행·타임아웃·결과 구분(통과/위반/실행 오류)·읽기 전용 확인·실행 기록
         └── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
 
 tests/
@@ -172,6 +174,7 @@ tests/
 ├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩·finalize 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건·3-way 반영·충돌·archive·정리
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── smoke-worker-regression.sh  # worker-regression 하네스 회귀 — 가짜 워커로 DONE=exit 0 / DOC_GAP=exit 2 + 체크포인트가 production 이 인정하는 impl PASS 위에 생김 · provenance 가드 불변 · usage summary v3 (LLM 호출 없음)
+├── smoke-fast-check.sh          # 프로젝트 빠른 검사 연결 회귀 — fixture 프로젝트의 정상·위반·실행 오류 명령: 미설정 생략·리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지 (mock)
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 39개 (문서·src·expected.json)
@@ -236,6 +239,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    FIXER_EFFORT="<지원 effort>"
    TEST_CMD="<프로젝트 테스트 명령>"    # 예: "npm test", "./gradlew test", "venv/bin/pytest tests -q"
    LINT_CMD="<프로젝트 린트/빌드 검증 명령>"   # 복잡도·중복·dead code 분석기도 여기에 구성(eslint/sonar, radon, detekt, knip, jscpd…)
+   FAST_CHECK_CMD=""                      # (선택) 리뷰 전 프로젝트 빠른 검사 명령. 빈 값 = 미설정(생략) — 아래 "프로젝트 빠른 검사"
    ```
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
    빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 모든 스크립트 실행을 거부한다.
@@ -269,6 +273,52 @@ finalize 는 `HEAD` 대비 diff 를 붙이지 않는다. worktree 생성 시 원
 ```
 
 파이프라인 시작 전에 켜도 `live.log` 생성을 기다렸다가 자동으로 스트리밍을 시작한다.
+
+### 프로젝트 빠른 검사 (선택)
+
+프로젝트가 빠른 컨벤션 검사 명령을 갖고 있으면 LLM 구현 리뷰어를 부르기 전에 그 명령을 먼저 돌려, 명백한 위반에 리뷰 호출을 쓰지 않게 할 수 있다. 스킬은 명령을 연결하고 결과를 구분할 뿐이다 — 어떤 도구로 무엇을 검사할지는 프로젝트가 정한다(특정 언어·도구·규칙 파일 형식을 요구하지 않는다). 전체 계약은 `references/pipeline-contracts.md` 의 "프로젝트 빠른 검사".
+
+**설정** — `.claude/skills/feature/config.sh` 의 사용자 설정 영역. 설정하지 않으면(빈 값이거나 줄이 없는 기존 config.sh) 종전 흐름 그대로이고 로그에 `[fast-check] 생략(…): FAST_CHECK_CMD 미설정` 만 남는다.
+
+```bash
+FAST_CHECK_CMD="scripts/convention-check.sh"   # 피처 worktree 루트에서 bash -c 로 실행된다
+FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초). 넘으면 실행 오류
+```
+
+**명령 계약**
+
+| 항목 | 내용 |
+|---|---|
+| 실행 위치 | 피처 worktree 루트(원본 저장소가 아니다). 검사 스크립트는 저장소에 커밋돼 있어야 worktree 에 존재한다 |
+| 종료 코드 | `0` 정상 / `1` 규칙 위반 / 그 외·타임아웃 = 실행 오류 |
+| 진단 | 위반이면 규칙·파일·위치·내용을 stdout/stderr 로(형식 자유 — 워커가 원본을 그대로 읽는다). exit 1 인데 출력이 없으면 실행 오류 |
+| 읽기 전용 | 자동 수정·포매팅·파일 생성/삭제·`git add` 금지. 실행 전후 작업 트리와 git index 를 비교해 달라졌으면 실행 오류(변경은 원복하지 않고 보존) |
+| 환경 변수 | `FAST_CHECK_ROOT`(worktree 루트), `FAST_CHECK_CHANGED_FILES`(이번 피처가 바꾼 파일 목록 파일 — 변경 파일만 검사할 때. 경로는 인용 없는 실제 문자열, 한글 포함 그대로) |
+| 타임아웃 | 명령은 자기 프로세스 그룹에서 돌고, 제한을 넘기면 그룹 전체를 TERM → KILL 로 정리한 뒤 실행 오류로 처리한다 |
+
+기존 도구의 종료 코드가 이 계약과 다르면 프로젝트에 얇은 어댑터 스크립트를 둔다. 예(도구가 위반을 2, 내부 오류를 다른 값으로 알리는 경우):
+
+```bash
+#!/usr/bin/env bash
+# scripts/convention-check.sh — 변경 파일만 검사하고 종료 코드를 0/1/그 외로 옮긴다
+files="$(grep -E '\.(ts|tsx)$' "$FAST_CHECK_CHANGED_FILES" || true)"
+[ -n "$files" ] || exit 0                      # 검사 대상 없음 = 정상
+printf '%s\n' "$files" | xargs my-linter --no-fix   # 자동 수정 옵션은 끈다(읽기 전용)
+case $? in 0) exit 0;; 2) exit 1;; *) exit 3;; esac
+```
+
+**실행 시점** — 리뷰어를 부르기 직전마다 한 번: 모든 구현 단위가 끝난 뒤 첫 리뷰 전, 수정자(Fixer) 뒤 다음 리뷰 전, 다른 수정 경로(verify 실패의 워커 수정·review-gap 워커)에서 리뷰로 돌아올 때, 재개 시, 그리고 기존 승인을 재사용하기 전. unit 마다 돌지 않으며 unit 의 targeted test 와 최종 `TEST_CMD`/`LINT_CMD` 는 그대로다. 과거 통과 기록으로 검사를 건너뛰지 않는다(성공 캐시 없음).
+
+**결과와 복구**
+
+- 통과 → 리뷰어 호출.
+- 규칙 위반 → 리뷰어를 부르지 않고, Feature Worker 세션의 수정 턴 1회(진단 로그 전달) → 재검사 → 통과한 코드만 리뷰. 한도는 `MAX_TEST_RETRIES`(피처 누적, verify 재시도와 따로). 소진되면 `NEED_USER(FAST_CHECK_RETRIES_EXHAUSTED)` — 진단(`.agent-work/fast-check/check-NNNN.log`)을 보고 직접 고치거나 검사 쪽을 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다.
+- 실행 오류(도구 누락·타임아웃·계약 밖 종료 코드·읽기 전용 위반) → 자동 수정 없이 `NEED_USER(FAST_CHECK_ERROR)`. 원인을 고치고 같은 명령으로 재실행.
+- 워커 수정이 범위 밖을 건드리면 `SCOPE_VIOLATION`, 규칙이 합의 문서·conventions 와 충돌하거나 모호하면 `UNDECIDED`(사용자 결정) — 기존 경로 그대로다.
+- 수정 턴이 도중에 끊겼거나(러너 강제 종료) 범위 위반으로 멈춘 뒤 그대로 재실행하면, 검사·모델 호출 전에 그 턴부터 판정한다 — 범위 밖 변경이 남아 있으면 다시 `SCOPE_VIOLATION`, 완료를 확인할 수 없는데 코드가 바뀌었으면 `WORKER_OUTCOME_UNCERTAIN`(호출 전 tree 로 되돌린 뒤 재실행), 미결정이 기록되기 전에 끊겼으면 그 질문을 다시 기록해 `UNDECIDED`. 끝난 수정 턴은 재실행으로 다시 확정돼도 한도를 한 번만 쓴다.
+- 실패 상태에서는 승인이 생기지 않으므로 verify·DONE·finalize 로 넘어갈 수 없다. 체크포인트나 `run-state.json` 을 지우거나 고쳐서 넘기지 않는다.
+
+진행 중인 피처가 있을 때 검사를 새로 켜거나 끄지 않는다(워커 세션 계약에 포함되어 다음 워커 호출이 `WORKER_SESSION_MISMATCH` 로 멈춘다). 실제 규칙 선정과 프로젝트 쪽 검사 스크립트 작성은 프로젝트의 몫이다.
 
 ### ntfy 완료 푸시 알림 (선택)
 
@@ -304,6 +354,7 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `units/<id>/` | unit 별 체크포인트: `unit.json`·`scope.json`·`before.tree`·`worker-before/after.tree`·`worker-result.json`·`targeted-test-NN.log`·`done.json`(version 2: `spec_hash` + `unit_contract_fingerprint`) · `contract/`(유효 계약 스냅샷: `baseline/`·`first/`·`history/`·`contract.json`) · `worker-contract.json`(마지막 워커 턴이 받은 계약 지문) · `changed-contract.diff`(재개 턴에 준 실제 diff) |
 | `unit-contract-impact.json` | 사용자가 쓰는 영향 확정 `{version:2, target_fingerprint, affected_units, unaffected_units}` — `target_fingerprint` 는 판단 당시 확정 대상 계약의 지문이고 적용 직전에 현재 값과 다시 대조한다. 러너가 적용 후 `unit-contract-impact.used.<시각>.json` 으로 옮긴다 |
 | `unit-contract-impact.request.json` | 러너가 쓰는 확정 요청: 현재 `target_fingerprint` 와 대상 unit 별 상태·local/전역 계약 지문(적용되면 `.request.used.<시각>.json`) |
+| `fast-check/` | 프로젝트 빠른 검사 실행 기록(설정했을 때만): `check-NNNN.log`(명령 출력 원본)·`check-NNNN.changed-files.txt`·`last.json`/`history.jsonl`(status PASS/VIOLATION/ERROR·kind·cmd·cwd·exit_code·duration_sec·tree 전후·modified_paths). 워커 수정 턴 결과는 `check-fix-NN-result.json` |
 | `reviews/invalid-review.json` | 리뷰어 출력 계약 위반 기록(`REVIEW_OUTPUT_INVALID`): attempt/round·원본 경로·결과 SHA256·invocation id·리뷰 입력 지문(작업 트리·범위·직전 리뷰·conventions + 계약 문서 request/design/implementation/approach/decisions 내용 해시)·검사기 버전·위반 배열. 재검증으로 수용될 때는 세션 확정과 체크포인트 전환이 끝난 뒤에만 `REVALIDATED` 로 닫힌다 |
 | `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
 | `worker-baseline.tree` | 워커 진입 직전 작업 트리의 git tree SHA. 리뷰 diff 와 `new_file_roots` 소유권 판정의 시점 기준선(변경 소유권 증거가 아니며 원복 근거로 쓰지 않는다) |
@@ -367,6 +418,7 @@ bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted
 bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지문·stage 회귀·DECISION_SCOPE_REQUIRED. LLM 호출 없음
 bash tests/smoke-user-escalation-resume.sh # 합의 에스컬레이션(ASK_USER/DEADLOCK/MAX_ROUNDS) 사용자 결정 뒤 검증자·디자이너 0회로 다음 단계, 미답·잘못된 답·stale provenance 차단, DOC_GAP 체인. LLM 호출 없음
 bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 워커 DONE/DOC_GAP 종료 코드·impl PASS provenance 전제·usage summary. LLM 호출 없음
+bash tests/smoke-fast-check.sh            # 프로젝트 빠른 검사 연결: 미설정 생략·첫 검사/수정자 뒤 위반 시 리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도 소진·실행 오류·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지·혼합 설치·한글 경로·TERM 무시 자식 정리·수정 턴 중단 뒤 재실행·미결정 복구·확정 멱등. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
 bash tests/smoke-codex-usage.sh           # codex usage/비용: turn 합산·가격표(astra 단문/장문, 캐시 쓰기 별도율·12h-only TTL 근거, 가정 기록)·깨진 줄/usage:{} → unknown(과소 집계 없음)·DONE 비용 보고 일치. LLM 호출 없음
@@ -395,6 +447,8 @@ bash tests/worker-regression.sh      # 워커 material-contract 충실도. 사�
 - **`[FAIL] 근거·연계 필드가 빠지거나 어긋난 blocker`**: 검증자가 스키마는 맞췄지만 증거 유형·action·Round 2 origin 규칙을 어긴 것. 재실행하면 되고 반복되면 `tests/validator-regression.sh`로 프롬프트 회귀를 본다.
 - **검증 라운드가 다시 돎**: `VALIDATOR_CONTRACT_VERSION`이 올라가 이전 PASS가 무효화된 것. 정상이며 `--new`는 쓰지 않는다(decisions.md가 비워진다).
 - **`NEED_USER(DECISION_SCOPE_REQUIRED)`**: `decisions.md`에 scope 없는 `- [USER-QUESTION] …` 줄이 있다. detail 의 행번호를 보고 `[USER-QUESTION][scope=design]` 또는 `[USER-QUESTION][scope=impl]` 로 고친 뒤 재실행(LLM 은 호출되지 않았다).
+- **`NEED_USER(FAST_CHECK_RETRIES_EXHAUSTED)`**: 프로젝트 빠른 검사의 위반이 워커 자동 수정 뒤에도 남았다(리뷰어는 호출되지 않았다). detail 의 `fast-check/check-NNNN.log` 를 보고 범위 안에서 직접 고치거나, 규칙·검사 명령이 틀렸으면 그쪽을 고친 뒤 같은 명령으로 재실행한다.
+- **`NEED_USER(FAST_CHECK_ERROR)`**: 검사를 끝까지 실행하지 못했다. detail 의 kind 를 본다 — `COMMAND_NOT_RUNNABLE`(도구·경로·권한: 명령은 피처 worktree 루트에서 돈다) / `TIMEOUT`(`FAST_CHECK_TIMEOUT_SEC`) / `UNEXPECTED_EXIT`·`NO_DIAGNOSTICS`(종료 코드 계약 0/1/그 외 — 어댑터 수정) / `WORKTREE_MODIFIED`·`INDEX_MODIFIED`(검사가 파일·index 를 바꿈 — 원복되지 않았으니 `fast-check/last.json` 의 `modified_paths` 확인 후 명령에서 자동 수정을 뺀다).
 - **리뷰 단계 중단은 세 가지 서로 다른 상태다** — 섞어서 "재실행하면 된다"로 처리하지 않는다:
   - **`NEED_USER(REVIEW_OUTPUT_INVALID)` — 형식 오류(반복 호출 금지)**: 리뷰어가 JSON 은 돌려줬지만 출력 계약에 어긋났다(증거 유형·action 필드, Round 2 `origin`/`previous_issue_id`/`fix_ref`, verdict 와 issues 모순, `schema_version` 불일치 — 업데이트 후 `REVIEWER_CONTRACT_VERSION` 미병합 포함). `reviews/invalid-review.json` 의 `errors[]`(`rule_id` 예: `INVALID_FIX_REF`)를 본다. **재실행해도 리뷰어는 호출되지 않고 같은 진단이 나온다.** 검사기 버그였으면 고친 뒤 재실행하면 저장된 출력을 로컬 재검증한다(입력·계약이 같을 때만, 모델 0회). 새 리뷰가 필요하면 `--new-review-attempt`(새 attempt Round 1, 새 세션 — `--new` 아님). 반복되면 `tests/reviewer-regression.sh`로 프롬프트 회귀를 본다.
   - **`ENV_ERROR` — CLI 결과 불확실(기존 resume marker 유지)**: 결과 JSON 자체가 없다(CLI 실패·중단). codex resume 호출이었으면 `.session-<key>.resume-pending.json` 이 남아 다음 실행이 `SESSION_RESUME_UNCERTAIN` 으로 모델 0회 중단한다 — 이벤트 로그로 중복 전송 여부를 확인한 사람이 marker 를 치운다. 러너는 지우지 않는다.

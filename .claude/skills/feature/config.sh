@@ -128,6 +128,17 @@ LINT_CMD="CHANGE_ME"
 # 복잡도·중복·dead code 같은 정적 분석은 LINT_CMD 안에 프로젝트 도구로 구성한다(eslint/sonar, radon, detekt, clippy, knip, jscpd…).
 # 스킬은 언어 독립이므로 자체 코드 검사를 갖지 않는다. 커버리지 % 임계치도 두지 않는다 — 숫자 채우기용 테스트를 유발한다.
 
+# --- 프로젝트 빠른 검사 (선택) ---
+# LLM 구현 리뷰어를 부르기 직전마다(첫 리뷰 전·수정자 뒤·재개·승인 재사용 전) 피처 worktree 루트에서 실행하는 결정론적 컨벤션 검사 명령.
+# 명백한 위반에 리뷰 호출을 쓰지 않기 위한 것이고 TEST_CMD/LINT_CMD(리뷰 승인 뒤 전체 검증)를 대신하지 않는다 — 수 초~수십 초 안에 끝나는 검사만 둔다.
+# 비어 있으면(또는 이 줄이 없는 기존 config.sh 면) 미설정 = 검사를 실행하지 않고 "생략" 으로만 로그에 남긴다.
+# 계약: exit 0 = 정상, exit 1 = 규칙 위반(진단을 stdout/stderr 로 — 규칙·파일·위치·내용), 그 외·타임아웃 = 실행 오류. 읽기 전용(자동 수정·포매팅·git add 금지 — 실행 전후를 비교한다).
+#       FAST_CHECK_CHANGED_FILES(이번 피처가 바꾼 파일 목록 파일 경로)·FAST_CHECK_ROOT 환경 변수를 준다. 기존 도구의 종료 코드가 다르면 프로젝트의 얇은 어댑터 스크립트로 맞춘다.
+# 예: FAST_CHECK_CMD="scripts/convention-check.sh"   (상세: README '프로젝트 빠른 검사', references/pipeline-contracts.md)
+# 진행 중인 피처가 있을 때 켜거나 끄지 않는다(워커 세션 계약에 포함된다 — WORKER_SESSION_MISMATCH).
+FAST_CHECK_CMD=""
+FAST_CHECK_TIMEOUT_SEC=120   # 제한 시간(초, 양의 정수). 넘으면 실행 오류(FAST_CHECK_ERROR/TIMEOUT)
+
 # --- ntfy 완료 푸시 알림 (선택) ---
 # DONE(리뷰 승인 + 테스트·린트 통과, FINALIZED 아님) 기록 직후 1회 발송한다(scripts/notify-done.sh 의 notify_feature_done).
 # OS 독립 — curl HTTP 호출 하나뿐이고 uname/OS 분기가 없다. 미설정이면 로그만 남기고 생략하며,

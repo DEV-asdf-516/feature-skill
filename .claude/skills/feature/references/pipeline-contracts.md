@@ -61,6 +61,58 @@ unit 마다 CLI 를 다시 부르는 것은 러너이고(Feature 당 프로세�
 테스트부터 재개 / 세션 전제(모델·세션 파일) 불일치 → `WORKER_SESSION_MISMATCH`(모델 0회), 복구 후에만 같은 세션 재개 / 예전 fresh-워커 잔존 → `WORKER_SESSION_MISSING`(묵시적 마이그레이션 금지, `worker-session.migrate` 후에만 새 세션) / 임계치 도달 시 unit 경계에서만 세션 교체(handoff 스키마·tree 검증, 변조 시 fresh 거부) / codex 워커도 세션 1 thread(thread_id 는
 원장에만, 저널은 `session_bound` — 원장 소실·결속 불일치 fail-closed) / rolling context(01 fact → 02 프롬프트, 실패 unit 미확정, fix 정정 반영, 같은 키 replace, remove 미전달, 재개 시 전달, 무효 체크포인트 미재사용, 추가 모델 호출 0회) / 앞 unit 무효화 + 뒤 unit 완료 → `UNIT_CHECKPOINT_CHAIN_STALE`(워커 0회, 원복 없음).
 
+## 프로젝트 빠른 검사 (선택 — 리뷰 전 결정론적 검사)
+
+적용 프로젝트가 제공한 빠른 컨벤션 검사 명령을 LLM 구현 리뷰어 호출 전에 실행해, 명백한 위반에 리뷰 호출을 쓰지 않게 한다. 하네스는 명령 연결·결과 구분·증거 보존·실패 처리만 한다 — 어떤 도구로 무엇을 검사할지는 프로젝트가 정하고, 언어·프레임워크별 규칙은 스킬에 없다. 구현: `scripts/fast-check.sh`(실행), `scripts/impl-review-loop.sh`(게이트), `scripts/feature-run.sh`(위반·오류 처리).
+
+**설정** (`config.sh` 사용자 설정 영역, 둘 다 선택)
+
+```bash
+FAST_CHECK_CMD="scripts/convention-check.sh"   # 비어 있거나 줄이 없으면 미설정
+FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초, 양의 정수)
+```
+
+- 미설정(빈 값, 또는 이 줄이 없는 기존 config.sh)이면 종전 흐름 그대로다. 로그에 `[fast-check] 생략(…): FAST_CHECK_CMD 미설정` 한 줄만 남고, 실행·통과로 집계하지 않으며 `fast-check/` 기록도 만들지 않는다.
+- 진행 중인 피처가 있을 때 켜거나 끄지 않는다. 설정 여부는 워커 세션 계약 지문에 들어가므로(검사 위반 수정 프롬프트 `worker-check-fix.md` 를 워커가 받을 수 있는가) 도중에 바꾸면 다음 워커 호출이 `WORKER_SESSION_MISMATCH` 로 멈춘다. 명령 문자열만 바꾸는 것은 지문과 무관하다.
+
+**명령 계약**
+
+- 실행 위치: **피처 worktree 루트**(`git rev-parse --show-toplevel`)에서 `bash -c "$FAST_CHECK_CMD"`, stdin 은 `/dev/null`. 상대 경로 명령은 worktree 기준이므로 검사 스크립트는 저장소에 커밋돼 있어야 worktree 에 존재한다.
+- 환경 변수: `FAST_CHECK_ROOT`(worktree 루트 절대 경로), `FAST_CHECK_CHANGED_FILES`(이번 피처가 바꾼 파일 목록 파일의 절대 경로 — 한 줄에 저장소 상대 경로 하나, 삭제 제외, feature-scope 범위 안, 기준은 워커 진입 기준선). 변경 파일만 검사하려는 도구가 쓰며, 쓰지 않아도 된다. 경로는 git 의 인용 표기가 아니라 실제 문자열 그대로다(한글·공백·따옴표 포함 — 경로 안의 개행만 표현하지 못한다).
+- 종료 코드: `0` = 정상 완료(위반 없음) / `1` = 규칙 위반 / 그 외 = 실행 오류. 기존 도구의 종료 코드가 다르면(예: 위반을 2 로 알림) 프로젝트의 얇은 어댑터 스크립트가 이 셋으로 옮긴다.
+- 진단: 위반(exit 1)이면 수정에 필요한 규칙·파일·위치·내용을 stdout/stderr 로 낸다. 형식은 자유다(별도 결과 스키마 없음) — 워커가 그 원본을 그대로 읽는다. exit 1 인데 출력이 비어 있으면 실행 오류(`NO_DIAGNOSTICS`)다.
+- 읽기 전용: 자동 수정·포매팅·파일 생성/삭제·`git add` 를 하지 않는다. 러너가 실행 전후의 작업 트리 tree 스냅샷(gitignore 적용, `.agent-work` 제외)과 git index 지문을 비교해, 달라졌으면 종료 코드와 무관하게 실행 오류(`WORKTREE_MODIFIED`/`INDEX_MODIFIED`)로 멈춘다. 변경은 원복하지 않는다(범위 밖 경로는 `out_of_scope_paths` 로 따로 기록). gitignore 된 도구 캐시는 영향이 없다.
+- 타임아웃: 명령은 자기 프로세스 그룹에서 돈다. `FAST_CHECK_TIMEOUT_SEC` 를 넘으면 그룹 전체(명령이 띄운 자식·손자 포함)에 TERM → KILL 을 보내고, 정리가 끝난 뒤에 사후 비교를 해 실행 오류(`TIMEOUT`)로 처리한다. TERM 을 무시하는 자식이 판정 뒤에 소스를 바꾸지 못한다(`setsid` 로 그룹을 벗어난 프로세스는 잡지 못한다).
+
+**실행 시점** — 리뷰어를 부르기 직전마다 한 번(같은 경계에서 두 번 돌지 않는다)
+
+- 모든 unit 완료 뒤 첫 구현 리뷰어 호출 전.
+- 수정자(Fixer) 완료 뒤 다음 리뷰어 호출 전.
+- 다른 수정 경로에서 전체 리뷰로 돌아올 때: verify 실패의 워커 수정(`worker-fix.md`) 뒤, 리뷰 DOC_GAP 의 review-gap 워커 뒤, 재개로 리뷰어 차례가 된 때, 저장된 리뷰 출력을 재사용하는 재개.
+- 승인 체크포인트를 재사용하기 전(리뷰어 호출 없음). 그래서 검사가 설정된 설치는 verify 로 바로 재개하는 실행도 review 를 지난다 — 승인 뒤 검사가 새로 설정됐거나 규칙 입력이 바뀌었을 수 있다.
+- unit 마다 돌지 않는다. unit 의 `targeted_test`, 최종 `TEST_CMD`/`LINT_CMD`, 승인 지문 재확인은 그대로다 — 이 검사는 그것들을 대신하지 않는다.
+- 성공 캐시는 없다. `fast-check/last.json`·`history.jsonl` 은 증거일 뿐이고 어떤 게이트도 과거 PASS 기록으로 검사를 건너뛰지 않는다.
+
+**결과 처리**
+
+- 통과: 그대로 리뷰어 호출(또는 승인 재사용)로 간다.
+- 규칙 위반(리뷰 루프 exit 5): 리뷰어를 부르지 않고 리뷰 체크포인트도 바꾸지 않는다. 리뷰 JSON 이 없으므로 수정자(입력 계약 = 리뷰 JSON)를 쓰지 않고, verify 실패와 같은 형태로 **Feature Worker 세션의 수정 턴 1회**(`prompts/worker-check-fix.md`, 진단 로그 경로 전달) → review 재진입 → 검사부터 다시 → 통과한 코드만 리뷰어로 간다.
+  수정이 코드를 바꾸면 그 전의 리뷰·승인은 지문이 달라 재사용되지 않는다(수정자 뒤였다면 새 attempt Round 1). 한도는 `MAX_TEST_RETRIES` 를 재사용하되 verify 재시도와 따로, 피처 전체에 누적해 끝난 수정 턴만 센다(`run-state.json` 의 `fast_check_retries`). 소진되면 `FAST_CHECK_RETRIES_EXHAUSTED`.
+- 워커 수정 턴의 범위 밖 수정·index 변경·기준선/manifest 변조·결과 불확실은 기존 게이트(`SCOPE_VIOLATION`, `WORKER_OUTCOME_UNCERTAIN` 등)가 그대로 처리한다. 규칙이 합의 문서·conventions 와 충돌하거나 모호하면 워커가 `UNDECIDED` 로 돌려보내 사용자 결정 경로(`doc-gap-resume.json`)로 간다 — 이 경우 한도를 쓰지 않는다.
+- 수정 턴은 `run_worker` 가 돌아왔을 때만 끝난 것이다. 러너는 호출 직전에 진행 기록(`check-fix.pending.json`)을 남기고, 시작할 때마다 모델·검사 호출 전에 그 턴을 판정한다: 작업 트리가 호출 전과 같으면 기록을 닫고 진행 / 바뀌었는데 호출 후 tree 기록이 없으면(CLI 도중 중단) `WORKER_OUTCOME_UNCERTAIN` / 호출 전 tree 이후 범위 밖 경로가 바뀌어 있으면 `SCOPE_VIOLATION` / 범위 안 변경 + 유효한 DONE 결과면 재호출 없이 끝난 턴으로 확정 / 유효한 UNDECIDED 결과면(코드를 바꾸지 않은 턴 포함) 그 턴의 미결정 체크포인트(`doc-gap-resume.json`)가 있는지 확인하고, 없으면 결과 JSON 에서 다시 기록해 `UNDECIDED` 로 멈춘다(작업 트리가 그 턴의 호출 후 tree 와 다르면 기록하지 않고 `WORKER_OUTCOME_UNCERTAIN`) / 결과가 없거나 깨졌으면 `WORKER_OUTCOME_UNCERTAIN`.
+  확정은 멱등이다 — 진행 기록의 `retries_before`(호출 전 한도 값)와 `check-fix-NN-merge-base.json`(호출 전 `worker-result.json` 사본)으로 계산하므로, 확정 도중 중단돼 같은 DONE 을 다시 확정해도 한도와 리뷰 입력 병합은 한 번만 반영된다.
+  그래서 수정 도중 강제 종료되거나 게이트에서 멈춘 턴을 그대로 재실행해도 그 변경이 범위 검사 없이 리뷰·DONE 으로 가지 않고, 반쯤 적용된 편집 위에 같은 수정 턴이 다시 돌지 않는다.
+- 실행 오류(리뷰 루프 exit 6): 통과·생략·위반 어느 것으로도 처리하지 않고, 리뷰어·수정자·워커를 부르지 않은 채 `FAST_CHECK_ERROR` 로 멈춘다. kind: `COMMAND_NOT_RUNNABLE`·`TIMEOUT`·`UNEXPECTED_EXIT`·`NO_DIAGNOSTICS`·`INVALID_CONFIG`·`WORKTREE_MODIFIED`·`INDEX_MODIFIED`.
+- 재개: 어느 중단이든 같은 명령으로 재실행하면 같은 지점에서 검사부터 다시 한다. 실패 상태에서는 승인 지문이 생기지 않으므로 verify·DONE·finalize 로 갈 수 없다. reason 별 복구는 `references/exit-states-resume.md` 의 `FAST_CHECK_RETRIES_EXHAUSTED`·`FAST_CHECK_ERROR` 절.
+
+**산출물** (`.agent-work/fast-check/` — 실행마다 새 번호, 덮어쓰지 않는다)
+
+- `check-NNNN.log`: 명령의 stdout+stderr 원본. `check-NNNN.changed-files.txt`: 넘긴 변경 파일 목록. `check-NNNN.timeout`: 타임아웃으로 종료시킨 실행에만.
+- `last.json` / `history.jsonl`: `status`(PASS·VIOLATION·ERROR), `kind`, `cmd`, `cwd`, `exit_code`, `timed_out`, `duration_sec`, `log`, `tree_before`/`tree_after`, `index_modified`, `modified_paths`, `out_of_scope_paths`, `label`(어느 경계의 실행인지), 시작·종료 시각.
+- 워커 수정 턴: `check-fix-NN-result.json`, `check-fix-NN-before.tree`/`-after.tree`, 원문 로그 `reviews/check-fix-NN-*.log`, 병합 기준 `check-fix-NN-merge-base.json`, 진행 기록 `check-fix.pending.json`(`active`·`tag`·`retries_before`·`outcome` — 지우거나 고쳐서 넘기지 않는다).
+
+회귀: `tests/smoke-fast-check.sh`(LLM 호출 없음 — fixture 프로젝트의 정상·위반·실행 오류 명령): 미설정 생략 / 첫 검사 위반 시 리뷰어 0회 / 수정자 뒤 위반 시 다음 리뷰어 0회 / 수정 → 재검사 → 리뷰 → TEST → LINT 순서 / 한도 소진·실행 오류·타임아웃·읽기 전용 위반 / worktree 실행 / 승인·과거 PASS 기록 오용 방지 / 혼합 설치 / 한글 경로 전달 / TERM 무시 자식 정리 / 수정 턴 도중 강제 종료·범위 위반 뒤 재실행 / 미결정 체크포인트 기록 전 중단(질문 복구) / 확정 도중 중단(한도·병합 1회).
+
 ## 강제 규칙 (어길 수 없음)
 
 - **검증자는 게이트지 설계자가 아니다.** REVISE_DOC은 여섯 가지 입장 조건(요구·결정·계약 위반 / 근거: 문서 대조 DIRECT_MISMATCH 또는 실행 경로 REACHABLE_FAILURE / 명시 계약과 다른 결과·권한·비밀·영속 데이터·구현 불가 영향 / 이번 변경이 만들거나 활성화 / 지금 결정 없이는 진행 불가 / 정확한 근거 위치)을 모두 만족할 때만, ASK_USER는 별도 네 조건(어디에도 미결정 / 동작·데이터·보안·범위가 갈림 / 기존 계약·패턴이 확정 못 함 /
