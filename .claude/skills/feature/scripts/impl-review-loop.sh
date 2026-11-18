@@ -95,6 +95,36 @@ save_review_checkpoint() { # attempt round next_step review tree worktree_finger
 # 라운드 중간이 아니라 새 attempt 의 Round 1 부터 시작해야 한다 — 체크포인트를 초기 상태로 되돌린다(파일 삭제 대신 덮어쓰기).
 reset_review_checkpoint() { save_review_checkpoint "${attempt:-0}" 0 NONE "" "" ""; }
 
+# 수정자 세션 불수용 중단: codex resume 의 이벤트 thread id 가 원장과 달라 어댑터(run_edit_role)가 결과를 받지 않았다.
+# 일반 CLI 비정상 종료(rc≠0 + 범위 안 변경 → 리뷰어가 partial fix 로 판정)와 다르다 — 변경이 어느 스레드의 것인지 모르므로
+# 세션 수용(role_session_accept 는 marker 를 무조건 지운다)·다음 리뷰로 가지 않는다. 변경·marker·체크포인트(FIXER_PENDING)를 그대로 두고 exit 1
+# (자동 원복·자동 재호출·stop_with 초기화 없음). 사유는 marker 자체에 남긴다(unaccepted) — 뒤쪽 CLI 판정과 다음 실행의 재개 판정이 같은 사실을 봐야 한다.
+# config.sh 는 설치가 덮어쓰지 않는 파일이므로 이 판정은 config.sh 헬퍼가 아니라 이 스크립트에 둔다(런타임 계약 표식 불변).
+fixer_marker_mark_unaccepted() { # marker reason
+  jq --arg r "$2" --arg now "$(date '+%FT%T%z')" '.unaccepted=$r | .unaccepted_at=$now' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+fixer_marker_stop_if_unaccepted() { # marker where
+  local why key
+  [ -f "$1" ] || return 0
+  why="$(jq -r '.unaccepted // ""' "$1" 2>/dev/null)"
+  [ -n "$why" ] || return 0
+  key="$(jq -r '.key // ""' "$1" 2>/dev/null)"
+  echo "[STOP] $why: 수정자 codex resume(${key:-?}, $2)의 결과가 불수용됨 — 이벤트 thread id 가 세션 원장과 다르다. 작업 트리 변경은 원복하지 않고 보존하며, 세션 수용·리뷰어 호출 없이 중단한다(일반 CLI_EXIT_STATUS_MISMATCH 복구 대상이 아님). 이벤트 로그($WORK_DIR/reviews/impl-attempt-*/fixer-round-*.raw.events.jsonl)와 변경을 확인한 뒤 $1 를 치우고 재실행 — 그 전의 재실행은 모델 호출 0회로 같은 사유로 멈춘다." >&2
+  exit 1
+}
+fixer_session_stop_if_unaccepted() { # session_key where
+  fixer_marker_stop_if_unaccepted "$(codex_resume_marker "$1")" "$2"
+}
+# 재실행 진입 판정: 불수용 표시가 남은 수정자 marker 가 하나라도 있으면 체크포인트 상태와 무관하게 멈춘다.
+# 체크포인트(FIXER_PENDING)에 기대지 않는다 — 같은 수정자 호출이 범위 위반 등 다른 게이트에도 걸리면 stop_with 가 체크포인트를 NONE 으로 초기화하고,
+# 그 오류만 복구한 재실행은 새 attempt·리뷰어로 넘어가 확인되지 않은 스레드의 변경을 승인할 수 있다. marker 가 유일한 사실 원천이다.
+fixer_stop_if_any_unaccepted() {
+  local m
+  for m in "$WORK_DIR"/.session-fixer-a*.resume-pending.json; do   # codex_resume_marker 의 경로 규칙(.session-<key>.resume-pending.json), key = fixer-a<attempt>
+    fixer_marker_stop_if_unaccepted "$m" "재실행"   # glob 불일치(파일 없음)는 -f 검사에서 걸러진다
+  done
+}
+
 # lock 이 있으면 원본과 같아야 한다 — 다르면 범위가 바뀐 것이고 어느 쪽이 맞는지 여기서 정하지 않는다.
 # 재개 블록이 승인 지문(compute_approval_fingerprint — 같은 불변식을 검사한다)을 계산하기 전에 여기서 상태를 남기고 멈춘다.
 if [ -f "$FEATURE_SCOPE_LOCK" ] && ! cmp -s "$FEATURE_SCOPE_FILE" "$FEATURE_SCOPE_LOCK"; then
@@ -110,6 +140,11 @@ if ! require_baseline_guard_resolved; then
   reset_review_checkpoint
   exit 2
 fi
+
+# 수정자의 codex resume 이 thread id 불일치로 불수용된 채 멈춘 상태(marker 에 표시)면 재개 판정·빠른 검사·모델 호출 전에 같은 사유로 멈춘다.
+# 위의 범위 lock·기준선 가드가 먼저다(범위 오류 우선순위 유지) — 그 오류를 복구한 뒤에도 사람이 marker 를 확인하고 치우기 전에는
+# 체크포인트가 무엇이든(FIXER_PENDING·NONE·그 밖) 새 attempt·리뷰어 호출·승인 재사용으로 가지 않는다.
+fixer_stop_if_any_unaccepted
 
 # ---------- 프로젝트 빠른 검사 게이트 (선택 — FAST_CHECK_CMD 미설정이면 생략 로그만) ----------
 # 리뷰어 호출(또는 저장된 리뷰 출력·승인 재사용) 직전에 한 번 부른다. 통과·미설정이면 돌아오고, 규칙 위반은 exit 5, 실행 오류는 exit 6 으로 끝낸다.
@@ -647,7 +682,21 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 해소됐다(워커와 같은 편집 역할 의미).
   # 결과 판정은 아래 index·manifest·기준선·write-set·지문 게이트가 하고, 게이트 중단 뒤의 재실행은 같은 스레드의 '의도된 새 턴'이다.
   # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다. 리뷰어(읽기 전용) marker 는 건드리지 않는다.)
-  [ "$(role_cli FIXER)" != codex ] || rm -f "$(codex_resume_marker "fixer-a$attempt_tag")"
+  # 지우는 것은 '이번 호출이 쓴' marker 뿐이다(워커와 같은 규칙): 이전 호출의 marker 때문에 CLI 를 부르지 않고 거부된 호출(SESSION_RESUME_UNCERTAIN)이나
+  # 이벤트 thread id 가 원장과 달라 불수용된 resume 에서는 남긴다 — 지우면 확인 전에 다음 재실행이 같은 스레드에 프롬프트를 보낸다.
+  if [ "$(role_cli FIXER)" = codex ]; then
+    fixer_marker="$(codex_resume_marker "fixer-a$attempt_tag")"
+    if [ -f "$fixer_marker" ] && [ -n "${RUN_EDIT_ROLE_INVOCATION_ID:-}" ] \
+      && [ "$(jq -r '.invocation_id // ""' "$fixer_marker" 2>/dev/null)" = "$RUN_EDIT_ROLE_INVOCATION_ID" ]; then
+      if codex_session_check_resumed "fixer-a$attempt_tag" "$fix_result.events.jsonl"; then
+        rm -f "$fixer_marker"
+      else
+        # 이번 호출의 thread id 불일치(복수 포함): marker 에 사유를 남긴다 — 아래 게이트를 지난 뒤 CLI 판정 앞에서 멈추고(fixer_session_stop_if_unaccepted),
+        # 그 전에 다른 게이트로 멈추거나 러너가 죽어도 재실행의 재개 판정이 같은 표시를 본다.
+        fixer_marker_mark_unaccepted "$fixer_marker" SESSION_THREAD_MISMATCH || { echo "[FAIL] 수정자 resume marker 불수용 표시 기록 실패: $fixer_marker" >&2; exit 1; }
+      fi
+    fi
+  fi
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료해도 재실행 가드는 남아야 한다
   baseline_changed=0
   baseline_file_after=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_after="$(cat "$WORK_DIR/worker-baseline.tree")"
@@ -684,6 +733,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
     fi
   fi
   # ---------- CLI 판정 (위 index → manifest → 기준선 → write-set 게이트를 모두 지난 뒤에만) ----------
+  # 세션 불수용(thread id 불일치)은 CLI 종료 코드 불일치보다 먼저 본다 — 범위 안 변경이 있어도 아래의 FORWARD_TO_REVIEWER·세션 수용으로 넘어가지 않는다.
+  fixer_session_stop_if_unaccepted "fixer-a$attempt_tag" "attempt $attempt round $round"
   if [ "$fixer_rc" -ne 0 ]; then
     fix_fp_after="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 후 지문 계산 실패" >&2; exit 1; }
     if [ "$fix_fp_after" = "$fix_fp_before" ]; then

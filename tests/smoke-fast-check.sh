@@ -23,6 +23,8 @@
 #   N. 타임아웃 정리: TERM 을 무시하는 검사 자식 프로세스까지 정리한 뒤에 사후 비교를 한다(타임아웃 판정 뒤 늦게 소스를 바꾸는 프로세스가 남지 않는다)
 #   O. 수정 턴 도중 러너 강제 종료: 재실행은 검사·모델 0회로 WORKER_OUTCOME_UNCERTAIN(범위 밖 변경 보존, DONE 아님), 호출 전 tree 로 되돌린 뒤에만 수정 턴 재개.
 #      범위 위반으로 멈춘 수정 턴(I1)을 그대로 재실행해도 같은 사유로 다시 멈추고, 범위 밖 변경을 정리한 뒤에는 그 턴의 결과로 이어간다(재호출 없음)
+#   R. codex 워커의 수정 턴 도중 강제 종료(resume marker 남음): 호출이 SESSION_RESUME_UNCERTAIN 으로 거부돼도 marker 를 지우지 않는다 —
+#      재실행을 반복해도 모델 0회로 같은 거부, 사람이 marker 를 치운 뒤에만 수정 턴이 다시 돈다
 #   P. 미결정 수정 턴이 체크포인트(doc-gap-resume.json) 기록 전에 중단: 재실행은 검사·모델 0회로 미결정을 다시 기록해 NEED_USER(UNDECIDED) — 질문이 사라진 채 DONE 으로 가지 않는다.
 #      호출 후 tree 가 달라져 있으면 다시 기록하지 않고 WORKER_OUTCOME_UNCERTAIN
 #   Q. 끝난 수정 턴의 확정 도중(한도 저장 뒤·진행 기록 닫기 전) 중단: 재실행이 같은 DONE 을 다시 확정해도 한도·리뷰 입력 병합은 한 번만 반영된다
@@ -480,6 +482,31 @@ rc="$(run_runner)"
 [ "$(cat src/outside.txt)" = "outside base" ] && ! grep -q 'BAD' src/a.txt || fail "O: 최종 코드에 범위 밖 변경 또는 위반이 남음"
 sed -i.bak 's|^WORKER_CLI=.*|WORKER_CLI=""|' "$CFG" && rm -f "$CFG.bak"
 pass "O: 수정 턴 도중 강제 종료 — 재실행은 검사·모델 0회로 WORKER_OUTCOME_UNCERTAIN(변경 보존), 호출 전 tree 복구 뒤에만 수정 턴 1회 재개 → DONE"
+
+# ===== 사례 R: codex 워커 — 거부된 호출(SESSION_RESUME_UNCERTAIN)이 resume marker 를 지우지 않는다 =====
+# unit 워커 턴이 codex 세션(원장)을 확정하므로 수정 턴은 exec resume 이고, 호출 직전에 marker 가 기록된다. 그 호출 도중 러너가 죽으면 marker 가 남는다.
+sed -i.bak 's|^WORKER_CLI=.*|WORKER_CLI="codex"|' "$CFG" && rm -f "$CFG.bak"
+MARKER=.agent-work/.session-feature-worker.resume-pending.json
+reset_tree; flag worker-violation; flag checkfix-crash
+rc="$(run_runner 2>/dev/null)"
+[ "$rc" -ne 0 ] && [ -f "$MARKER" ] && [ ! -f .agent-work/check-fix-01-after.tree ] || fail "R: 픽스처 — codex resume 도중 강제 종료 상태(marker 남음)가 만들어지지 않음(exit $rc)"
+marker_inv="$(jq -r '.invocation_id' "$MARKER")"
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] && [ -f "$MARKER" ] || fail "R: 중단된 수정 턴 판정(WORKER_OUTCOME_UNCERTAIN·호출 0회·marker 유지) 기대(exit $rc, $(reason)): $(seq_all)"
+git checkout -q "$(cat .agent-work/check-fix-01-before.tree)" -- src && git reset -q   # 사용자가 호출 전 tree 로 되돌림(marker 는 아직 확인하지 않았다)
+for i in 1 2; do   # 거부된 호출이 marker 를 지우면 두 번째 재실행에서 같은 스레드로 프롬프트가 나간다
+  rc="$(run_runner)"
+  [ "$rc" -eq 1 ] && grep -q 'SESSION_RESUME_UNCERTAIN' "$TMP/run.log" || fail "R: 재실행 $i 이 SESSION_RESUME_UNCERTAIN 으로 멈추지 않음(exit $rc, $(status)/$(reason)): $(seq_all)"
+  [ "$(calls check-fix)" -eq 0 ] && [ "$(calls worker)" -eq 0 ] || fail "R: 재실행 $i 에서 확인되지 않은 스레드로 워커가 호출됨: $(seq_all)"
+  [ -f "$MARKER" ] && [ "$(jq -r '.invocation_id' "$MARKER")" = "$marker_inv" ] || fail "R: 거부된 호출(재실행 $i)이 resume marker 를 지우거나 바꿈"
+  [ "$(status)" != DONE ] && [ ! -f .agent-work/approved.fingerprint ] || fail "R: marker 가 남은 상태에서 승인·DONE 으로 넘어감"
+done
+mv "$MARKER" "$MARKER.checked"   # 사람이 중복 전송 여부를 확인하고 marker 를 치움
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] && [ "$(seq_all)" = "check|check-fix|check|reviewer|full-test|full-lint" ] || fail "R: marker 를 치운 뒤 검사 → 수정 턴 1회 → 재검사 → 리뷰가 아님(exit $rc, $(status)/$(reason)): $(seq_all)"
+[ ! -f "$MARKER" ] || fail "R: 수용된 resume 호출의 marker 가 해제되지 않음"
+sed -i.bak 's|^WORKER_CLI=.*|WORKER_CLI=""|' "$CFG" && rm -f "$CFG.bak"
+pass "R: codex 워커 — 거부된 호출은 resume marker 를 지우지 않음(재실행 반복에도 모델 0회), marker 를 치운 뒤에만 수정 턴 재개 → DONE"
 
 # ===== 사례 P: 미결정 수정 턴이 체크포인트 기록 전에 중단 → 질문을 잃지 않는다 =====
 # run_worker 는 결과 JSON·호출 후 tree 를 남긴 뒤에 doc-gap-resume.json 을 쓴다. 그 사이에 러너가 죽은 상태를 만든다: 정상 UNDECIDED 중단에서 체크포인트만 없앤다.

@@ -30,6 +30,9 @@
 #   W2. crash recovery(codex) — session_bound=true 인데 원장 소실: 같은 이유로 중단
 #   L1. 리뷰어(codex) Round 1 새 exec → 수정자(claude) → Round 2 같은 thread 로 exec resume → APPROVE, 원장 수용 기록
 #   L2. 승인 후 코드 변경 → 새 attempt 02 → attempt 01 스레드를 쓰지 않고 새 exec (원장 reviewer-a02, 다른 tid)
+#   L3. 수정자(codex) resume 의 thread id 불일치 + 범위 안 코드 수정 → 일반 CLI_EXIT_STATUS_MISMATCH 복구(리뷰로 전달)가 아니라 중단:
+#       세션 수용 없음·marker 유지·다음 리뷰어 0회, 재실행 반복에도 모델 0회, 사람이 marker 를 치운 뒤에만 리뷰어가 partial fix 를 판정
+#   L4. L3 + 같은 호출의 범위 위반 → SCOPE_VIOLATION 이 먼저(체크포인트 NONE 초기화), 범위 밖 변경만 복구한 재실행도 marker 확인 전에는 모델 0회로 중단
 # =============================================================
 set -u
 PROJECT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -70,6 +73,7 @@ mkdir -p "$MOCK_STATE"
 #   FAKE_DUP_THREAD_STARTED=1 : 서로 다른 thread.started 2개
 #   FAKE_RESUME_TID=<id>      : 재개 호출이 보고하는 thread id 를 저장된 것과 다르게
 #   FAKE_RESUME_RC_FAIL=1     : 재개 호출이 아무 출력 없이 exit 1
+#   -o 가 없는 호출(편집 역할 — 수정자)은 FAKE_EDIT_CMD 를 실행한다
 cat > "$TMP/bin/codex" <<'EOF'
 #!/usr/bin/env bash
 [ "${1:-}" = exec ] || { echo "unexpected argv: $*" >&2; exit 9; }
@@ -110,6 +114,7 @@ if [ "${FAKE_NO_THREAD_STARTED:-0}" != 1 ]; then
 fi
 printf '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"cache_write_input_tokens":3,"output_tokens":10,"reasoning_output_tokens":2}}\n'
 echo "diag" >&2
+[ -n "$out" ] || eval "${FAKE_EDIT_CMD:-true}"
 if [ -n "$out" ]; then
   f="$MOCK_STATE/review-$n.json"; [ -f "$f" ] || f="$MOCK_STATE/review-default.json"
   cp "$f" "$out"
@@ -375,6 +380,94 @@ bash "$REVIEW_LOOP" > "$TMP/l2.log" 2>&1; rc=$?
 jq -e '.key=="reviewer-a02" and .thread_id=="tid-3"' .agent-work/.session-reviewer-a02.codex.json >/dev/null || fail "L2: attempt 02 원장 불일치"
 [ "$(jq -r .thread_id .agent-work/.session-reviewer-a01.codex.json)" != "$(jq -r .thread_id .agent-work/.session-reviewer-a02.codex.json)" ] || fail "L2: attempt 간 thread 공유됨"
 pass "L2: Attempt 02 는 Attempt 01 스레드와 무관한 새 세션"
+
+# ===== L3: 수정자(codex) resume thread id 불일치 + 범위 안 코드 수정 → 리뷰로 전달하지 않고 중단 =====
+# 수정자 세션(fixer-a01)이 이미 수용된 상태에서 수정자가 다시 불리면 exec resume 이다. 그 호출이 원장과 다른 thread id 를 보고하면서 코드를 고친다.
+reset_case
+PREV_ATTEMPTS="$TMP/prev-attempts-l3"; mkdir -p "$PREV_ATTEMPTS"; mv .agent-work/reviews/impl-attempt-* "$PREV_ATTEMPTS"/ 2>/dev/null   # 이전 사례의 attempt 는 옮겨 둔다
+mv .agent-work/review-impl.json .agent-work/approved.fingerprint "$PREV_ATTEMPTS"/ 2>/dev/null
+sed -i.bak 's/^FIXER_CLI=.*/FIXER_CLI="codex"/' "$CFG"
+git checkout -q -- src/u01.txt
+: > .agent-work/decisions.md
+( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+echo "worker edit" >> src/u01.txt
+cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
+( set -e; source "$CFG"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l3-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L3: 수정자 세션 준비 실패"
+fixer_tid="$(jq -r .thread_id .agent-work/.session-fixer-a01.codex.json)"
+FIXER_MARKER=.agent-work/.session-fixer-a01.resume-pending.json
+printf '%s' "$review_issue" | jq -c --argjson v "$REVIEW_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$MOCK_STATE/review-2.json"
+printf '{"schema_version":%s,"verdict":"APPROVE","issues":[]}\n' "$REVIEW_CONTRACT" > "$MOCK_STATE/review-4.json"
+reviewer_calls() { grep -c -- '--output-schema' "$MOCK_LOG" || true; }
+fixer_calls() { grep '^codex ' "$MOCK_LOG" | grep -vc -- '--output-schema' || true; }
+: > "$MOCK_LOG"
+FAKE_RESUME_TID=tid-999 FAKE_EDIT_CMD='echo fixed >> src/u01.txt; echo "- [fix round 1] R-01 ACCEPT" >> .agent-work/decisions.md' bash "$REVIEW_LOOP" > "$TMP/l3.log" 2>&1; rc=$?
+[ "$rc" -eq 1 ] || { tail -30 "$TMP/l3.log"; fail "L3: thread 불일치 + 코드 수정이 중단(exit 1)되지 않음(exit $rc)"; }
+grep -q '\[STOP\] SESSION_THREAD_MISMATCH' "$TMP/l3.log" || { tail -30 "$TMP/l3.log"; fail "L3: SESSION_THREAD_MISMATCH 중단 메시지 없음"; }
+grep -q '\[WARN\] CLI_EXIT_STATUS_MISMATCH' "$TMP/l3.log" && fail "L3: 세션 불일치가 일반 CLI 종료 코드 불일치 복구로 처리됨"
+[ "$(grep -c "^codex resume $fixer_tid" "$MOCK_LOG")" -eq 1 ] || fail "L3: 수정자가 수용된 thread 로 resume 1회가 아님: $(grep ^codex "$MOCK_LOG")"
+[ "$(reviewer_calls)" -eq 1 ] || fail "L3: 불일치 뒤 다음 리뷰어가 호출됨(리뷰어 $(reviewer_calls)회)"
+[ -f "$FIXER_MARKER" ] && [ "$(jq -r '.unaccepted // ""' "$FIXER_MARKER")" = SESSION_THREAD_MISMATCH ] || fail "L3: 수정자 marker 가 지워졌거나 불수용 표시가 없음"
+marker_inv="$(jq -r .invocation_id "$FIXER_MARKER")"
+[ "$(jq -r .last_accepted_label .agent-work/.session-fixer-a01.codex.json)" = seed ] || fail "L3: 불수용된 호출이 수정자 세션으로 수용됨"
+jq -e '.round==1 and .next_step=="FIXER_PENDING" and .attempt==1' .agent-work/review-impl.json >/dev/null || fail "L3: 체크포인트가 round 1 / FIXER_PENDING 이 아님: $(cat .agent-work/review-impl.json)"
+[ "$(tail -1 src/u01.txt)" = fixed ] || fail "L3: 수정자 변경이 보존되지 않음"
+[ ! -f .agent-work/approved.fingerprint ] && [ ! -s .agent-work/cli-anomalies.jsonl ] || fail "L3: 승인 또는 anomaly 복구 기록이 남음"
+for i in 1 2; do   # 재실행: 작업 트리가 바뀌어 있어도 '변경 흔적 → 다음 리뷰 라운드'로 넘어가지 않는다
+  : > "$MOCK_LOG"
+  bash "$REVIEW_LOOP" > "$TMP/l3r.log" 2>&1; rc=$?
+  [ "$rc" -eq 1 ] && grep -q '\[STOP\] SESSION_THREAD_MISMATCH' "$TMP/l3r.log" || { tail -30 "$TMP/l3r.log"; fail "L3: 재실행 $i 이 같은 사유로 멈추지 않음(exit $rc)"; }
+  [ "$(codex_calls)" -eq 0 ] || fail "L3: 재실행 $i 에서 모델이 호출됨: $(grep ^codex "$MOCK_LOG")"
+  [ -f "$FIXER_MARKER" ] && [ "$(jq -r .invocation_id "$FIXER_MARKER")" = "$marker_inv" ] || fail "L3: 재실행 $i 이 marker 를 지우거나 바꿈"
+  jq -e '.round==1 and .next_step=="FIXER_PENDING"' .agent-work/review-impl.json >/dev/null || fail "L3: 재실행 $i 이 체크포인트를 넘김"
+  [ ! -f .agent-work/approved.fingerprint ] || fail "L3: marker 가 남은 상태에서 승인됨"
+done
+mv "$FIXER_MARKER" "$FIXER_MARKER.checked"   # 사람이 이벤트 로그·변경을 확인하고 marker 를 치움
+: > "$MOCK_LOG"
+FAKE_EDIT_CMD='echo AGAIN >> src/u01.txt' bash "$REVIEW_LOOP" > "$TMP/l3ok.log" 2>&1; rc=$?
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/l3ok.log"; fail "L3: marker 를 치운 뒤 리뷰어 판정(APPROVE) 기대, 실제 exit $rc"; }
+[ "$(fixer_calls)" -eq 0 ] && [ "$(reviewer_calls)" -eq 1 ] || fail "L3: 확인 뒤 재실행이 수정자 0회·리뷰어 1회가 아님: $(grep ^codex "$MOCK_LOG")"
+grep -q AGAIN src/u01.txt && fail "L3: 같은 수정자 편집이 반복됨"
+jq -e '.next_step=="APPROVE" and .round==2 and .attempt==1' .agent-work/review-impl.json >/dev/null || fail "L3: 최종 체크포인트가 round 2 APPROVE 가 아님"
+pass "L3: 수정자 codex resume thread 불일치 + 코드 수정 → 중단(marker 유지·수용 없음·리뷰어 0회), 재실행 반복에도 모델 0회, marker 확인 뒤에만 리뷰어 판정"
+
+# ===== L4: thread 불일치 + 범위 위반이 같은 수정자 호출에 겹침 → 범위 오류가 먼저, 범위 밖 변경만 복구해도 marker 확인 전에는 진행하지 않는다 =====
+# SCOPE_VIOLATION 은 stop_with 로 체크포인트를 NONE 으로 초기화한다 — 불수용 차단이 FIXER_PENDING 에만 기대면 재실행이 새 attempt·리뷰어로 넘어가 승인까지 간다.
+reset_case
+mkdir -p "$PREV_ATTEMPTS/l3"; mv .agent-work/reviews/impl-attempt-* .agent-work/review-impl.json .agent-work/approved.fingerprint "$PREV_ATTEMPTS/l3"/ 2>/dev/null
+rm -f .agent-work/state.json
+git checkout -q -- src/u01.txt
+: > .agent-work/decisions.md
+( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+echo "worker edit" >> src/u01.txt
+( set -e; source "$CFG"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l4-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L4: 수정자 세션 준비 실패"
+printf '%s' "$review_issue" | jq -c --argjson v "$REVIEW_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$MOCK_STATE/review-2.json"
+printf '{"schema_version":%s,"verdict":"APPROVE","issues":[]}\n' "$REVIEW_CONTRACT" > "$MOCK_STATE/review-1.json"   # marker 를 치운 뒤의 실행(호출 카운터 초기화 뒤 첫 호출)
+: > "$MOCK_LOG"
+FAKE_RESUME_TID=tid-999 FAKE_EDIT_CMD='echo fixed >> src/u01.txt; echo stray > outside-l4.txt; echo "- [fix round 1] R-01 ACCEPT" >> .agent-work/decisions.md' bash "$REVIEW_LOOP" > "$TMP/l4.log" 2>&1; rc=$?
+[ "$rc" -eq 2 ] && [ "$(jq -r .status .agent-work/state.json)" = SCOPE_VIOLATION ] || { tail -30 "$TMP/l4.log"; fail "L4: 범위 위반이 먼저 보고되지 않음(exit $rc)"; }
+[ -f "$FIXER_MARKER" ] && [ "$(jq -r '.unaccepted // ""' "$FIXER_MARKER")" = SESSION_THREAD_MISMATCH ] || fail "L4: 범위 위반 중단에서 marker 불수용 표시가 남지 않음"
+jq -e '.next_step=="NONE"' .agent-work/review-impl.json >/dev/null || fail "L4: 픽스처 — 체크포인트가 NONE 으로 초기화된 상태가 아님: $(cat .agent-work/review-impl.json)"
+marker_inv="$(jq -r .invocation_id "$FIXER_MARKER")"
+mv outside-l4.txt "$TMP/side/outside-l4.txt"   # 사용자가 범위 밖 변경만 복구(marker·체크포인트는 그대로)
+for i in 1 2; do
+  : > "$MOCK_LOG"
+  bash "$REVIEW_LOOP" > "$TMP/l4r.log" 2>&1; rc=$?
+  [ "$rc" -eq 1 ] && grep -q '\[STOP\] SESSION_THREAD_MISMATCH' "$TMP/l4r.log" || { tail -30 "$TMP/l4r.log"; fail "L4: 범위 복구 뒤 재실행 $i 이 불수용 marker 로 멈추지 않음(exit $rc)"; }
+  [ "$(codex_calls)" -eq 0 ] || fail "L4: 재실행 $i 에서 모델이 호출됨: $(grep ^codex "$MOCK_LOG")"
+  [ -f "$FIXER_MARKER" ] && [ "$(jq -r .invocation_id "$FIXER_MARKER")" = "$marker_inv" ] || fail "L4: 재실행 $i 이 marker 를 지우거나 바꿈"
+  [ ! -f .agent-work/approved.fingerprint ] && [ ! -d .agent-work/reviews/impl-attempt-02 ] || fail "L4: marker 가 남은 상태에서 새 attempt·승인으로 넘어감"
+  [ "$(jq -r .last_accepted_label .agent-work/.session-fixer-a01.codex.json)" = seed ] || fail "L4: 불수용된 호출이 수정자 세션으로 수용됨"
+done
+mv "$FIXER_MARKER" "$FIXER_MARKER.checked"   # 사람이 확인하고 marker 를 치움
+: > "$MOCK_LOG"; rm -f "$MOCK_STATE/codex.n"
+bash "$REVIEW_LOOP" > "$TMP/l4ok.log" 2>&1; rc=$?
+[ "$rc" -eq 0 ] || { tail -30 "$TMP/l4ok.log"; fail "L4: marker 를 치운 뒤 리뷰 재개(APPROVE) 기대, 실제 exit $rc"; }
+[ "$(fixer_calls)" -eq 0 ] && [ "$(reviewer_calls)" -eq 1 ] || fail "L4: 확인 뒤 재실행이 수정자 0회·리뷰어 1회가 아님: $(grep ^codex "$MOCK_LOG")"
+jq -e '.next_step=="APPROVE" and .round==1 and .attempt==2' .agent-work/review-impl.json >/dev/null || fail "L4: 최종 체크포인트가 attempt 2 round 1 APPROVE 가 아님: $(cat .agent-work/review-impl.json)"
+[ "$(tail -1 src/u01.txt)" = fixed ] || fail "L4: 수정자 변경이 보존되지 않음"
+pass "L4: thread 불일치 + 범위 위반 → SCOPE_VIOLATION 우선, 범위 밖 변경만 복구한 재실행은 marker 유지·모델 0회로 중단, marker 확인 뒤 새 attempt 리뷰"
+
+mv "$CFG.bak" "$CFG"
 
 echo "[SMOKE OK] codex resume 세션 정책 스모크 전체 통과"
 rm -rf "$TMP"

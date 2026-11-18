@@ -480,7 +480,18 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   # 결과를 수용할지는 아래 게이트·가드(index·manifest·기준선·write-set·결과 계약·worker-outcome)가 따로 판정하고,
   # 게이트 중단 뒤 사용자가 복구하고 재실행하는 재호출은 같은 스레드에 보내는 '의도된 새 턴'이다 — marker 로 막지 않는다.
   # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다.)
-  [ "$(role_cli WORKER)" != codex ] || rm -f "$(codex_resume_marker "$FEATURE_WORKER_SESSION")"
+  # 지우는 것은 '이번 호출이 쓴' marker 뿐이다. 다음 두 경우는 불확실성이 해소되지 않았으므로 남긴다:
+  #   · marker 의 invocation_id 가 이번 호출과 다르다 — 이전 호출의 marker 때문에 codex_session_begin 이 CLI 를 부르지 않고 거부했다(SESSION_RESUME_UNCERTAIN).
+  #     여기서 지우면 사람이 중복 전송 여부를 확인하기도 전에 다음 재실행이 같은 스레드에 프롬프트를 보낸다.
+  #   · 이번 resume 의 이벤트 thread id 가 원장과 다르다 — run_edit_role 이 결과를 불수용했다(어느 스레드에 도달했는지 모른다).
+  if [ "$(role_cli WORKER)" = codex ]; then
+    local resume_marker; resume_marker="$(codex_resume_marker "$FEATURE_WORKER_SESSION")"
+    if [ -f "$resume_marker" ] && [ -n "${RUN_EDIT_ROLE_INVOCATION_ID:-}" ] \
+      && [ "$(jq -r '.invocation_id // ""' "$resume_marker" 2>/dev/null)" = "$RUN_EDIT_ROLE_INVOCATION_ID" ] \
+      && codex_session_check_resumed "$FEATURE_WORKER_SESSION" "$raw.events.jsonl"; then
+      rm -f "$resume_marker"
+    fi
+  fi
   # 기준선 변경은 다른 사후 조건보다 먼저 '기록'만 한다 — index·manifest 검사가 앞서 종료하면 가드가 남지 않아
   # 사용자가 보고된 문제만 고치고 재실행할 때 변조된 기준선이 새 기준선으로 읽힌다. 종료 우선순위(index → manifest → 기준선)는 그대로.
   local baseline_changed=0

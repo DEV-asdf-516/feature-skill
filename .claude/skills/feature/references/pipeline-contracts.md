@@ -111,7 +111,7 @@ FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초, 양의 정�
 - `last.json` / `history.jsonl`: `status`(PASS·VIOLATION·ERROR), `kind`, `cmd`, `cwd`, `exit_code`, `timed_out`, `duration_sec`, `log`, `tree_before`/`tree_after`, `index_modified`, `modified_paths`, `out_of_scope_paths`, `label`(어느 경계의 실행인지), 시작·종료 시각.
 - 워커 수정 턴: `check-fix-NN-result.json`, `check-fix-NN-before.tree`/`-after.tree`, 원문 로그 `reviews/check-fix-NN-*.log`, 병합 기준 `check-fix-NN-merge-base.json`, 진행 기록 `check-fix.pending.json`(`active`·`tag`·`retries_before`·`outcome` — 지우거나 고쳐서 넘기지 않는다).
 
-회귀: `tests/smoke-fast-check.sh`(LLM 호출 없음 — fixture 프로젝트의 정상·위반·실행 오류 명령): 미설정 생략 / 첫 검사 위반 시 리뷰어 0회 / 수정자 뒤 위반 시 다음 리뷰어 0회 / 수정 → 재검사 → 리뷰 → TEST → LINT 순서 / 한도 소진·실행 오류·타임아웃·읽기 전용 위반 / worktree 실행 / 승인·과거 PASS 기록 오용 방지 / 혼합 설치 / 한글 경로 전달 / TERM 무시 자식 정리 / 수정 턴 도중 강제 종료·범위 위반 뒤 재실행 / 미결정 체크포인트 기록 전 중단(질문 복구) / 확정 도중 중단(한도·병합 1회).
+회귀: `tests/smoke-fast-check.sh`(LLM 호출 없음 — fixture 프로젝트의 정상·위반·실행 오류 명령): 미설정 생략 / 첫 검사 위반 시 리뷰어 0회 / 수정자 뒤 위반 시 다음 리뷰어 0회 / 수정 → 재검사 → 리뷰 → TEST → LINT 순서 / 한도 소진·실행 오류·타임아웃·읽기 전용 위반 / worktree 실행 / 승인·과거 PASS 기록 오용 방지 / 혼합 설치 / 한글 경로 전달 / TERM 무시 자식 정리 / 수정 턴 도중 강제 종료·범위 위반 뒤 재실행 / 미결정 체크포인트 기록 전 중단(질문 복구) / 확정 도중 중단(한도·병합 1회) / codex 워커의 거부된 호출(`SESSION_RESUME_UNCERTAIN`)이 resume marker 를 지우지 않음.
 
 ## 강제 규칙 (어길 수 없음)
 
@@ -205,6 +205,7 @@ FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초, 양의 정�
   — 규칙 원문은 재전달 경계에서 다시 싣는다), 전제는 `worker-session.json` 저널이 고정하고 임계치 도달 시 unit 경계에서만 `worker-handoff.json` 검증을 거쳐 fresh 세대로 교체한다. 세션 정책은 CLI 와 독립이다 — codex 로 라우팅된 역할도 같은 key 정책을 따른다:
   호출자가 결과를 수용한 key(`role_session_accept` — 현재 리뷰어·수정자, attempt 단위)는 세션 원장 `.session-<key>.codex.json` 의 `thread_id` 로 `codex exec resume` 을 하고, 새 attempt·검증자(고유 key)·수용되지 않은 호출은 항상 새 `codex exec` 다.
   thread id 는 최초 실행 이벤트 JSONL 의 `thread.started` 에서만 취득하며(`--last`·자동 검색 금지), resume 실패 시 새 세션으로 조용히 대체하지 않고 중단한다(결과 수용이 불확실하면 `.session-<key>.resume-pending.json` marker 가 재전송을 막는다).
+  수정자의 resume 이벤트 thread id 가 원장과 다르면(`SESSION_THREAD_MISMATCH`) 리뷰 루프가 그 사유를 marker 에 남기고(`unaccepted`), 범위 안 변경이 있어도 일반 `CLI_EXIT_STATUS_MISMATCH` 복구(리뷰어로 전달)·세션 수용을 타지 않는다 — 변경·marker·체크포인트(`FIXER_PENDING`)를 보존한 채 exit 1 로 멈추며, 재실행도 사람이 marker 를 확인하고 치우기 전에는 모델 호출 0회로 같은 사유로 멈춘다(치운 뒤에는 수정자 재호출 없이 리뷰어가 남은 변경을 판정). 이 차단은 체크포인트가 아니라 marker 의 `unaccepted` 표시로 판정한다 — 같은 호출이 범위 위반 등 다른 게이트에 먼저 걸려(그 오류가 우선 보고된다) 체크포인트가 `NONE` 으로 초기화돼도, 그 오류만 복구한 재실행은 marker 를 치우기 전에는 새 attempt·리뷰어 호출·승인 재사용 없이 같은 사유로 멈춘다(범위 lock·기준선 가드 다음, 재개 판정·빠른 검사 앞). 회귀: `tests/smoke-codex-resume.sh` L3·L4.
   리뷰어 모델을 Claude↔Codex 로 바꿔도 attempt 단위 재사용 의미는 같고 CLI 플래그만 다르다. 세션 재사용은 비용 최적화일 뿐 판정 근거가 아니다 — 승인은 계속 리뷰 JSON·diff·지문으로만 검증한다.
 - 사용량은 `$WORK_DIR/usage.jsonl`에 CLI invocation 한 번당 행 1개(세션 누계 아님, `--resume` 해도 invocation 별). 필드: `role`/`cli`/`model`/`label`/`invocation_id`, `input_uncached`(cache 제외 입력)·`cache_read`·`cache_write`·`output`·`input_effective`(셋의 합, 진단용 파생값), `reasoning_output`(codex 만, output 의
   부분집합 — total/cost 에 다시 더하지 않음), `num_turns`·`duration_ms`, `exit_code`/`success`. 비용은 provenance 로 나뉜다: `cost_usd` = provider 가 직접 보고한 실제 비용(claude `total_cost_usd`, codex 는 항상 `null`), `estimated_cost_usd` = codex 토큰 관측값 × 명시적 가격표(`config.sh` `codex_model_pricing`
