@@ -68,7 +68,7 @@ unit 마다 CLI 를 다시 부르는 것은 러너이고(Feature 당 프로세�
   스키마와 러너가 근거 필드, 사용하지 않는 필드의 공백, id 유일성, Round 2 `origin`의 형식과 참조 대상 존재(직전 이슈 id, docs diff에서 실제 바뀐 파일)를 강제하며 어긋나면 검증자 응답 오류로 중단한다. 수정과 신규 blocker 사이의 의미적 인과관계까지 러너가 보장하지는 않는다
   — 그것은 `tests/validator-cases.md` 감도 회귀 세트의 몫이다. 순수 정책 미결정은 `POLICY_UNDECIDED` + `UNDECIDED_CHOICE`로 표현해 충돌 계약이나 실패 경로를 지어내지 않게 한다. 검증자 프롬프트는 두 층이다 — 공통 계약(`prompts/validator-review-design.md`/`-impl.md`:
   관할·탐색 범위·입장 조건·출력 형식, 모델과 무관)과 판정 전략 오버레이(`prompts/validator-overlays/<프로필>.md`, `[VALIDATOR PROFILE: …]` 블록으로 task prompt 끝에 붙음). 프로필은 `config.sh`의 `VALIDATOR_PROFILE`(compact / guided / conservative / none)이며 기본은 명시 `guided` 다.
-  비워 두면 `validator_profile` 헬퍼가 `VALIDATOR_MODEL`의 정확한 ID 로 기본값을 고른다(gpt-6-sol·gpt-5.6-sol→compact, gpt-6-astra→guided, 그 외→conservative). 오버레이는 계약을 바꾸지 못하고 "그 계약을 어떤 순서·깊이로 판정할지"만 담는다
+  비워 두면 `validator_profile` 헬퍼가 `VALIDATOR_MODEL`의 정확한 ID 로 기본값을 고른다(gpt-6-sol·gpt-5.6-sol→compact, gpt-6-astra·gpt-6.2-astra→guided, 그 외→conservative). 오버레이는 계약을 바꾸지 못하고 "그 계약을 어떤 순서·깊이로 판정할지"만 담는다
   — 모델별로 계약 파일을 복제하지 않는다. 프로필 이름이 있는데 파일이 없으면 검증자를 부르지 않고 실패한다. 검증자 프롬프트(공통 계약·오버레이 모두)·스키마·러너 검사 중 하나라도 바뀌면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 그 값과 다른 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
   검증자는 문서의 사실 주장을 그대로 믿지 않는다 — 명시적 convention 규칙과의 직접 충돌, 요구·확정 결정·기존 필수 계약에 근거 없는 새 제품 동작, 변경 대상의 직접 호출부·피호출부 누락으로 인한 계약 위반, 직접 범위 코드와 어긋나는 NEW 탐색 근거를 독립적으로 대조한다(확정적인 위반만 BLOCK, 탐색은 변경 대상과 직접 의존까지, 필수 파생 기술 변경·local expression 은 대상 아님).
   검증자는 최소 불변식만 요구하고 해결 방법을 처방하지 않는다. 디자이너는 5단계 판정을 거쳐 REJECT하고, ACCEPT해도 검증자의 처방을 복사하지 않는다. Round 1은 전부, Round 2부터는 직전 이슈 종결 검토와 직접 회귀만. 파이프라인 운영(git 기준선·지문·테스트 순서)은 러너 책임이며 문서 blocking 사유가 아니다.
@@ -156,7 +156,7 @@ unit 마다 CLI 를 다시 부르는 것은 러너이고(Feature 당 프로세�
   리뷰어 모델을 Claude↔Codex 로 바꿔도 attempt 단위 재사용 의미는 같고 CLI 플래그만 다르다. 세션 재사용은 비용 최적화일 뿐 판정 근거가 아니다 — 승인은 계속 리뷰 JSON·diff·지문으로만 검증한다.
 - 사용량은 `$WORK_DIR/usage.jsonl`에 CLI invocation 한 번당 행 1개(세션 누계 아님, `--resume` 해도 invocation 별). 필드: `role`/`cli`/`model`/`label`/`invocation_id`, `input_uncached`(cache 제외 입력)·`cache_read`·`cache_write`·`output`·`input_effective`(셋의 합, 진단용 파생값), `reasoning_output`(codex 만, output 의
   부분집합 — total/cost 에 다시 더하지 않음), `num_turns`·`duration_ms`, `exit_code`/`success`. 비용은 provenance 로 나뉜다: `cost_usd` = provider 가 직접 보고한 실제 비용(claude `total_cost_usd`, codex 는 항상 `null`), `estimated_cost_usd` = codex 토큰 관측값 × 명시적 가격표(`config.sh` `codex_model_pricing`
-  — OpenAI API Standard, 2026-10-30 조회, USD/1M tokens, 컬럼 입력 / 캐시 입력 / 30분 캐시 쓰기 / 12시간 캐시 쓰기 / 출력: `gpt-6-astra` 10/1/12.5/25/50(장문 20/2/25/50/75), `gpt-5.6-sol` 4/0.4/5/10/20(장문 8/0.8/10/20/30
+  — OpenAI API Standard, 2026-10-30 조회, USD/1M tokens, 컬럼 입력 / 캐시 입력 / 30분 캐시 쓰기 / 12시간 캐시 쓰기 / 출력: `gpt-6.2-astra` 8/0.4/10/20/40(장문 16/0.8/20/40/60, 2026-11-18 조회), `gpt-6-astra` 10/1/12.5/25/50(장문 20/2/25/50/75), `gpt-5.6-sol` 4/0.4/5/10/20(장문 8/0.8/10/20/30
   — 2026-11-21 까지 최소 유지 예정인 프로모션 단가), `gpt-6-sol` 2/0.2/2.5/5/10(장문 4/0.4/5/10/15), `gpt-5.6-luna` 0.2/0.02/0.25/0.5/1.2(장문 0.4/0.04/0.5/1/1.8), `gpt-6-luna` 0.1/0.01/0.125/0.25/0.5(장문 0.2/0.02/0.25/0.5/0.75).
   규칙: 장문 = 요청 입력 > 272,000(정확히 272,000 은 단문)이면 **요청 전체**에 적용, 장문 단가 = 입력·캐시 입력·캐시 쓰기 단문×2 / 출력 ×1.5, 30분 캐시 쓰기 = 입력×1.25, 12시간 = ×2.5(캐시 쓰기는 입력 단가 위의 할증이 아니라 배타적 입력 토큰 분류).
   정확한 모델 ID 만 매칭하며(`gpt-6-sol` ≠ `gpt-6.1-sol`) 가격표에 없는 모델은 `null`), `cost_kind` = `reported|estimated|unknown`, `pricing_basis`, `pricing_assumptions`(판단할 수 없는 과금 조건을 명시한 가정 목록), `long_context_turns`.

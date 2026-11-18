@@ -227,17 +227,18 @@ case "$line" in *"claude=1건(reported \$0.25, estimated \$0"*"codex=1건(report
 [ "$(printf '%s' "$summary" | jq -r '[.by_cli.codex.invocations,.by_cli.claude.invocations,.by_model["gpt-5.6-luna"].invocations,(.by_model["gpt-5.6-luna"].estimated_cost_usd*100000000|round),(.pricing_bases|join(","))]|@csv')" = '1,1,1,157000,"openai-api-standard-2026-10-30"' ] || fail "I: by_cli/by_model/pricing_bases 불일치: $summary"
 pass "I: DONE 보고(reported + estimated + combined 추정 + unknown 건수)가 usage_summary·usage-summary.json 과 같은 숫자, by_cli/by_model 분리"
 
-# ===== 사례 J (GOAL-6 P0-A): 5종 × short/long 요금표 전수 비교, 30m/12h 캐시 쓰기, 272,000/272,001 경계, 요청 전체 요율, 누적 비판정 =====
+# ===== 사례 J (GOAL-6 P0-A): 등록 모델 전부 × short/long 요금표 전수 비교, 30m/12h 캐시 쓰기, 272,000/272,001 경계, 요청 전체 요율, 누적 비판정 =====
 price() { bash -c "source $CFG; codex_model_pricing $1"; }
 est() { bash -c "source $CFG; codex_estimate_cost '$1' \"\$(codex_model_pricing $2)\""; }   # turns_json model
 flat() { jq -r '[.input,.cached,.cache_write_30m,.cache_write_12h,.output,.long_context_input_tokens,.long.input,.long.cached,.long.cache_write_30m,.long.cache_write_12h,.long.output]|map(tostring)|join(" ")' | sed 's/\.0\b//g'; }
 check_price() { [ "$(price "$1" | flat)" = "$2" ] || fail "J: $1 요금표 불일치: $(price "$1" | flat) ≠ $2"; }
+check_price gpt-6.2-astra "8 0.4 10 20 40 272000 16 0.8 20 40 60"
 check_price gpt-6-astra  "10 1 12.5 25 50 272000 20 2 25 50 75"
 check_price gpt-5.6-sol  "4 0.4 5 10 20 272000 8 0.8 10 20 30"
 check_price gpt-6-sol    "2 0.2 2.5 5 10 272000 4 0.4 5 10 15"
 check_price gpt-5.6-luna "0.2 0.02 0.25 0.5 1.2 272000 0.4 0.04 0.5 1 1.8"
 check_price gpt-6-luna   "0.1 0.01 0.125 0.25 0.5 272000 0.2 0.02 0.25 0.5 0.75"
-for m in gpt-6-astra gpt-5.6-sol gpt-6-sol gpt-5.6-luna gpt-6-luna; do
+for m in gpt-6.2-astra gpt-6-astra gpt-5.6-sol gpt-6-sol gpt-5.6-luna gpt-6-luna; do
   p="$(price "$m")"
   [ "$(printf '%s' "$p" | jq -r '[.cache_write_30m,.cache_write_12h,.long.cache_write_30m,.long.cache_write_12h,.long]|map(.==null)|any')" = false ] || fail "J: $m 에 null 캐시 쓰기/long 이 남음"
   # long = short×2(입력·캐시·캐시쓰기), 출력 ×1.5 / 30m = 입력×1.25, 12h = 입력×2.5
@@ -245,7 +246,7 @@ for m in gpt-6-astra gpt-5.6-sol gpt-6-sol gpt-5.6-luna gpt-6-luna; do
 done
 # 동일 fixture (input 10000, cached 6000, write 1000(30m), output 500) 의 기대값
 fx='[{"i":10000,"c":6000,"w":1000,"w12":0,"o":500,"r":300}]'
-for pair in gpt-6-astra:735000 gpt-5.6-sol:294000 gpt-6-sol:147000 gpt-5.6-luna:15700 gpt-6-luna:7350; do
+for pair in gpt-6.2-astra:564000 gpt-6-astra:735000 gpt-5.6-sol:294000 gpt-6-sol:147000 gpt-5.6-luna:15700 gpt-6-luna:7350; do
   m="${pair%%:*}"; want="${pair##*:}"
   got="$(est "$fx" "$m" | jq -r '(.estimated_cost_usd*10000000|round)')"
   [ "$got" = "$want" ] || fail "J: $m fixture 비용 불일치: $got ≠ $want (/1e7)"
@@ -264,7 +265,7 @@ got="$(est '[{"i":10000,"c":6000,"w":1000,"w12":500,"o":500,"r":0}]' gpt-6-astra
 got="$(est '[{"i":8700,"c":6000,"w":0,"w12":200,"o":500,"r":0}]' gpt-6-astra)"
 [ "$(printf '%s' "$got" | jq -r '[(.estimated_cost_usd*10000000|round),(.assumptions|any(startswith("cache_write_ttl=observed"))),(.assumptions|any(startswith("cache_write_ttl=30m")))]|@csv')" = '610000,true,false' ] || fail "J: 12h-only turn 의 TTL 근거가 빠짐: $got"
 [ "$(est '[{"i":1000,"c":0,"w":0,"w12":0,"o":10,"r":0}]' gpt-6-astra | jq -r '.assumptions|any(startswith("cache_write_ttl="))')" = false ] || fail "J: 캐시 쓰기 없는 turn 에 TTL 가정이 붙음"
-pass "J: 5종×short/long 요금표 전수 일치(null 없음, ×2/×1.5/×1.25/×2.5 규칙), fixture 5종 비용, 30m/12h 분기(12h-only TTL 근거 포함), 272,000/272,001 경계·요청 전체 요율, 누적 비판정"
+pass "J: 6종×short/long 요금표 전수 일치(null 없음, ×2/×1.5/×1.25/×2.5 규칙), fixture 6종 비용, 30m/12h 분기(12h-only TTL 근거 포함), 272,000/272,001 경계·요청 전체 요율, 누적 비판정"
 
 rm -rf "$TMP"
 echo "smoke-codex-usage: 전부 통과"

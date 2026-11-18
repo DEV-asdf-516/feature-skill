@@ -205,6 +205,7 @@ overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFI
 echo "$overlay_sol" | grep -q '^\[VALIDATOR PROFILE: compact\]$' || fail "검증자 프로필: sol 기본값이 compact 가 아님"
 # 모델별 기본 매핑: gpt-6-astra 는 guided 여야 한다(매핑 누락으로 conservative 로 떨어지던 문제), 매핑에 없는 모델만 conservative
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6.2-astra 기본값이 guided 가 아님"
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=some-unknown-model VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = conservative ] || fail "검증자 프로필: 매핑에 없는 모델의 기본값이 conservative 가 아님"
 # 배포 기본값: 명시 프로필 guided · effort medium, 그리고 명시 프로필과 그 모델의 매핑 기본값이 서로 모순되지 않는다
 src_validator_profile="$(sed -n 's/^VALIDATOR_PROFILE="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"

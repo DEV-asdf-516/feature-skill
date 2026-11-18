@@ -13,8 +13,8 @@
 # DESIGN_REVISION_MODEL: 검증자가 BLOCK 한 합의 문서(design/implementation/approach)를 수정하는 하위 실행(consensus-loop 의 DESIGNER 역할) 전용.
 #   초안 작성은 interactive 오케스트레이터 세션이 직접 하며 그 모델은 이 설정으로 제어되지 않는다.
 DESIGN_REVISION_MODEL="claude-fable-5-2"
-DESIGNER_EFFORT="low"
-VALIDATOR_MODEL="gpt-6-astra"     # 명세 검증자
+DESIGNER_EFFORT="medium"
+VALIDATOR_MODEL="gpt-6.2-astra"     # 명세 검증자
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정)지만 문서 주장을 직접 호출 경로·conventions 와 교차 확인하므로 low 로 내리지 않는다. 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 VALIDATOR_PROFILE="guided"      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 명시 값이 모델별 기본값(validator_profile 헬퍼)보다 우선한다. 빈 값 = 모델별 기본값. compact | guided | conservative | none
 WORKER_MODEL="claude-opus-5-5"       # 구현 담당
@@ -195,6 +195,7 @@ validator_profile() {
     gpt-6-sol)   printf 'compact' ;;
     gpt-5.6-sol)   printf 'compact' ;;
     gpt-6-astra)   printf 'guided' ;;
+    gpt-6.2-astra) printf 'guided' ;;
     *)             printf 'conservative' ;;
   esac
 }
@@ -2463,14 +2464,17 @@ USAGE_SCHEMA_VERSION=4
 #   등록된 5종은 cache_write_*·long 에 null 이 없다. 어떤 구간의 캐시 쓰기 단가가 null 이면 추측하지 않고 estimated=null(unknown) 로 둔다.
 #   실제 청구(ChatGPT/Codex 구독 결제액·크레딧 차감·service tier·리전 할증)가 아니라 API 표준 요금 환산 추정치다.
 #   여기 없는 모델은 estimated_cost_usd=null, cost_kind=unknown 으로 집계된다(추측 가격 금지).
-# [Modified: GOAL-6] 5종 전부 short/long 두 구간과 30분/12시간 캐시 쓰기 단가를 등록한다(null 없음). 기준: OpenAI API Standard, 2026-10-30 조회
+# [Modified: GOAL-6] 등록 모델 전부 short/long 두 구간과 30분/12시간 캐시 쓰기 단가를 등록한다(null 없음). 기준: OpenAI API Standard, 2026-10-30 조회
 #   (developers.openai.com/api/docs/pricing · /guides/prompt-caching · /models/<id>). 규칙: long = 요청 입력 > 272,000(정확히 272,000 은 short) 일 때
 #   그 요청 전체에 적용, long 단가 = 입력·캐시 입력·캐시 쓰기 short×2 / 출력 short×1.5, 30분 캐시 쓰기 = 구간 입력 단가×1.25, 12시간 = ×2.5
 #   (캐시 쓰기는 입력 단가 위에 더하는 할증이 아니라 배타적 입력 토큰 분류). 정확한 모델 ID 만 매칭한다(gpt-6-sol ≠ gpt-6.1-sol).
+#   gpt-6.2-astra 는 2026-11-18 같은 페이지에서 추가 조회했다(같은 규칙을 따른다 — 캐시 입력만 입력의 5%).
 #   gpt-5.6-sol 단가는 2026-11-21 까지 최소 유지 예정인 프로모션 단가다 — 이 날짜 뒤에는 요금표 재확인이 필요하다(basis 의 날짜가 그 근거).
 CODEX_PRICING_BASIS="openai-api-standard-2026-10-30"
 codex_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
   case "$1" in
+    gpt-6.2-astra)
+      printf '%s' '{"input":8,"cached":0.4,"cache_write_30m":10,"cache_write_12h":20,"output":40,"long_context_input_tokens":272000,"long":{"input":16,"cached":0.8,"cache_write_30m":20,"cache_write_12h":40,"output":60}}' ;;
     gpt-6-astra)
       printf '%s' '{"input":10,"cached":1,"cache_write_30m":12.5,"cache_write_12h":25,"output":50,"long_context_input_tokens":272000,"long":{"input":20,"cached":2,"cache_write_30m":25,"cache_write_12h":50,"output":75}}' ;;
     gpt-5.6-sol)
