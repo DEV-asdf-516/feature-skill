@@ -139,6 +139,36 @@ LINT_CMD="CHANGE_ME"
 FAST_CHECK_CMD=""
 FAST_CHECK_TIMEOUT_SEC=120   # 제한 시간(초, 양의 정수). 넘으면 실행 오류(FAST_CHECK_ERROR/TIMEOUT)
 
+# --- Unit 정적 검사 (선택) ---
+# 구현 단위(unit)마다 워커 턴 뒤, 그 unit 의 targeted test 앞에서 실행하는 결정론적 검사 명령. 빠르고 국소적인 규칙만 둔다(변경 파일의 formatter 검사·lint·국소 규칙) —
+# 전역 규칙·느린 검사는 위 FAST_CHECK_CMD(모든 unit 뒤 1회)에 두고, 같은 비싼 검사를 두 곳에 걸지 않는다. FAST_CHECK_CMD 를 unit 마다 자동으로 되풀이하지 않는다.
+# 비어 있으면(또는 이 줄이 없는 기존 config.sh 면) 미설정 = 검사를 실행하지 않고 "생략" 으로만 로그에 남긴다(통과로 세지 않는다).
+# 계약은 FAST_CHECK_CMD 와 같다: exit 0 = 정상, exit 1 = 규칙 위반(진단 출력 필수), 그 외·타임아웃 = 실행 오류, 읽기 전용(자동 수정·포매팅·git add 금지).
+#       환경 변수 UNIT_CHECK_CHANGED_FILES(이 unit 이 바꾼 파일 목록 파일 — unit 시작 tree 대비, unit scope 안, 삭제 제외)·UNIT_CHECK_ROOT·UNIT_CHECK_UNIT_ID.
+# 위반은 targeted test 실패와 같은 unit 수정 턴 1회로 함께 고친다(한도 MAX_TEST_RETRIES 공유). 실행 오류는 워커를 부르지 않고 사용자에게 돌아간다.
+# 진행 중인 피처에서 명령을 켜거나 바꾸면: 이미 완료된 unit 은 워커 재호출 없이 새 명령으로 검사만 다시 돌고(위반이면 사용자에게), 남은 unit 은 새 명령을 따른다.
+# 예: UNIT_CHECK_CMD="scripts/unit-check.sh"   (상세: README '검증 게이트', references/pipeline-contracts.md)
+UNIT_CHECK_CMD=""
+UNIT_CHECK_TIMEOUT_SEC=120   # 제한 시간(초, 양의 정수). 넘으면 실행 오류(UNIT_CHECK_ERROR/TIMEOUT)
+# (선택) 검사가 읽는 규칙·설정 파일 중 **어느 unit 의 scope 안에 있는 것**을 공백으로 구분해 적는다(저장소 상대 경로 — 파일 또는 디렉터리, glob 없음).
+# 완료 unit 의 검사 PASS 는 '그때의 규칙'에 묶여 재사용된다. 어느 unit 의 scope 에도 없는 파일과 위 명령이 가리키는 스크립트 파일은 자동으로 규칙 입력에 들어가지만,
+# 이번 피처의 unit 이 직접 고치는 규칙 파일(예: 다른 unit 의 scope 에 든 lint 설정)은 하네스가 알 수 없다 — 여기 적어야 그 파일이 바뀔 때 완료 unit 을 다시 검사한다.
+# 적은 경로가 작업 트리에 없으면(오타·gitignore) 검사를 실행하지 않고 ENV_ERROR 로 멈춘다. 비어 있으면(또는 줄이 없으면) 자동 포함분만 쓴다.
+# 예: UNIT_CHECK_POLICY_PATHS="config/lint-rules.yml tools/checks"
+UNIT_CHECK_POLICY_PATHS=""
+
+# --- 위험도별 추가 검증 (선택) ---
+# 리뷰 승인 뒤, 전체 TEST_CMD 앞에서 실행하는 프로젝트 명령 하나. 명령이 변경 내용(RISK_VERIFY_CHANGED_FILES)을 보고 위험도를 판정하고 그 위험도에 필요한
+# 추가 검증(계약·보안·통합 테스트 등)을 직접 수행한다 — 위험도 규칙과 테스트 명령은 프로젝트가 소유하고 스킬에는 없다. 새 LLM 호출·리뷰어는 없다.
+# 비어 있으면(또는 이 줄이 없는 기존 config.sh 면) 미설정 = 종전 그대로 리뷰 승인 → TEST_CMD.
+# 계약: exit 0 = 통과(이때 $RISK_VERIFY_RESULT 파일에 {"risk_level":"LOW|MEDIUM|HIGH|CRITICAL|UNKNOWN","checks":[{"name":"…","status":"PASS"}],"reasons":["…"],"needs_human":false} 를 쓴다 —
+#       risk_level 만 필수. 결과가 없거나 형식이 틀리면 실행 오류다: 위험도를 LOW 로 가정하지 않는다), exit 1 = 위반(진단 출력 필수 → 기존 worker-fix → 재리뷰 → 재검증,
+#       한도 MAX_TEST_RETRIES 를 최종 테스트 수정과 공유), 그 외·타임아웃 = 실행 오류. risk_level=UNKNOWN 또는 needs_human=true 는 통과가 아니라 사용자 판단으로 돌아간다.
+#       읽기 전용(소스·git index 변경 금지 — 산출물은 작업 트리 밖 임시 디렉터리에). TEST_CMD/FAST_CHECK_CMD 가 이미 돌리는 검사를 여기서 되풀이하지 않는다.
+# 예: RISK_VERIFY_CMD="scripts/risk-verify.sh"   (상세: README '검증 게이트', references/pipeline-contracts.md)
+RISK_VERIFY_CMD=""
+RISK_VERIFY_TIMEOUT_SEC=600  # 제한 시간(초, 양의 정수). 넘으면 실행 오류(RISK_VERIFY_ERROR/TIMEOUT)
+
 # --- ntfy 완료 푸시 알림 (선택) ---
 # DONE(리뷰 승인 + 테스트·린트 통과, FINALIZED 아님) 기록 직후 1회 발송한다(scripts/notify-done.sh 의 notify_feature_done).
 # OS 독립 — curl HTTP 호출 하나뿐이고 uname/OS 분기가 없다. 미설정이면 로그만 남기고 생략하며,

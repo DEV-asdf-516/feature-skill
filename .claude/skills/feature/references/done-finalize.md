@@ -4,7 +4,8 @@
 
 ## Phase 2 — 보고 + finalize 질문 (오케스트레이터)
 
-`DONE`이면 변경 요약·라운드 수(`run-state.json.history`, `usage.jsonl`)·`decisions.md` 주요 결정·`delegated_choices`를 한 번에 보고한다. 실행 중 워커 `DOC_GAP`, 리뷰어 `CONTRACT_VIOLATION`/`UNDECIDED_APPROACH`, 반복된 수정자 수정이 있었으면 그 지점의 implementation.md/approach.md 가 material decision 을 충분히 정했는지(어떤 material 선택이
+`DONE`이면 변경 요약·라운드 수(`run-state.json.history`, `usage.jsonl`)·`decisions.md` 주요 결정·`delegated_choices`를 한 번에 보고한다. 러너가 DONE 직후 만든 `.agent-work/post-run-report.json`(모델 호출 없이 기존 기록을 집계한 사후 분석 — 형식은 `references/pipeline-contracts.md` 의 "DONE 뒤 사후 분석 보고서")을 읽어 함께 보고한다: 관측 비용(보고 비용과 추정 비용을 구분하고, `cost_unknown_invocations` 는 0 달러가 아니라 미관측으로 말한다.
+`totals_are_lower_bound` 가 true 면 usage 기록 일부를 읽지 못한 것이므로 합계를 "최소 이만큼"으로 말한다)·수정 턴과 리뷰어 재호출 횟수·unit/feature 단계별 검증 결과·`failure_analysis`·`rule_candidates`. `candidate_cause` 는 후보일 뿐이고 `root_cause` 가 `UNKNOWN` 이면 원인을 단정해 말하지 않으며, 절감액은 계산돼 있지 않다(unknown). `rule_candidates` 는 **제시만 한다** — DONE 뒤 코드·conventions·검사 규칙을 스스로 고치지 않고, 사용자가 고른 개선만 별도 작업으로 한다(이 worktree 의 승인된 코드는 건드리지 않는다). 보고서가 없으면(생성 실패 경고) 같은 명령으로 재실행하면 모델 호출 없이 다시 만들어진다. 실행 중 워커 `DOC_GAP`, 리뷰어 `CONTRACT_VIOLATION`/`UNDECIDED_APPROACH`, 반복된 수정자 수정이 있었으면 그 지점의 implementation.md/approach.md 가 material decision 을 충분히 정했는지(어떤 material 선택이
 워커에게 남았는지, 반대로 local expression 을 불필요하게 REQUIRED 로 적었는지)를 함께 분석해 보고한다 — 모델 이름별 문서 길이 조정·capability score·profile 은 만들지 않는다. `DONE` 은 리뷰 승인 + 전체 `TEST_CMD`/`LINT_CMD` 통과 + 승인 지문 유효를 뜻하며 여기서 상태 기계는 끝난다
 — 러너는 worktree 를 지우거나 원본에 반영하지 않는다.
 

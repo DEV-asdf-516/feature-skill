@@ -87,6 +87,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 | 2 | `NEED_USER` | `ASK_USER` / `DEADLOCK` / `MAX_ROUNDS`(design·impl 합의): 사용자 결정이 최종. 마지막 리뷰의 **모든 blocker** 에 `- [USER-QUESTION][scope=design\|impl][escalation=<blocker id>] <쟁점> → <답>` 을 `decisions.md` 에 추가하고 결정 내용을 그 단계 문서에 반영한 뒤 재실행하면 그 단계 검증자·디자이너 호출 0회로 다음 단계(design → impl, impl → worker)로 간다(`user-escalation-resume-<target>.json`, `USER_RESOLVED` — 검증자 PASS 아님). 답이 없거나 일부만 있으면 모델 0회로 다시 멈춘다 |
 | 2 | `NEED_USER` | `TEST_RETRIES_EXHAUSTED` / `APPROVAL_STALE_REPEATED` / 범위·기준선(`SCOPE_*`, `FOREIGN_WORKTREE_CHANGE`) / 구현 단위(`UNITS_MANIFEST_CHANGED` / `UNIT_SCOPE_VIOLATION` / `UNIT_TEST_RETRIES_EXHAUSTED`) / `WORKER_OUTCOME_UNCERTAIN`(워커가 변경을 만든 뒤 유효 결과 없이 non-zero — 자동 재호출·원복 없음, 호출 전 tree 로 복구 후 재실행) / `DESIGNER_SCOPE_VIOLATION`(디자이너가 합의 문서 밖 source 를 변경 — 검증자로 넘기지 않고 fail-closed) |
 | 2 | `NEED_USER` | `FAST_CHECK_RETRIES_EXHAUSTED`(프로젝트 빠른 검사의 규칙 위반이 워커 자동 수정 한도 뒤에도 남음 — 리뷰어 0회, 직접 고친 뒤 재실행하면 검사부터) / `FAST_CHECK_ERROR`(검사 실행 오류: 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반 — 자동 수정 없음). 아래 "프로젝트 빠른 검사" |
+| 2 | `NEED_USER` | `UNIT_CHECK_RETRIES_EXHAUSTED` / `UNIT_CHECK_ERROR` / `UNIT_CHECK_STALE_VIOLATION`(unit 별 정적 검사) · `RISK_VERIFY_RETRIES_EXHAUSTED` / `RISK_VERIFY_ERROR` / `RISK_VERIFY_NEEDS_USER`(리뷰 승인 뒤 위험도별 추가 검증 — 위험도 UNKNOWN·사람 확인 요구 포함). 아래 "검증 게이트" |
 | 2 | `NEED_USER` | `REVIEW_OUTPUT_INVALID`: 리뷰어 출력이 계약(스키마 → 버전 → origin/`fix_ref` → verdict 일관성)에 어긋남 — 승인도 수정 요청도 아니고 수정자는 호출되지 않는다. 원본·진단·입력 지문은 `reviews/invalid-review.json`. 그대로 재실행하면 리뷰어 0회로 같은 진단, 새 리뷰는 `--new-review-attempt` 로만 |
 | 2 | `NEED_USER` | `UNIT_CONTRACT_IMPACT_REQUIRED`(전역 입력 변경·스냅샷 없는 과거 unit·해석 불가 references — `unit-contract-impact.json` 으로 영향 unit 확정. 확정 파일은 러너가 내준 `target_fingerprint`(판단 당시 계약 지문)를 들고, 확정 뒤 계약이 또 바뀌면 적용되지 않고 다시 멈춘다) / `UNIT_CONTRACT_STALE`(완료 확정·review/verify/DONE 진입 직전에 계약 변경이 드러남 — 재실행하면 stale unit 부터 변경 계약으로 다시 돈다) |
 | 1 | `ENV_ERROR` | CLI·환경 오류(결과 JSON 자체가 없는 CLI 실패 포함 — codex resume 이면 marker 가 남아 다음 실행도 모델 0회로 멈춘다) |
@@ -94,7 +95,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 `DONE` 뒤 별도 명령 `--feature <id> --finalize`(사용자 승인 뒤에만, 아래 "사용")의 종료 코드는 0 `FINALIZED`(또는 already finalized) / 2 `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE`(사용자 확인) / 1 거부·오류(원본·worktree 불변) 다.
 
 재실행은 항상 같은 명령. 러너는 `run-state.json`(임시 파일 + `mv` 원자 교체)의 stage 힌트를 실제 산출물과 교차 확인해 재개 지점을 고른다. 대조하는 산출물은 합의 PASS 파일(또는 합의 에스컬레이션의 유효한 사용자 수리 `user-escalation-resume-<target>.json`), `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint` 다.
-러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)와 리뷰 전 프로젝트 빠른 검사의 (규칙 위반 → 워커 수정 → 재검사 → 리뷰)는 두 번째와 같은 형태·같은 한도다(빠른 검사의 실행 오류는 자동 수정으로 보내지 않는다). 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
+러너는 스크립트다. 자동 루프는 (리뷰 이슈 → 수정 → 재리뷰)와 (테스트 실패 → 워커 1회 수정 → 재리뷰 → 재테스트) 둘뿐이다. 구현 단위 안의 (targeted test 실패 → unit 범위 수정 → 재테스트)와 리뷰 전 프로젝트 빠른 검사의 (규칙 위반 → 워커 수정 → 재검사 → 리뷰)는 두 번째와 같은 형태·같은 한도다(빠른 검사의 실행 오류는 자동 수정으로 보내지 않는다). Unit 정적 검사 위반은 unit 수정 턴에, 위험도별 추가 검증 위반은 최종 테스트의 워커 수정에 실려 가므로 새 루프가 아니다. 그 밖의 막힘은 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구는 일부러 넣지 않았다.
 
 ### 구현 단위(implementation unit) 직렬 실행
 
@@ -165,7 +166,8 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
         ├── feature-worktree.sh  # 피처 전용 worktree 부트스트랩(dirty 원본을 snapshot tree 로 materialize, 재실행 재사용) + finalize(B/O/F 3-way 무커밋 반영·archive·정리)
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
         ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지 (리뷰어 호출 직전 프로젝트 빠른 검사 게이트)
-        ├── fast-check.sh        # 프로젝트 빠른 검사 연결(선택, FAST_CHECK_CMD) — worktree 루트 실행·타임아웃·결과 구분(통과/위반/실행 오류)·읽기 전용 확인·실행 기록
+        ├── fast-check.sh        # 프로젝트 빠른 검사 연결(선택, FAST_CHECK_CMD) — worktree 루트 실행·타임아웃·결과 구분(통과/위반/실행 오류)·읽기 전용 확인·실행 기록. 같은 엔진으로 Unit 정적 검사(UNIT_CHECK_CMD)·위험도별 추가 검증(RISK_VERIFY_CMD)도 실행한다
+        ├── post-run-report.sh   # DONE 뒤 사후 분석 보고서(post-run-report.json) — 비용·검증·실패 회고·규칙 개선 후보. 기존 기록 집계만(모델 호출 0회), 실패해도 DONE 유지
         └── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
 
 tests/
@@ -175,6 +177,7 @@ tests/
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
 ├── smoke-worker-regression.sh  # worker-regression 하네스 회귀 — 가짜 워커로 DONE=exit 0 / DOC_GAP=exit 2 + 체크포인트가 production 이 인정하는 impl PASS 위에 생김 · provenance 가드 불변 · usage summary v3 (LLM 호출 없음)
 ├── smoke-fast-check.sh          # 프로젝트 빠른 검사 연결 회귀 — fixture 프로젝트의 정상·위반·실행 오류 명령: 미설정 생략·리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지 (mock)
+├── smoke-verification-gates.sh  # 검증 게이트 회귀 — Unit 정적 검사(PASS·위반·오류·읽기 전용·수정 턴 1회·설정 변경)·위험도별 추가 검증(LOW·HIGH·UNKNOWN·위반→재승인)·DONE 사후 분석 보고서 (mock)
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 39개 (문서·src·expected.json)
@@ -240,6 +243,8 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    TEST_CMD="<프로젝트 테스트 명령>"    # 예: "npm test", "./gradlew test", "venv/bin/pytest tests -q"
    LINT_CMD="<프로젝트 린트/빌드 검증 명령>"   # 복잡도·중복·dead code 분석기도 여기에 구성(eslint/sonar, radon, detekt, knip, jscpd…)
    FAST_CHECK_CMD=""                      # (선택) 리뷰 전 프로젝트 빠른 검사 명령. 빈 값 = 미설정(생략) — 아래 "프로젝트 빠른 검사"
+   UNIT_CHECK_CMD=""                      # (선택) unit 마다 targeted test 앞에서 도는 정적 검사 명령 — 아래 "검증 게이트"
+   RISK_VERIFY_CMD=""                     # (선택) 리뷰 승인 뒤 TEST_CMD 앞에서 도는 위험도별 추가 검증 명령 — 아래 "검증 게이트"
    ```
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
    빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 모든 스크립트 실행을 거부한다.
@@ -320,6 +325,82 @@ case $? in 0) exit 0;; 2) exit 1;; *) exit 3;; esac
 
 진행 중인 피처가 있을 때 검사를 새로 켜거나 끄지 않는다(워커 세션 계약에 포함되어 다음 워커 호출이 `WORKER_SESSION_MISMATCH` 로 멈춘다). 실제 규칙 선정과 프로젝트 쪽 검사 스크립트 작성은 프로젝트의 몫이다.
 
+### 검증 게이트 — Unit 정적 검사 · 위험도별 추가 검증 · DONE 사후 분석 (선택)
+
+결정론적으로 잡을 수 있는 문제를 LLM 호출 전에 막고, 통과 여부를 모델의 주장이 아니라 실제 실행 결과로 증명하기 위한 선택 기능이다. 셋 다 새 에이전트·리뷰어·수정 루프·재시도 한도를 추가하지 않고, 설정하지 않으면 종전 흐름 그대로다. 전체 계약은 `references/pipeline-contracts.md` 의 "Unit 정적 검사 · 위험도별 추가 검증"·"DONE 뒤 사후 분석 보고서".
+
+```
+Worker(unit) → [UNIT_CHECK_CMD] → targeted test → … 모든 unit → [FAST_CHECK_CMD] → Reviewer → [RISK_VERIFY_CMD] → TEST_CMD/LINT_CMD → DONE → post-run-report.json
+```
+
+**설정** — `config.sh` 사용자 설정 영역(둘 다 기본 빈 값 = 미설정, 줄이 없는 기존 config.sh 도 미설정으로 동작).
+
+```bash
+UNIT_CHECK_CMD="scripts/unit-check.sh"     # 빠르고 국소적인 규칙만. UNIT_CHECK_TIMEOUT_SEC=120
+RISK_VERIFY_CMD="scripts/risk-verify.sh"   # 위험도 판정 + 그 위험도의 추가 검증. RISK_VERIFY_TIMEOUT_SEC=600
+```
+
+명령 계약은 프로젝트 빠른 검사와 같다(worktree 루트 실행, exit 0 정상 / 1 위반 + 진단 출력 / 그 외·타임아웃 실행 오류, 읽기 전용, 성공 캐시 없음). 검사 도구와 규칙은 프로젝트가 소유한다 — 스킬에는 언어·프레임워크 규칙이 없다.
+
+**Unit 정적 검사** — unit 워커 턴 뒤 그 unit 이 바꾼 파일(`UNIT_CHECK_CHANGED_FILES`)을 대상으로 한 번 돈다. 위반은 targeted test 실패와 **같은 수정 턴 1회**로 함께 고친다(한도 `MAX_TEST_RETRIES` 공유 — 둘 다 실패해도 워커를 두 번 부르지 않는다). 실행 오류·읽기 전용 위반은 워커 없이 `UNIT_CHECK_ERROR`.
+
+```bash
+#!/usr/bin/env bash
+# scripts/unit-check.sh (예: 변경 파일만 검사하는 어댑터) — 자동 수정 옵션을 쓰지 않는다
+files=(); while IFS= read -r f; do case "$f" in *.ts|*.tsx) [ -f "$f" ] && files+=("$f");; esac; done < "$UNIT_CHECK_CHANGED_FILES"
+[ "${#files[@]}" -gt 0 ] || exit 0
+npx eslint --no-fix "${files[@]}"; rc=$?          # eslint: 0 정상 / 1 위반 / 2 실행 오류 — 계약과 같다
+exit "$rc"
+```
+
+무엇을 어디에 둘지: Unit 검사 = 변경 파일의 formatter 검사·lint·국소 규칙 / 빠른 검사 = 전역 아키텍처 의존성·전체 범위 규칙 / 위험도 검증 = 기본 테스트가 다루지 않는 위험. 같은 비싼 검사를 두 곳에 걸지 않는다.
+
+진행 중인 피처에서 `UNIT_CHECK_CMD` 를 켜거나 바꾸면: 이미 완료된 unit 은 워커 재호출 없이 새 명령으로 **검사만** 다시 돌고(통과하면 체크포인트 유지, 위반이면 `UNIT_CHECK_STALE_VIOLATION` 으로 사용자에게), 남은 unit 은 새 명령을 따른다. 워커 세션 전제는 바뀌지 않는다.
+
+**위험도별 추가 검증** — 리뷰 승인 뒤 프로젝트 명령 하나가 변경(`RISK_VERIFY_CHANGED_FILES`)의 위험도를 정하고 필요한 검증을 직접 실행한 다음 결과 JSON 을 `$RISK_VERIFY_RESULT` 에 쓴다.
+
+```bash
+#!/usr/bin/env bash
+# scripts/risk-verify.sh (예) — 경로 규칙은 프로젝트가 정한다
+level=LOW; checks='[]'
+if grep -qE '^src/(auth|payment)/' "$RISK_VERIFY_CHANGED_FILES"; then
+  level=HIGH
+  npm run test:authz-bypass || { echo "[authz-bypass] 권한 우회 테스트 실패"; exit 1; }   # 위반 = exit 1 + 진단
+  checks='[{"name":"authz-bypass","status":"PASS"}]'
+elif grep -qE '^db/migrations/' "$RISK_VERIFY_CHANGED_FILES"; then
+  level=UNKNOWN                                    # 규칙으로 판정할 수 없으면 추측하지 않는다 → 사용자에게
+fi
+printf '{"risk_level":"%s","checks":%s}\n' "$level" "$checks" > "$RISK_VERIFY_RESULT"
+```
+
+| 결과 | 처리 |
+|---|---|
+| exit 0 + `risk_level` LOW·MEDIUM·HIGH·CRITICAL | 통과 → `TEST_CMD` |
+| exit 1 + 진단 | 위반 → 기존 워커 수정 1회 → **리뷰 재승인** → 재검증(한도는 최종 테스트 수정과 공유). 남으면 `RISK_VERIFY_RETRIES_EXHAUSTED` |
+| exit 0 인데 결과 JSON 없음·형식 오류, 그 외 종료 코드, 타임아웃, 소스·index 변경 | 실행 오류 → `RISK_VERIFY_ERROR`(위험도를 LOW 로 가정하지 않는다, 자동 수정 없음) |
+| `risk_level` UNKNOWN 또는 `needs_human: true` | `RISK_VERIFY_NEEDS_USER` — 모델에게 추측시키지 않고 사용자에게 |
+
+위험도가 높다는 이유만으로 LLM 을 더 부르지 않는다. 사람의 확인을 받는 방법(승인 기록 등)은 프로젝트의 검증 명령이 정한다.
+
+**DONE 사후 분석** — DONE 직후 `.agent-work/post-run-report.json` 이 생긴다(모델 호출 0회, 기존 기록 집계).
+
+- `cost_summary`: `usage-summary.json` 과 같은 숫자 + 워커 수정 턴·리뷰어 재호출·수정자 비용, 전체 모델 호출 수, 실행 시간. 보고 비용(reported)과 추정 비용(estimated)을 섞지 않고, 관측하지 못한 호출은 0 이 아니라 `cost_unknown_invocations` 다. 기계적 검증이 막은 횟수는 적지만 "절감액"은 계산하지 않는다(`counterfactual_savings.usd: null`).
+- `verification_summary`: unit 단계와 feature 단계의 검증 결과를 나눠 적는다(미설정은 SKIPPED, 기록 없음은 미관측).
+- `record_integrity`: 집계에 쓴 실행 기록(JSONL)에 읽을 수 없는 줄이 있으면 `complete:false` 와 파일별 줄 수를 적는다 — 그때의 집계는 읽힌 줄만 센 것이다(항목별 `corrupt_records`). 손상과 미관측은 구분된다. `usage.jsonl` 이 손상돼도 보고서는 만들어지고, 비용은 읽힌 줄만의 하한값으로 표시된다(`cost_summary.unreadable_usage_records`·`totals_are_lower_bound` — 읽지 못한 호출은 0 달러가 아니다).
+- `failure_analysis`: 관측된 실패 유형·횟수·근거 경로. `root_cause` 는 직접 증거가 없으면 `UNKNOWN` 이다.
+- `rule_candidates`: 같은 오류가 반복됐다는 근거가 기록에 있을 때만 만드는 개선 후보(`CODEBASE_CONSTRAINT`·`STATIC_CHECK`·`RUNTIME_TEST`·`LLM_REVIEW_REQUIRED`·`NEEDS_HUMAN_ANALYSIS`). 검사 진단 줄을 `[rule-id] 경로:줄: 내용` 형식으로 내면 같은 규칙의 반복을 식별한다. `auto_promote` 는 항상 `false` — DONE 뒤 코드·conventions·검사 규칙을 자동으로 고치지 않으며, 개선은 사용자가 골라 별도 작업으로 한다. Feature 간 반복 여부는 확인하지 않는다(`unverified`).
+
+보고서 생성이 실패해도 DONE 은 그대로다(경고 + `post-run-report.error.log`). 이미 DONE 인 피처를 다시 실행하면 모델·검증 명령을 부르지 않고, 보고서가 없을 때만 다시 만든다.
+
+**제한과 비용상 트레이드오프**
+
+- Unit 검사·위험도 검증은 캐시하지 않는다: unit 검증 회차마다, verify 에 들어올 때마다 명령을 다시 실행한다(LLM 호출이 아니라 프로젝트 명령의 실행 시간이 든다). 느린 검사를 `UNIT_CHECK_CMD` 에 두면 unit 수만큼 반복된다.
+- 완료 unit 의 검사 증거는 명령(`cmd_sha256`)·검사 대상 코드(`subject_fingerprint` — 그 unit 의 scope 안 내용)·정책 입력(`policy_fingerprint` — 어느 unit 의 scope 에도 없는 파일 + 명령이 가리키는 검사 스크립트 + `UNIT_CHECK_POLICY_PATHS` 로 선언한 경로)에 묶인다. 검사 뒤 그 코드가 바뀌거나(뒤 unit·수정자·worker-fix·수동 수정) 검사 스크립트·규칙이 바뀌면 review·verify 앞에서 **워커·리뷰어 호출 없이 그 unit 의 검사만** 다시 돈다(위반이면 `UNIT_CHECK_STALE_VIOLATION`). 수정자가 바꾼 경우도 다음 리뷰어 호출 전에 재검사한다(위반 코드에 리뷰어 호출을 쓰지 않는다). 다른 unit 의 scope 에만 속한 변경은 재검사를 일으키지 않는다 — 그래서 **이번 피처의 unit 이 직접 고치는 규칙·설정 파일**(어느 unit 의 scope 안에 있는 검사 정책)은 `config.sh` 의 `UNIT_CHECK_POLICY_PATHS="config/lint-rules.yml …"` 에 적어야 그 파일이 바뀔 때 완료 unit 을 다시 검사한다(적지 않으면 과거 PASS 가 재사용된다 — 하네스는 검사기가 무엇을 읽는지 모른다). gitignore 된 설정·전역 도구 버전처럼 작업 트리 밖의 입력과 다른 unit 의 코드를 함께 읽는 교차 파일 규칙도 지문에 없다 — 그 범위는 캐시 없는 빠른 검사·리뷰·최종 테스트가 맡는다.
+- 검사·검증이 파일이나 git index 를 바꾸면(읽기 전용 위반) 그 변경이 실제로 되돌려질 때까지 재실행이 다시 멈춘다(Unit 검사: 바뀐 경로 + index / 위험도 검증·빠른 검사: index). 다른 파일을 더 고치거나 검사 명령만 고치는 것으로는 풀리지 않는다. 자동 원복은 없다.
+- 위험도 검증의 결과 JSON 은 형식(`checks[].name`·`status` PASS/FAIL/SKIPPED, `reasons[]` 문자열)과 종료 코드의 일관성을 검사한다: `checks` 에 FAIL 이 있는데 exit 0 이면 통과가 아니라 `RISK_VERIFY_ERROR`(`RESULT_INCONSISTENT`)다.
+- 위반 하나는 워커 수정 턴 하나를 쓴다(unit 한도·verify 한도 공유). 검사가 엄격할수록 리뷰어가 볼 위반은 줄지만 수정 턴과 `*_RETRIES_EXHAUSTED` 중단은 늘 수 있다.
+- 위험도 판정의 정확도는 프로젝트 명령에 달려 있다. 스킬은 결과 JSON 의 형식과 UNKNOWN 처리만 강제한다.
+
 ### ntfy 완료 푸시 알림 (선택)
 
 `DONE`(리뷰 승인 + 테스트·린트 통과 — 사용자 승인 뒤의 `FINALIZED` 가 아니다)이 기록되면 러너가 [ntfy](https://ntfy.sh) HTTP API 로 휴대폰 푸시 알림을 보낸다(`scripts/notify-done.sh`). 발송 경로는 `curl` HTTP 요청 하나뿐이고 `uname`/OS 조건문이 없어 macOS·Linux·Windows(Git Bash/WSL) 어디서든 같게 동작한다.
@@ -354,6 +435,9 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 | `units/<id>/` | unit 별 체크포인트: `unit.json`·`scope.json`·`before.tree`·`worker-before/after.tree`·`worker-result.json`·`targeted-test-NN.log`·`done.json`(version 2: `spec_hash` + `unit_contract_fingerprint`) · `contract/`(유효 계약 스냅샷: `baseline/`·`first/`·`history/`·`contract.json`) · `worker-contract.json`(마지막 워커 턴이 받은 계약 지문) · `changed-contract.diff`(재개 턴에 준 실제 diff) |
 | `unit-contract-impact.json` | 사용자가 쓰는 영향 확정 `{version:2, target_fingerprint, affected_units, unaffected_units}` — `target_fingerprint` 는 판단 당시 확정 대상 계약의 지문이고 적용 직전에 현재 값과 다시 대조한다. 러너가 적용 후 `unit-contract-impact.used.<시각>.json` 으로 옮긴다 |
 | `unit-contract-impact.request.json` | 러너가 쓰는 확정 요청: 현재 `target_fingerprint` 와 대상 unit 별 상태·local/전역 계약 지문(적용되면 `.request.used.<시각>.json`) |
+| `units/<id>/unit-check/` · `risk-verify/` | Unit 정적 검사 · 위험도별 추가 검증 실행 기록(설정했을 때만, 형식은 `fast-check/` 와 같고 `unit_id` / `risk_level`·`checks`·`needs_human` 이 붙는다). 수정 턴에 넘긴 진단 묶음: `units/<id>/unit-verify-NN.diag.log`, `risk-verify/check-NNNN.diag.log` |
+| `units/<id>/targeted-test.history.jsonl` · `reviews/verify.history.jsonl` | targeted test · 최종 테스트/린트 실행 기록(append-only 증거 — 재개 판정에 쓰지 않는다) |
+| `post-run-report.json` | DONE 뒤 사후 분석(비용·검증·실패 회고·규칙 개선 후보 — 모델 호출 0회). 생성 실패 진단은 `post-run-report.error.log` |
 | `fast-check/` | 프로젝트 빠른 검사 실행 기록(설정했을 때만): `check-NNNN.log`(명령 출력 원본)·`check-NNNN.changed-files.txt`·`last.json`/`history.jsonl`(status PASS/VIOLATION/ERROR·kind·cmd·cwd·exit_code·duration_sec·tree 전후·modified_paths). 워커 수정 턴 결과는 `check-fix-NN-result.json` |
 | `reviews/invalid-review.json` | 리뷰어 출력 계약 위반 기록(`REVIEW_OUTPUT_INVALID`): attempt/round·원본 경로·결과 SHA256·invocation id·리뷰 입력 지문(작업 트리·범위·직전 리뷰·conventions + 계약 문서 request/design/implementation/approach/decisions 내용 해시)·검사기 버전·위반 배열. 재검증으로 수용될 때는 세션 확정과 체크포인트 전환이 끝난 뒤에만 `REVALIDATED` 로 닫힌다 |
 | `run-state.json` / `worker-result.json` | 러너 상태(재개 힌트) / 워커 결과 JSON(`DONE`/`UNDECIDED`, `undecided`, `delegated_choices`, `tests` — 모든 unit 완료 후 unit 결과를 합친 것) |
@@ -419,6 +503,7 @@ bash tests/smoke-consensus-fingerprint.sh # 사용자 결정 scope 별 PASS 지�
 bash tests/smoke-user-escalation-resume.sh # 합의 에스컬레이션(ASK_USER/DEADLOCK/MAX_ROUNDS) 사용자 결정 뒤 검증자·디자이너 0회로 다음 단계, 미답·잘못된 답·stale provenance 차단, DOC_GAP 체인. LLM 호출 없음
 bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 워커 DONE/DOC_GAP 종료 코드·impl PASS provenance 전제·usage summary. LLM 호출 없음
 bash tests/smoke-fast-check.sh            # 프로젝트 빠른 검사 연결: 미설정 생략·첫 검사/수정자 뒤 위반 시 리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도 소진·실행 오류·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지·혼합 설치·한글 경로·TERM 무시 자식 정리·수정 턴 중단 뒤 재실행·미결정 복구·확정 멱등. LLM 호출 없음
+bash tests/smoke-verification-gates.sh    # 검증 게이트: Unit 정적 검사·위험도별 추가 검증·DONE 사후 분석 보고서, mock LLM 호출 수 비교 출력. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
 bash tests/smoke-codex-usage.sh           # codex usage/비용: turn 합산·가격표(astra 단문/장문, 캐시 쓰기 별도율·12h-only TTL 근거, 가정 기록)·깨진 줄/usage:{} → unknown(과소 집계 없음)·DONE 비용 보고 일치. LLM 호출 없음

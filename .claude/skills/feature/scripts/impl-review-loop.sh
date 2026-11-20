@@ -9,7 +9,9 @@
 #            3=리뷰어 DOC_GAP(사용자 결정 — doc-gap-resume.json 기록, 러너가 NEED_USER/REVIEW_DOC_GAP),
 #            4=리뷰어 출력 계약 위반(REVIEW_OUTPUT_INVALID — reviews/invalid-review.json, 러너가 NEED_USER/REVIEW_OUTPUT_INVALID), 1=환경·CLI 오류,
 #            5=프로젝트 빠른 검사 규칙 위반(FAST_CHECK_VIOLATION — 리뷰어 호출 전 중단, 러너가 기존 워커 수정 1회 → 재검사, 한도 소진이면 NEED_USER/FAST_CHECK_RETRIES_EXHAUSTED),
-#            6=프로젝트 빠른 검사 실행 오류(FAST_CHECK_ERROR — 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반. 자동 수정 없이 러너가 NEED_USER/FAST_CHECK_ERROR)
+#            6=프로젝트 빠른 검사 실행 오류(FAST_CHECK_ERROR — 도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반. 자동 수정 없이 러너가 NEED_USER/FAST_CHECK_ERROR),
+#            7=수정자가 완료 unit 의 Unit 정적 검사 증거를 낡게 만듦(UNIT_CHECK_EVIDENCE_STALE — 다음 리뷰어 호출 전 중단, 체크포인트는 다음 라운드 REVIEWER_PENDING.
+#              러너가 모델 호출 없이 그 unit 의 검사만 다시 돌린 뒤 이 루프로 돌아온다: 통과하면 같은 attempt 의 리뷰어부터, 위반이면 NEED_USER/UNIT_CHECK_STALE_VIOLATION)
 # 프로젝트 빠른 검사(선택, scripts/fast-check.sh): config.sh 의 FAST_CHECK_CMD 가 있으면 **리뷰어를 부르기 직전마다** 한 번 실행한다 — 첫 리뷰 전,
 #   수정자 완료 뒤 다음 리뷰 전, 재개로 리뷰어 차례가 된 때, 저장된 리뷰 출력·승인 체크포인트를 재사용하기 전. 통과한 코드만 리뷰어(또는 재사용)로 넘어간다.
 #   위반·실행 오류는 리뷰 체크포인트를 바꾸지 않고 멈춘다(exit 5/6) — 재실행은 같은 지점에서 검사부터 다시 한다. 미설정이면 "생략" 로그만 남기고 종전 흐름이다.
@@ -170,6 +172,25 @@ fast_check_gate() { # label
       exit 6;;
     *) echo "[FAIL] 프로젝트 빠른 검사 헬퍼 실패(스냅샷·기록 불가, rc $fc_rc) — 검사 결과를 알 수 없으므로 진행하지 않는다" >&2; exit 1;;
   esac
+}
+
+# ---------- 수정자 뒤 Unit 정적 검사 증거 확인 (선택 — UNIT_CHECK_CMD 미설정·구현 단위 없음이면 아무것도 하지 않는다) ----------
+# 수정자가 이미 검사한 unit 의 코드를 고쳤으면, 다음 리뷰어(유료)를 부르기 전에 러너에게 돌려보내 그 unit 의 검사만 다시 돌리게 한다(exit 7).
+# 여기서는 판정만 한다(지문 비교 — 검사 명령·모델 0회). 재검증·위반 처리(UNIT_CHECK_STALE_VIOLATION)는 러너의 기존 경로(unit_checks_refresh) 하나뿐이다 —
+# 새 루프·새 한도가 아니다. 체크포인트(다음 라운드 REVIEWER_PENDING)를 남긴 뒤에 부르므로 돌아온 실행은 수정자를 다시 부르지 않는다.
+# 이 판정이 없어도 러너가 verify 진입에서 같은 재검증을 하므로 안전성은 같다 — 차이는 위반 코드에 리뷰어 호출 1회를 쓰느냐뿐이다.
+unit_check_evidence_gate() { # label
+  declare -F unit_check_evidence_current >/dev/null || return 0
+  { [ -f "$UNITS_MANIFEST_LOCK" ] && unit_check_configured; } || return 0
+  local u tree
+  tree="$(snapshot_worktree_tree)" || { echo "[FAIL] 작업 트리 스냅샷 실패(Unit 정적 검사 증거 확인, $1)" >&2; exit 1; }
+  for u in $(unit_ids); do
+    unit_check_evidence_current "$u" "$tree" && continue
+    echo "[STOP] UNIT_CHECK_EVIDENCE_STALE: unit $u 의 Unit 정적 검사 증거가 지금의 코드에 대한 것이 아니다($UNIT_CHECK_EVIDENCE_WHY, $1) — 리뷰어를 부르지 않고 러너로 돌아가 검사부터 다시 한다" >&2
+    jq -n --arg label "$1" --arg unit "$u" --arg why "$UNIT_CHECK_EVIDENCE_WHY" \
+      '{phase:"impl", status:"UNIT_CHECK_EVIDENCE_STALE", label:$label, unit:$unit, why:$why}' > "$WORK_DIR/state.json"
+    exit 7
+  done
 }
 
 # ---------- 리뷰어 출력 계약 위반 기록 (REVIEW_OUTPUT_INVALID) ----------
@@ -757,6 +778,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   save_review_checkpoint "$attempt" "$round" "$next_step" "$prev_review" "$prev_tree" "$(compute_fixer_resume_fingerprint)"
   # 수정자가 바꾼 코드는 다음 리뷰어 호출 전에 빠른 검사를 다시 지난다. 체크포인트(다음 라운드 REVIEWER_PENDING)를 남긴 뒤에 검사하므로
   # 위반으로 멈춰도 재실행이 수정자를 다시 부르지 않고 검사부터 한다.
+  # Unit 정적 검사 증거가 먼저다(국소·저렴 — 낡았으면 exit 7 로 러너가 재검증한 뒤 돌아와 빠른 검사 → 리뷰어 순서로 간다).
+  unit_check_evidence_gate "after-fixer round $round"
   fast_check_gate "after-fixer round $round"
   fi # FIXER_PENDING
 done

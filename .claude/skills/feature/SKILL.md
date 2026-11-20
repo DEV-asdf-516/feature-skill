@@ -42,7 +42,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 
 ## 실행
 
-사전 조건: `config.sh` 의 역할별 모델·effort·`TEST_CMD`·`LINT_CMD` 설정(선택: 리뷰 전 프로젝트 빠른 검사 `FAST_CHECK_CMD` — `references/pipeline-contracts.md`), `claude`·`codex`·`jq`·`uuidgen`·`envsubst` 설치·로그인, 저장소 루트에서 실행.
+사전 조건: `config.sh` 의 역할별 모델·effort·`TEST_CMD`·`LINT_CMD` 설정(선택: 리뷰 전 프로젝트 빠른 검사 `FAST_CHECK_CMD`, unit 별 정적 검사 `UNIT_CHECK_CMD`, 리뷰 승인 뒤 위험도별 추가 검증 `RISK_VERIFY_CMD` — `references/pipeline-contracts.md`), `claude`·`codex`·`jq`·`uuidgen`·`envsubst` 설치·로그인, 저장소 루트에서 실행.
 
 ```bash
 bash <skill_dir>/scripts/feature-run.sh --feature <id>                        # 처음이든 재실행이든 항상 이 형태
@@ -61,12 +61,12 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id> --finalize             # 
 
 | exit | status / reason | 다음 행동 |
 |---|---|---|
-| 0 | `DONE` | 결과 보고 → finalize 여부를 사용자에게 **질문**(자동 실행 금지) |
+| 0 | `DONE` | 결과 보고(`.agent-work/post-run-report.json` 의 비용·검증·실패 분석·개선 후보 포함 — 후보는 제시만, 자동 수정 금지) → finalize 여부를 사용자에게 **질문**(자동 실행 금지) |
 | 3 | `NEED_DOCS` `DESIGN_MISSING` | request.md·design.md 작성 → 재실행(첫 실행은 항상 이 상태) |
 | 3 | `NEED_DOCS` `IMPL_DOCS_MISSING`/`SCOPE_MISSING` | 구현 문서 4종 작성·수정 → 재실행 |
 | 2 | `NEED_USER` `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS` | 마지막 리뷰의 모든 blocker 를 그대로 전달 → `[escalation=<id>]` 답 기록 → 재실행 |
 | 2 | `NEED_USER` `UNDECIDED`/`REVIEW_DOC_GAP` | 미결정 항목을 그대로 전달 → 태그 답 기록 + approach.md 최소 동기화 → 재실행 |
-| 2 | `NEED_USER` 그 밖(`DOC_GAP_*`·`SCOPE_*`·`UNIT*`·`WORKER_*`·`REVIEW_OUTPUT_INVALID`·`FAST_CHECK_*` 등) | detail 을 보고하고 멈춘다. 되돌릴지·보존할지·재시작할지는 사용자가 정한다 |
+| 2 | `NEED_USER` 그 밖(`DOC_GAP_*`·`SCOPE_*`·`UNIT*`·`WORKER_*`·`REVIEW_OUTPUT_INVALID`·`FAST_CHECK_*`·`UNIT_CHECK_*`·`RISK_VERIFY_*` 등) | detail 을 보고하고 멈춘다. 되돌릴지·보존할지·재시작할지는 사용자가 정한다 |
 | 1 | `ENV_ERROR` | 원인 확인 후 재실행. 진행 금지 |
 | `--finalize` 0/2/1 | `FINALIZED` / `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE` / 거부 | 결과 보고. 충돌은 자동 해결하지 않고 사용자에게 |
 

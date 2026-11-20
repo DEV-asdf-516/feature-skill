@@ -81,6 +81,7 @@ FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초, 양의 정�
 - 환경 변수: `FAST_CHECK_ROOT`(worktree 루트 절대 경로), `FAST_CHECK_CHANGED_FILES`(이번 피처가 바꾼 파일 목록 파일의 절대 경로 — 한 줄에 저장소 상대 경로 하나, 삭제 제외, feature-scope 범위 안, 기준은 워커 진입 기준선). 변경 파일만 검사하려는 도구가 쓰며, 쓰지 않아도 된다. 경로는 git 의 인용 표기가 아니라 실제 문자열 그대로다(한글·공백·따옴표 포함 — 경로 안의 개행만 표현하지 못한다).
 - 종료 코드: `0` = 정상 완료(위반 없음) / `1` = 규칙 위반 / 그 외 = 실행 오류. 기존 도구의 종료 코드가 다르면(예: 위반을 2 로 알림) 프로젝트의 얇은 어댑터 스크립트가 이 셋으로 옮긴다.
 - 진단: 위반(exit 1)이면 수정에 필요한 규칙·파일·위치·내용을 stdout/stderr 로 낸다. 형식은 자유다(별도 결과 스키마 없음) — 워커가 그 원본을 그대로 읽는다. exit 1 인데 출력이 비어 있으면 실행 오류(`NO_DIAGNOSTICS`)다.
+- 읽기 전용 위반 뒤의 재실행(세 검사 공통 엔진): 마지막 기록이 index 를 바꾼 실행이면 현재 index 지문이 그 실행 전 지문(`index_before`)으로 돌아오기 전에는 명령을 실행하지 않고 같은 `INDEX_MODIFIED` 로 멈춘다 — 실행 전후만 비교하면 바뀐 index 를 둔 재실행이 '이번에는 안 바꿨다'로 통과한다. 새 기록은 쓰지 않는다(마지막 기록은 그 위반 그대로).
 - 읽기 전용: 자동 수정·포매팅·파일 생성/삭제·`git add` 를 하지 않는다. 러너가 실행 전후의 작업 트리 tree 스냅샷(gitignore 적용, `.agent-work` 제외)과 git index 지문을 비교해, 달라졌으면 종료 코드와 무관하게 실행 오류(`WORKTREE_MODIFIED`/`INDEX_MODIFIED`)로 멈춘다. 변경은 원복하지 않는다(범위 밖 경로는 `out_of_scope_paths` 로 따로 기록). gitignore 된 도구 캐시는 영향이 없다.
 - 타임아웃: 명령은 자기 프로세스 그룹에서 돈다. `FAST_CHECK_TIMEOUT_SEC` 를 넘으면 그룹 전체(명령이 띄운 자식·손자 포함)에 TERM → KILL 을 보내고, 정리가 끝난 뒤에 사후 비교를 해 실행 오류(`TIMEOUT`)로 처리한다. TERM 을 무시하는 자식이 판정 뒤에 소스를 바꾸지 못한다(`setsid` 로 그룹을 벗어난 프로세스는 잡지 못한다).
 
@@ -112,6 +113,66 @@ FAST_CHECK_TIMEOUT_SEC=120                      # 제한 시간(초, 양의 정�
 - 워커 수정 턴: `check-fix-NN-result.json`, `check-fix-NN-before.tree`/`-after.tree`, 원문 로그 `reviews/check-fix-NN-*.log`, 병합 기준 `check-fix-NN-merge-base.json`, 진행 기록 `check-fix.pending.json`(`active`·`tag`·`retries_before`·`outcome` — 지우거나 고쳐서 넘기지 않는다).
 
 회귀: `tests/smoke-fast-check.sh`(LLM 호출 없음 — fixture 프로젝트의 정상·위반·실행 오류 명령): 미설정 생략 / 첫 검사 위반 시 리뷰어 0회 / 수정자 뒤 위반 시 다음 리뷰어 0회 / 수정 → 재검사 → 리뷰 → TEST → LINT 순서 / 한도 소진·실행 오류·타임아웃·읽기 전용 위반 / worktree 실행 / 승인·과거 PASS 기록 오용 방지 / 혼합 설치 / 한글 경로 전달 / TERM 무시 자식 정리 / 수정 턴 도중 강제 종료·범위 위반 뒤 재실행 / 미결정 체크포인트 기록 전 중단(질문 복구) / 확정 도중 중단(한도·병합 1회) / codex 워커의 거부된 호출(`SESSION_RESUME_UNCERTAIN`)이 resume marker 를 지우지 않음.
+
+## Unit 정적 검사 · 위험도별 추가 검증 (선택 — 결정론적 검증 게이트)
+
+두 검사 모두 프로젝트가 제공한 명령을 하네스가 연결만 한다. 실행 엔진은 프로젝트 빠른 검사와 같은 하나(`scripts/fast-check.sh` 의 `project_check_run`)이고 계약도 같다: 피처 worktree 루트에서 `bash -c`, exit 0 = 정상 / exit 1 = 위반(진단 출력 필수) / 그 외·타임아웃 = 실행 오류, 읽기 전용(실행 전후 tree·index 비교), 실행마다 새 번호의 로그·기록, **성공 캐시 없음**. 미설정(빈 값 또는 줄이 없는 기존 config.sh)이면 `[unit-check] 생략`/`[risk-verify] 생략` 로그만 남고 종전 흐름이다 — 생략은 통과(PASS)로 세지 않는다. 새 LLM 호출·리뷰어·수정 루프·재시도 한도는 없다.
+
+```bash
+UNIT_CHECK_CMD="scripts/unit-check.sh"     # unit 마다, targeted test 앞.  UNIT_CHECK_TIMEOUT_SEC=120
+RISK_VERIFY_CMD="scripts/risk-verify.sh"   # 리뷰 승인 뒤, TEST_CMD 앞.    RISK_VERIFY_TIMEOUT_SEC=600
+```
+
+| 검사 | 실행 시점 | 대상 | 위반 처리 | 한도 |
+|---|---|---|---|---|
+| Unit 정적 검사 `UNIT_CHECK_CMD` | unit 워커 턴 뒤, 그 unit 의 targeted test 앞(수정 턴 뒤 매번 다시) | 그 unit 이 바꾼 파일 | 같은 unit 수정 턴(`worker-unit-fix.md`) | `MAX_TEST_RETRIES` — targeted test 수정과 공유(unit 별) |
+| 프로젝트 빠른 검사 `FAST_CHECK_CMD` | 모든 unit 뒤, 리뷰어 호출 직전마다 | 피처 전체 변경 | `worker-check-fix.md` → 재검사 → 리뷰 | `MAX_TEST_RETRIES` — 피처 누적 |
+| 위험도별 추가 검증 `RISK_VERIFY_CMD` | 리뷰 승인 뒤, `TEST_CMD` 앞(verify 진입마다) | 승인된 코드 | 기존 `worker-fix.md` → 재리뷰 → 재검증 | `MAX_TEST_RETRIES` — 최종 테스트 수정과 공유 |
+
+같은 비싼 검사를 두 곳에 걸지 않는다: Unit 검사에는 빠르고 국소적인 규칙(변경 파일의 formatter 검사·lint), 빠른 검사에는 전역 규칙(아키텍처 의존성·전체 범위 규칙), 위험도 검증에는 기본 테스트가 다루지 않는 위험(권한 우회·멱등성·마이그레이션 등)을 둔다. `FAST_CHECK_CMD` 를 unit 마다 자동으로 되풀이하지 않는다.
+
+**Unit 정적 검사** (`scripts/feature-run.sh` 의 `run_unit`)
+
+- 환경 변수: `UNIT_CHECK_ROOT`, `UNIT_CHECK_UNIT_ID`, `UNIT_CHECK_CHANGED_FILES`(그 unit 의 시작 tree `units/<id>/before.tree` → 현재, unit scope 안, 삭제 제외 — 한 줄에 경로 하나). 목록은 입력이지 강제 범위가 아니다 — 파일 목록만으로 안전성을 판단할 수 없는 검사기는 더 넓게 검사해도 된다.
+- 결과: PASS → targeted test / SKIPPED(미설정) → targeted test / VIOLATION → targeted test 까지 돌린 뒤 **수정 턴 1회**(검사 진단과 테스트 결과를 `units/<id>/unit-verify-NN.diag.log` 로 묶어 `${TEST_LOG}` 로 전달 — 검사용·테스트용 턴을 따로 쓰지 않는다) → 검사·테스트 재실행 / ERROR → 워커·테스트 호출 없이 `UNIT_CHECK_ERROR`.
+- 수정 턴은 기존 unit 게이트(index·manifest·기준선·feature scope·unit scope·결과 계약·세션 수용)를 그대로 지난다. 워커 프롬프트 템플릿은 바뀌지 않았다(워커 세션 계약 지문 불변 — 검사를 켜거나 꺼도 `WORKER_SESSION_MISMATCH` 가 아니다).
+- 완료 조건: 워커 결과 계약·unit scope·unit 계약 지문·targeted test PASS 에 더해, 설정돼 있으면 **같은 회차의 검사 PASS**. 한도 뒤에도 위반이 남으면 `UNIT_CHECK_RETRIES_EXHAUSTED`(테스트도 실패했으면 종전대로 `UNIT_TEST_RETRIES_EXHAUSTED`) — `done.json` 을 쓰지 않는다.
+- 재개: 미완료 unit 은 재개할 때마다 검사부터 다시 한다(과거 PASS 기록으로 건너뛰지 않는다). 유효한 워커 결과 + tree 일치면 워커 재호출 없이 검사 → 테스트부터다.
+- 증거의 결속: 완료 unit 의 증거는 `units/<id>/unit-check/last.json` 이다 — status PASS 에 더해 그 PASS 가 **무엇을 무엇으로 검사한 것인지**를 세 값으로 든다(`done.json` 형식은 그대로다).
+  `cmd_sha256`(명령 문자열) · `subject_fingerprint`(그 unit 의 scope — files + new_file_roots — 안 경로의 내용 = 검사 대상 코드) · `policy_fingerprint`(정책 입력 = 검사 스크립트·규칙·설정의 내용). 두 지문은 작업 트리 tree 의 해시다(모델 호출 없음).
+  정책 입력은 세 부분의 합이다: ① 어느 unit 의 scope 에도 속하지 않는 경로 전부 ② `UNIT_CHECK_CMD` 의 토큰 중 작업 트리의 파일인 것(검사 스크립트 자체) ③ `config.sh` 의 `UNIT_CHECK_POLICY_PATHS`(선택 — 공백 구분 저장소 상대 경로, 파일·디렉터리)로 선언한 경로. ②③ 은 어느 unit 의 scope 안에 있어도 포함된다 — ① 만으로는 **다른 unit 이 소유한 규칙 파일**(그 unit 의 scope 안이라 ① 에서 빠진다)이 바뀌어도 지문이 그대로이기 때문이다. 선언한 경로가 작업 트리에 없으면(오타·gitignore) 검사를 실행하지 않고 `ENV_ERROR` 다(빈 지문으로 넘어가지 않는다).
+  셋 중 하나라도 지금과 다르면 과거 PASS 를 쓰지 않는다: 완료 뒤 검사를 새로 켰거나 명령을 바꿈 / 뒤 unit(겹치는 scope)·수정자·worker-fix·사용자가 그 unit 의 코드를 고침 / 명령 문자열은 같고 검사 스크립트·규칙만 바뀜 / 지문이 없는 이전 형식의 기록.
+  전체 tree 를 통째로 비교하지 않는다 — 다른 unit 의 scope 에만 속한 변경(독립 unit 의 정상 작업)은 이 unit 의 증거를 무효화하지 않는다.
+- 재검증: 증거가 현재 것이 아니면 **워커 재호출 없이 그 unit 의 검사만** 다시 돌린다(LLM 호출보다 결정론적 재검증이 먼저다). 판정 지점은 ① 러너 시작(stage 결정 — review·verify 로 바로 가지 않고 worker stage 로) ② 완료 unit 을 건너뛸 때(`run_unit`) ③ **review·verify 진입마다**(같은 실행 안에서 뒤 unit·수정자·worker-fix 가 이미 검사한 코드를 바꾼 경우 — 리뷰어·`TEST_CMD` 앞). 수정자가 바꾼 경우도 다음 리뷰어 호출 **전**이다: 리뷰 루프가 수정자 뒤에 지문만 비교해(검사 명령·모델 0회) 낡았으면 exit 7 로 러너에 돌려보내고, 러너가 ③ 의 재검증을 한 뒤 같은 attempt 의 리뷰어로 돌아간다(새 루프·새 한도 없음 — 위반 코드에 리뷰어 호출을 쓰지 않는다). 통과하면 증거를 갱신하고 체크포인트를 유지하며, 위반이면 `UNIT_CHECK_STALE_VIOLATION`(완료된 unit 에 자동 수정 턴을 다시 열지 않는다 — 직렬 체크포인트 사슬 보존). 검사를 끄면(빈 값) 요구할 증거가 없다 — 끄는 것은 사용자가 명시적으로 정할 때만.
+- 읽기 전용 위반(`WORKTREE_MODIFIED`·`INDEX_MODIFIED`)으로 멈춘 뒤에는 **검사가 만든 변경이 실제로 해소될 때까지** 재실행이 검사·모델 0회로 다시 멈춘다: 그 실행이 바꾼 경로(`tree_before` → `tree_after`)가 전부 검사 전 내용으로 돌아오고, index 지문이 검사 전 지문(`index_before`)과 같아야 한다. 다른 파일을 더 고쳐 tree 가 달라진 것, 검사기를 고쳐 '이번 실행은 아무것도 안 바꾼' 것은 복구가 아니다(검사가 만든 변경이 unit scope 검사를 거치지 않고 다음 워커 턴의 '호출 전 tree' 에 섞이는 것을 막는다). 자동 원복은 없다. 복구가 확인되면 `unit-check/readonly-restored.json` 표식을 남긴다(그 뒤의 정상적인 코드 변경을 같은 위반으로 다시 세지 않는다).
+- 실행 로그: `targeted-test-NN.log`·`unit-verify-NN.diag.log` 의 NN 은 unit 디렉터리 안에서 이어서 센다 — 재개한 실행이 01 부터 다시 써서 앞선 실행의 로그를 덮어쓰지 않는다. `targeted-test.history.jsonl`(append-only)의 각 행은 그 실행 당시의 로그를 계속 가리킨다.
+- 제한: 하네스는 검사기가 실제로 무엇을 읽는지 알 수 없다. 지문에 없는 것 — ⓐ gitignore 된 설정·전역 도구 버전 같은 트리 밖 입력 ⓑ 어느 unit 의 scope 안에 있으면서 명령 문자열에도 `UNIT_CHECK_POLICY_PATHS` 에도 나오지 않는 규칙·설정 파일 ⓒ 검사기가 다른 unit 의 코드까지 읽는 교차 파일 규칙. ⓑ 는 프로젝트가 `UNIT_CHECK_POLICY_PATHS` 에 선언해 닫는다(이번 피처가 규칙 파일을 직접 고치는 경우에만 필요하다 — 선언은 재검증을 늘릴 뿐 줄이지 않는다). ⓐⓒ 는 캐시 없는 프로젝트 빠른 검사·리뷰·verify 가 맡는다. 모든 unit 변경마다 전체를 다시 검사하는 방식은 쓰지 않는다(unit 수 × 검사 시간). 어느 unit 의 scope 에도 없는 파일이 하나라도 바뀌면 모든 완료 unit 을 다시 검사한다(보수적 — 검사 명령의 실행 시간만 든다).
+
+**위험도별 추가 검증** (`scripts/feature-run.sh` 의 verify stage)
+
+- 프로젝트 명령 하나가 변경(`RISK_VERIFY_CHANGED_FILES` — 빠른 검사와 같은 목록, `RISK_VERIFY_ROOT`)을 보고 위험도를 판정하고 그 위험도에 필요한 검증을 직접 수행한다. 하네스에는 위험도 규칙·정책 DSL·테스트 명령이 없다.
+- 결과 JSON(`$RISK_VERIFY_RESULT` 경로에 명령이 쓴다): `{"risk_level":"LOW|MEDIUM|HIGH|CRITICAL|UNKNOWN", "checks":[{"name":"…","status":"PASS|FAIL|SKIPPED"}], "reasons":["…"], "needs_human":false}` — `risk_level` 만 필수. `checks`·`reasons` 는 있으면 항목 형식까지 검사한다(`checks[]` = 비어 있지 않은 문자열 `name` + `status` 가 PASS·FAIL·SKIPPED 중 하나, `reasons[]` = 문자열).
+  LOW = 국소 변경(추가 검증 없음) / MEDIUM = 일반 기능·API 변경(필요한 계약 테스트) / HIGH = 인증·인가·결제·동시성·데이터 정합성(추가 계약·보안·통합 테스트) / CRITICAL = 데이터 손실 가능·파괴적 변경(강화된 검증, 필요하면 `needs_human`) / UNKNOWN = 규칙으로 판정할 수 없음.
+- 판정(하네스): exit 0 + 유효한 결과 + LOW~CRITICAL + `needs_human` 아님 → PASS → `TEST_CMD`. exit 1(+ 진단) → VIOLATION. exit 0 인데 결과가 없거나 형식이 틀림(`checks`·`reasons` 항목 형식 포함) → 실행 오류 `RESULT_INVALID`(**위험도를 LOW 로 가정하지 않는다** — 기록의 `risk_level` 은 UNKNOWN). exit 0 인데 `checks` 에 `FAIL` 이 있음 → 실행 오류 `RESULT_INCONSISTENT`(종료 코드와 개별 검증 결과가 모순 — **통과로 받지 않고 코드 위반으로도 보내지 않는다**: 검증 명령의 결과 계약 오류다. 실패한 검증이 있으면 명령은 exit 1 + 진단을 내야 한다). `risk_level=UNKNOWN` 또는 `needs_human=true` → `RISK_VERIFY_NEEDS_USER`(모델에게 추측·수정을 맡기지 않는다).
+- VIOLATION: `TEST_CMD` 실패와 같은 경로다 — 기존 `worker-fix.md` 1회(진단 묶음 `risk-verify/check-NNNN.diag.log` 를 `${TEST_LOG}` 로) → **review(재승인 필수)** → verify 재진입 시 검증부터 다시. 한도 `MAX_TEST_RETRIES` 를 최종 테스트 수정과 공유하고(`run-state.json` 의 `test_retries`) 소진되면 `RISK_VERIFY_RETRIES_EXHAUSTED`. 승인 없이 수정된 코드가 `TEST_CMD`·DONE 으로 가는 경로는 없다.
+- ERROR(도구 누락·타임아웃·해석 불가 종료 코드·읽기 전용 위반·`RESULT_INVALID`·`RESULT_INCONSISTENT`): 워커를 부르지 않고 한도도 쓰지 않은 채 `RISK_VERIFY_ERROR`. 검증이 범위 안 소스를 바꿨으면 승인 지문이 달라져 재리뷰를 지나야 한다. 검증이 git index 를 바꿨으면(`INDEX_MODIFIED`) index 지문이 검증 전(`index_before`)으로 돌아오기 전의 재실행은 stage 와 무관하게 검증 명령·리뷰어·`TEST_CMD` 0회로 다시 멈춘다(자동 복구 없음).
+- 사람의 확인(`needs_human`)을 어떻게 받는지는 프로젝트가 정한다 — 검증 명령이 자기 승인 조건(예: 프로젝트가 정한 승인 기록)을 확인해 충족되면 `needs_human` 없이 통과시킨다. 하네스에는 별도 승인 상태가 없다.
+- verify 에 들어올 때마다 실행한다(재개·수정 뒤 재승인 포함). 이전 PASS 를 캐시하지 않으므로 승인·코드가 달라진 뒤 옛 검증 결과가 쓰이는 일이 없다. 이미 `TEST_CMD`/`FAST_CHECK_CMD` 가 돌리는 검사를 여기서 되풀이하지 않는 것은 프로젝트 명령의 몫이다(`.agent-work/fast-check/last.json` 의 `tree_after` 로 같은 코드에 대한 결과인지 직접 대조할 수 있다).
+
+**산출물**: `units/<id>/unit-check/`·`risk-verify/` 에 빠른 검사와 같은 형식(`check-NNNN.log`, `last.json`, `history.jsonl`) + unit 검사 기록의 `unit_id`, 위험도 검증 기록의 `risk_level`·`result_valid`·`needs_human`·`checks`·`reasons`·`result`(`check-NNNN.result.json`). 실행 기록(증거 — 재개 판정에 쓰지 않는다): `units/<id>/targeted-test.history.jsonl`, `reviews/verify.history.jsonl`. 최종 검증 로그는 `reviews/verify-<YYYYMMDD-HHMMSS>.log` 이고 같은 초에 다시 돌면 `-2`, `-3` … 이 붙는다(기록이 가리키는 앞선 로그를 덮어쓰지 않는다).
+
+## DONE 뒤 사후 분석 보고서 (`post-run-report.json`)
+
+`DONE` 기록 직후 `scripts/post-run-report.sh` 가 기존 기록을 집계해 `.agent-work/post-run-report.json` 하나를 만든다 — **모델 호출 0회**, 읽기 전용 집계(usage.jsonl·run-state·검사/테스트 실행 기록·리뷰어 출력), 프로덕션 코드·git index·계약 문서·승인 지문 불변. 기록의 무결성은 `record_integrity` 에 남긴다: 집계에 쓴 JSONL 에 JSON 객체로 읽을 수 없는 줄이 있으면 `complete:false` 와 파일별 줄 수(`corrupt[]`)를 적고, 그 기록에서 나온 항목에 `corrupt_records` 를 붙인다 — 손상된 줄을 조용히 빼고 완전한 기록처럼 집계하지 않는다(손상 = 기록은 있었는데 읽지 못함, 미관측 = 기록 자체가 없음). `usage.jsonl` 이 손상돼도 보고서는 만들어진다: 읽힌 줄만으로 같은 `usage_summary` 를 계산하고 `cost_summary.unreadable_usage_records`(읽지 못한 줄 수)·`totals_are_lower_bound:true` 를 적는다 — 그때의 비용·호출 수는 하한값이고, 읽지 못한 호출을 0 달러로 더한 값이 아니다(전부 읽을 수 없으면 `observed:null`).
+
+- `cost_summary`: `usage_summary` 와 같은 숫자(관측 비용 = provider 보고 `reported` + 가격표 환산 `estimated`, 둘 다 없는 호출은 `cost_unknown_invocations` — 0 달러가 아니다), 역할·모델별, 워커 수정 턴(unit 수정·빠른 검사 수정·verify 수정·review-gap)·리뷰어 재호출·수정자 비용, 전체 모델 호출 수, 실행 시간. `counterfactual_savings.usd` 는 항상 `null`(unknown) — 기계적 검증이 막은 횟수만 관측값이고 실행되지 않은 LLM 호출의 비용은 계산하지 않는다.
+- `verification_summary`: `unit`(Unit 정적 검사·targeted test·수정 턴)과 `feature`(빠른 검사·리뷰·위험도 검증·최종 검증)를 나눠 실행·통과·위반·오류 횟수를 적는다. 기록이 없으면 0 이 아니라 `observed:false`/`SKIPPED` 다.
+- `failure_analysis`: 관측된 실패 유형별 횟수·근거 경로·`candidate_cause`(후보 분류). `root_cause` 는 직접 증거가 없으면 `"UNKNOWN"`, `confirmed:false` — 근거를 모델 호출로 채우지 않는다. 실패가 없으면 빈 배열이다.
+- `rule_candidates`: 반복 오류의 개선 **후보**(`CODEBASE_CONSTRAINT`·`STATIC_CHECK`·`RUNTIME_TEST`·`LLM_REVIEW_REQUIRED`·`NEEDS_HUMAN_ANALYSIS`) — 관측된 오류·반복 근거·관련 로그/리뷰 issue·자동화 가능성·오탐 위험·`auto_promote:false`. 같은 오류라는 근거가 기록에 있을 때만 만든다: 같은 규칙 id(진단 줄 맨 앞의 `[rule-id]`)가 서로 다른 검사 실행에서 반복 / 리뷰어가 같은 근거(`basis_refs[0]`)로 서로 다른 issue / 같은 issue 가 수정 뒤에도 남음. 같은 category 가 여러 번 나온 것만으로는 만들지 않는다. Feature 간 반복 여부는 항상 `unverified`(전역 오류 DB 없음).
+- **분석과 후보 제시까지만 자동이다.** DONE 뒤 코드·conventions·검사 규칙을 자동으로 고치지 않는다 — 승인된 작업 트리의 승인·검증 근거가 무효가 된다. 사용자가 고른 개선은 별도 작업으로 한다.
+- 멱등·실패 처리: 유효한 보고서가 있으면 다시 만들지 않는다. 이미 `DONE` 인 재실행은 워커·리뷰어·테스트·검사 명령·완료 알림을 다시 부르지 않고 보고서가 없을 때만 기존 기록에서 다시 만든다(같은 입력이면 같은 내용 — `generated_at` 은 DONE 기록 시각). 생성 실패는 경고와 `post-run-report.error.log` 만 남기고 `DONE`·exit 0 을 바꾸지 않는다. 중단(NEED_USER 등) 시의 비용 보고(`usage-summary.json`)는 종전 그대로다.
+
+회귀: `tests/smoke-verification-gates.sh`(LLM 호출 없음 — fixture 프로젝트의 unit 검사·위험도 검증 명령): 미설정 시 종전 흐름 / PASS·위반·실행 오류·읽기 전용 위반 / 검사 위반 + 테스트 실패의 수정 턴 1회 / unit scope 게이트 / PASS 재사용 금지 / 앞 unit 체크포인트 유지 / 설정 변경 뒤 완료 unit 재검증 / 위험도 LOW·HIGH·UNKNOWN·needs_human·결과 없음 / 위반 → worker-fix → 재승인 → 재검증 / 보고서 생성·usage 집계 일치·미관측 ≠ 0·근거 있는 후보만·재생성 동일·실패해도 DONE·DONE 재실행 시 호출 0회 / 검사 PASS 뒤 코드·검사 스크립트 변경 시 완료 unit 재검증(worker-fix·수정자·겹치는 뒤 unit·수동 수정) / 읽기 전용 위반 뒤 다른 파일 수정·index 미복구 재실행 차단 / `checks` FAIL + exit 0·형식 오류 결과 / 재개 시 targeted test 로그 보존 / 손상된 JSONL 기록의 구분 / 다른 unit 의 scope 안 정책 파일(선언·명령 토큰이면 재검사, 없는 경로 선언은 ENV_ERROR) / 수정자 뒤 재검증이 다음 리뷰어 앞 / 같은 초의 verify 로그 경로 고유 / 손상된 usage.jsonl 에서도 보고서 생성(하한값 표시).
 
 ## 강제 규칙 (어길 수 없음)
 

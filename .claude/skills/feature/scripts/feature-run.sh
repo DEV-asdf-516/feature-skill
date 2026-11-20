@@ -29,6 +29,8 @@
 #            세션**(worker-invoke.sh 의 FEATURE_WORKER_SESSION, 저널 worker-session.json)이 턴 단위로 이어 간다: unit 마다
 #            같은 세션의 워커 턴(worker-unit.md, 결과 JSON DONE|UNDECIDED) → targeted_test(실패 시 같은 세션에 unit 범위 수정 → 재테스트)
 #            → context-updates.json(워커·수정 결과의 context_updates 를 순서대로 보존) → units/<id>/done.json.
+#            Unit 정적 검사(선택 — config.sh UNIT_CHECK_CMD, 엔진은 scripts/fast-check.sh): 설정돼 있으면 unit 의 targeted test 앞에서 그 unit 이 바꾼 파일을 대상으로 한 번 실행한다.
+#            위반은 targeted test 실패와 같은 수정 턴 1회로 함께 고치고(한도 MAX_TEST_RETRIES 공유), 실행 오류는 워커 없이 사용자(UNIT_CHECK_ERROR). 미설정이면 생략 로그만 남는다.
 #            unit 사이에 이어지는 것은 worktree 의 코드 + 합의 문서 + 같은 Worker 세션의 대화 문맥 + implementation-context.json(앞 unit 이
 #            확정한 사실의 압축 색인 — 세션 기억은 source of truth 가 아니고 이 색인·문서가 체크포인트다). unit 별 리뷰·수정자·설계는 없다.
 #            Unit N 이 끝나기 전에는 N+1 을 시작하지 않는다 — 다음 unit 시작 권한은 러너만 갖는다.
@@ -53,8 +55,12 @@
 #            사전 게이트일 뿐이고, 워커·리뷰어가 구현 중 발견한 DOC_GAP/USER_DECISION 은 사용자 결정이 최종이다 — 검증자·디자이너 재호출 없음.
 #            WAITING_USER(답 전 — 모델 0회) → 답·approach 동기화·source tree 불변 확인 → WORKER_PENDING(unit 이면 그 unit 부터 worker stage,
 #            리뷰 이슈면 review-gap 워커 1회가 DOC_GAP 결정 + 같은 리뷰의 FIX_CODE 를 함께) → REVIEW_PENDING → review → RESOLVED.
-#   verify : 승인 지문 → TEST_CMD → LINT_CMD → 지문 재확인
+#   verify : 승인 지문 → (선택) 위험도별 추가 검증 RISK_VERIFY_CMD → TEST_CMD → LINT_CMD → 지문 재확인
 #            실패 → worker-fix(최대 MAX_TEST_RETRIES) → review → verify
+#            위험도별 추가 검증(선택 — 프로젝트 명령 하나가 위험도 판정 + 추가 검증): 위반 → 위와 같은 worker-fix 경로·같은 한도 / 실행 오류 → 사용자(RISK_VERIFY_ERROR) /
+#            위험도 UNKNOWN·needs_human → 사용자(RISK_VERIFY_NEEDS_USER). verify 에 들어올 때마다 다시 실행한다(성공 캐시 없음). 미설정이면 종전 그대로다.
+#   done   : DONE 기록 → 완료 알림 → 비용 보고 → 사후 분석 보고서(post-run-report.json — scripts/post-run-report.sh, 모델 호출 0회, 실패해도 DONE 유지).
+#            이미 DONE 인 재실행은 모델·검증 명령을 부르지 않고, 보고서가 없을 때만 기존 기록에서 다시 만든다.
 #            지문 STALE → review (연속 2회면 사용자 반환)
 #
 # 종료 코드 / run-state.json status:
@@ -63,6 +69,10 @@
 #                 DOC_GAP_LOCATION_UNRESOLVED(gap 위치를 파일 경로로 확정할 수 없음 — 범위 위반과 구분, 체크포인트는 WAITING_USER 유지) |
 #                 TEST_RETRIES_EXHAUSTED | APPROVAL_STALE_REPEATED | FOREIGN_WORKTREE_CHANGE | SCOPE_VIOLATION | REVIEW_OUTPUT_INVALID |
 #                 FAST_CHECK_RETRIES_EXHAUSTED(빠른 검사 규칙 위반이 자동 수정 한도 뒤에도 남음) | FAST_CHECK_ERROR(빠른 검사 실행 오류 — 자동 수정 없음) |
+#                 UNIT_CHECK_RETRIES_EXHAUSTED(Unit 정적 검사 위반이 unit 수정 한도 뒤에도 남음) | UNIT_CHECK_ERROR(Unit 정적 검사 실행 오류·읽기 전용 위반) |
+#                 UNIT_CHECK_STALE_VIOLATION(완료된 unit 이 바뀐 검사 명령으로는 위반 — 워커 자동 재호출 없음) |
+#                 RISK_VERIFY_RETRIES_EXHAUSTED(위험도별 검증 위반이 수정 한도 뒤에도 남음) | RISK_VERIFY_ERROR(검증 실행 오류·결과 JSON 없음) |
+#                 RISK_VERIFY_NEEDS_USER(위험도 UNKNOWN 또는 프로젝트가 사람의 확인을 요구) |
 #                 SCOPE_MANIFEST_CHANGED | SCOPE_BASELINE_CHANGED | UNITS_MANIFEST_CHANGED | UNIT_SCOPE_VIOLATION |
 #                 UNIT_TEST_RETRIES_EXHAUSTED | UNIT_CHECKPOINT_CHAIN_STALE | UNIT_CONTRACT_IMPACT_REQUIRED | UNIT_CONTRACT_STALE | DECISION_SCOPE_REQUIRED | WORKER_OUTCOME_UNCERTAIN | DESIGNER_SCOPE_VIOLATION |
 #                 RESOLVED_GAP_REPEATED(이미 사용자가 결정한 unit 미결정을 워커가 같은 질문으로 재반환 — 자동 재시도 없음) |
@@ -74,7 +84,8 @@
 # 두 가지뿐이다 — (리뷰 이슈 → 수정자 → 재리뷰), (테스트 실패 → 워커 1회 수정 →
 # 재리뷰 → 재테스트). 리뷰 전 프로젝트 빠른 검사의 (규칙 위반 → 워커 수정 → 재검사 → 리뷰)는 두 번째 형태와 같고
 # 같은 한도(MAX_TEST_RETRIES)를 따로 센다(실행 오류는 이 루프에 넣지 않는다). unit 단계의 (targeted test 실패 → unit 범위 수정 → 재테스트)는 두 번째 형태와
-# 같고 같은 한도(MAX_TEST_RETRIES)를 쓴다. "무슨 뜻인지 모르겠다", "둘 중 골라야 한다", "같은 이슈가
+# 같고 같은 한도(MAX_TEST_RETRIES)를 쓴다. Unit 정적 검사 위반은 그 unit 수정 턴에, 위험도별 검증 위반은 verify 의 워커 수정에 실려 간다 — 둘 다 새 루프·새 한도가 아니다.
+# "무슨 뜻인지 모르겠다", "둘 중 골라야 한다", "같은 이슈가
 # 반복된다"는 추가 추론 없이 즉시 사람에게 반환한다. 여기에 더 똑똑한 복구를
 # 추가하지 마라 — 이 스킬의 목적을 거꾸로 훼손한다.
 # =============================================================
@@ -269,7 +280,9 @@ log() { echo "[$(date '+%F %T')] [feature-run] $*"; }
 # usage.jsonl 을 다시 집계할 뿐이라 이중 카운트가 없다. usage.jsonl 이 없으면(실제 invocation 전 실패) 빈 상태로 표시한다. 모델 호출 없음, 종료 코드·상태 불변.
 report_usage_on_exit() {
   if [ -s "$WORK_DIR/usage.jsonl" ]; then
-    usage_summary > "$WORK_DIR/usage-summary.json.tmp" && mv "$WORK_DIR/usage-summary.json.tmp" "$WORK_DIR/usage-summary.json" || true
+    # 집계 실패(usage.jsonl 에 JSON 으로 읽을 수 없는 줄 등)는 조용히 넘기지 않는다 — 비용이 없는 것이 아니라 관측하지 못한 것이다
+    usage_summary > "$WORK_DIR/usage-summary.json.tmp" 2>/dev/null && mv "$WORK_DIR/usage-summary.json.tmp" "$WORK_DIR/usage-summary.json" \
+      || log "[WARN] 비용(usage_summary): $WORK_DIR/usage.jsonl 을 집계하지 못했다(읽을 수 없는 줄이 있을 수 있다) — 비용 미관측(0 달러 아님), usage-summary.json 은 갱신되지 않았다"
     local cost_line; cost_line="$(usage_cost_report_line)" || cost_line=""
     [ -z "$cost_line" ] || log "$cost_line (상세: $WORK_DIR/usage-summary.json)"
   else
@@ -445,6 +458,22 @@ done
 # 프로젝트 빠른 검사 연결(선택 기능): 실행은 리뷰 루프가 하고, 러너는 설정 여부(fast_check_configured)와 결과 처리만 쓴다. 파일이 없으면 혼합 설치다.
 [ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 source "$SKILL_DIR/scripts/fast-check.sh"
+# Unit 정적 검사·위험도별 검증은 같은 파일의 엔진을 쓴다. scripts/ 만 옛 버전이면(헬퍼 없음) 설정된 검사를 조용히 건너뛰게 되므로 혼합 설치로 멈춘다.
+declare -F unit_check_run risk_verify_run >/dev/null \
+  || env_error "scripts/fast-check.sh 에 unit_check_run/risk_verify_run 이 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+# DONE 뒤 사후 분석 보고서(선택 산출물): 없거나 실패해도 파이프라인 결과를 바꾸지 않으므로 누락은 경고로만 남긴다.
+post_run_report_ensure() { # 실패는 경고·진단으로만 — 종료 코드·run-state 를 바꾸지 않는다
+  if ! declare -F post_run_report_write >/dev/null; then log "[WARN] 사후 분석 보고서 생략 — scripts/post-run-report.sh 없음(DONE 은 그대로)"; return 0; fi
+  local err="$WORK_DIR/post-run-report.error.log" out
+  if out="$(post_run_report_write 2>&1)"; then
+    [ -z "$out" ] || log "$out"
+  else
+    printf '[%s] %s\n' "$(date '+%F %T')" "$out" >> "$err" 2>/dev/null || true
+    log "[WARN] 사후 분석 보고서 생성 실패 — DONE·exit 0 은 그대로다(진단: $err). 재실행하면 모델 호출 없이 다시 시도한다"
+  fi
+  return 0
+}
+[ ! -f "$SKILL_DIR/scripts/post-run-report.sh" ] || source "$SKILL_DIR/scripts/post-run-report.sh"
 [ -f "$WORKER_SCHEMA" ] || env_error "스키마 없음: $WORKER_SCHEMA"
 for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md worker-check-fix.md; do
   [ -f "$SKILL_DIR/prompts/$p" ] || env_error "프롬프트 없음: $p"
@@ -524,7 +553,8 @@ if [ -f "$STATE" ]; then
   STALE_COUNT="$(jq -r '.stale_count // 0' "$STATE")"
   hinted="$(jq -r '.stage' "$STATE")"
   hinted_status="$(jq -r '.status' "$STATE")"
-  [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; skill_reference_hint DONE ""; exit 0; }
+  # 이미 DONE: 워커·리뷰어·테스트·검사 명령을 다시 부르지 않는다. 사후 분석 보고서가 없을 때만(이 기능 이전의 DONE, 생성 실패) 기존 기록에서 다시 만든다(모델 호출 0회).
+  [ "$hinted_status" = DONE ] && { log "이미 DONE 상태. --new 로 새 피처를 시작하라."; post_run_report_ensure; skill_reference_hint DONE ""; exit 0; }
   # doc-gap 힌트인데 체크포인트가 더 이상 pending 이 아니면(RESOLVED 직후 죽음) worker 부터 — 완료 unit 은 건너뛰고 review 로 간다
   case "$hinted" in preflight|"") STAGE=design;; doc-gap) STAGE=worker;; *) STAGE="$hinted";; esac
 fi
@@ -571,6 +601,16 @@ case "$STAGE" in
     [ "$STAGE" = worker ] || units_contract_preflight apply
     if [ "$STAGE" != worker ] && [ -f "$UNITS_MANIFEST_LOCK" ] && ! all_units_done; then
       log "구현 단위 체크포인트가 전부 유효하지 않음 — worker 부터(첫 미완료 unit 에서 재개)"; STAGE=worker
+    fi
+    # Unit 정적 검사가 설정돼 있으면 완료 unit 마다 '현재 명령·현재 코드·현재 정책 입력으로 PASS' 증거가 있어야 review 이상으로 간다 — 완료 뒤 검사를 새로 설정했거나
+    # 명령을 바꾼 경우, 검사 뒤 그 unit 의 코드나 검사 스크립트·규칙이 바뀐 경우 이전 완료·승인만으로 넘기지 않는다(scripts/fast-check.sh unit_check_evidence_current).
+    # worker stage 가 워커 재호출 없이 그 unit 의 검사만 다시 돌린다(run_unit). 미설정이면 이 판정은 없다.
+    if [ "$STAGE" != worker ] && [ -f "$UNITS_MANIFEST_LOCK" ] && unit_check_configured; then
+      evidence_tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패(Unit 정적 검사 증거 확인)"
+      for unit_id in $(unit_ids); do
+        unit_check_evidence_current "$unit_id" "$evidence_tree" && continue
+        log "unit $unit_id: 현재 코드·UNIT_CHECK_CMD 로 통과한 증거가 없음($UNIT_CHECK_EVIDENCE_WHY) — worker 부터(워커 재호출 없이 검사만 재실행)"; STAGE=worker; break
+      done
     fi;;
 esac
 # verify 로 바로 가려면 approved.fingerprint 파일 존재만으론 부족하다 — 리뷰 체크포인트가 현재 계약·현재 작업 트리의
@@ -697,6 +737,16 @@ check_fix_pending_resolve() {
 }
 # 재개 지점이 어디든(review 든 doc-gap 이든) 모델·검사 호출 전에 판정한다
 check_fix_pending_resolve
+# 위험도별 검증이 git index 를 바꾸고 멈춘 뒤(INDEX_MODIFIED) index 가 그대로면, stage 와 무관하게 모델·검증 명령 0회로 다시 멈춘다. verify 진입까지 기다리면
+# 바뀐 index 때문에 승인 지문이 어긋나 리뷰어부터 다시 부르게 되고, 실행 전후만 비교하는 재검증은 '이번에는 안 바꿨다'로 통과한다. 엔진도 실행 직전에 같은 판정을 한다.
+if risk_verify_configured; then
+  rv_ro_rc=0; check_readonly_violation_pending "$RISK_VERIFY_DIR" index || rv_ro_rc=$?
+  case "$rv_ro_rc" in
+    1) ;;
+    0) stop_need_user RISK_VERIFY_ERROR "직전 위험도별 추가 검증(${RISK_VERIFY_CMD:-})이 읽기 전용 계약을 어겼고($CHECK_RO_KIND) 그 변경이 해소되지 않았다 — $CHECK_RO_DETAIL. 검증 명령·워커·리뷰어를 다시 부르지 않았고 TEST_CMD 도 실행하지 않았다(DONE 아님). index 를 검증 전 상태로 명시적으로 되돌리고 RISK_VERIFY_CMD 에서 git add 등 index 를 바꾸는 동작을 뺀 뒤 재실행(stage $STAGE 재개 전 전역 검사, 자동 복구 없음 — 기록을 지우거나 고쳐서 넘기지 않는다)";;
+    *) env_error "직전 위험도별 추가 검증의 읽기 전용 위반 복구 여부를 판정하지 못함(지문·표식 기록 실패)";;
+  esac
+fi
 
 # ---------- 구현 단위 하나 실행 ----------
 # Feature Worker 세션의 워커 턴 → targeted test(실패 시 같은 세션에 unit 범위 수정 → 재테스트, MAX_TEST_RETRIES) → done.json.
@@ -706,10 +756,97 @@ check_fix_pending_resolve
 # 현재 tree 와 일치하면 워커 재호출 없이 테스트부터, tree 가 바뀌었는데 일치하는 유효 결과가 없으면 WORKER_OUTCOME_UNCERTAIN 으로
 # 멈춘다(새 세션 생성·같은 세션 임의 재호출 금지). 그 외에는 워커 턴부터 다시 돌되 before.tree 는 첫 시도의 것을 재사용한다
 # (unit 시작 시점의 증거). 러너는 unit 을 건너뛸지 판단하지 않는다(체크포인트가 유효한가만 본다).
+# ---------- Unit 정적 검사(선택 — UNIT_CHECK_CMD, 엔진은 scripts/fast-check.sh 의 unit_check_run) ----------
+# unit 의 targeted test 앞에서 프로젝트가 제공한 결정론적 검사를 한 번 돌린다. 결과 처리는 전체 Fast Check 와 같은 의미다:
+#   PASS → 다음 검증 / SKIPPED(미설정) → 생략 로그만(통과로 세지 않는다) / VIOLATION → targeted test 실패와 **같은 수정 턴**(worker-unit-fix.md, 한도 MAX_TEST_RETRIES 공유)
+#   ERROR → 워커를 부르지 않고 사용자에게(UNIT_CHECK_ERROR). 위반과 테스트 실패가 함께 나면 진단을 한 파일로 묶어 수정 턴 1회로 보낸다(검사용·테스트용 턴을 따로 쓰지 않는다).
+# 성공 캐시는 없다 — 미완료 unit 은 재개할 때마다 검사부터 다시 한다. 완료 unit 의 증거(units/<id>/unit-check/last.json)는 '그 명령으로, 그때의 unit scope 코드를,
+# 그때의 정책 입력으로 검사해 PASS' 를 뜻한다(기록의 cmd_sha256 · subject_fingerprint · policy_fingerprint). 셋 중 하나라도 지금과 다르면(unit_check_evidence_current 실패 —
+# 명령 신설·변경, 뒤 unit·수정자·worker-fix·사용자의 코드 변경, 검사 스크립트·규칙 변경) 워커 재호출 없이 검사만 다시 돌려 증거를 갱신한다. 판정 지점은 셋이다:
+# 러너 시작(stage 결정), 완료 unit 을 건너뛸 때(run_unit), 그리고 review·verify 진입마다(unit_checks_refresh — 같은 실행 안에서 뒤 unit·수정자·worker-fix 가 코드를 바꾼 경우).
+# 그 재검증이 위반이면 완료 체크포인트·뒤 unit 을 건드리지 않고 사용자에게 돌려보낸다(UNIT_CHECK_STALE_VIOLATION — 완료된 unit 에 자동 수정 턴을 다시 여는 것은
+# 직렬 체크포인트 사슬을 깨뜨린다). 다른 unit 의 scope 에만 속한 변경은 이 unit 의 증거를 무효화하지 않는다.
+unit_check_stop_error() { # unit-id — 실행 오류: 통과도 위반도 아니다. 코드 수정으로 풀 수 없으므로 워커를 부르지 않는다(재실행 = 검사부터)
+  stop_need_user UNIT_CHECK_ERROR "unit $1: Unit 정적 검사(${UNIT_CHECK_CMD:-})를 끝까지 실행하지 못했다 — $CHECK_KIND: $CHECK_DETAIL. 통과·생략·규칙 위반 어느 것으로도 처리하지 않았고 워커를 부르지 않았다(자동 코드 수정 없음, done.json 미확정). 로그: $CHECK_LOG, 기록: $CHECK_RECORD. 복구(kind 별): COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 / TIMEOUT = 검사 범위를 줄이거나(UNIT_CHECK_CHANGED_FILES) UNIT_CHECK_TIMEOUT_SEC 조정 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 명령이 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약을 따르도록 프로젝트 어댑터를 고친다 / INVALID_CONFIG = UNIT_CHECK_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED·INDEX_MODIFIED = 검사가 파일이나 index 를 바꿨다: 기록의 modified_paths 가 가리키는 경로를 검사 전 내용(기록의 tree_before)으로, index 를 검사 전 상태로 직접 되돌리고(자동 원복 없음) 명령에서 자동 수정·포매팅·git add 를 뺀다 — 되돌리기 전의 재실행은 모델·검사 호출 0회로 다시 멈춘다(다른 파일을 더 고치는 것은 복구가 아니다). 고친 뒤 같은 명령으로 재실행하면 이 unit 의 검사부터 다시 돈다. UNIT_CHECK_CMD 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만"
+}
+# 읽기 전용 위반(검사가 작업 트리나 index 를 바꿈)으로 멈춘 뒤 그 변경이 남은 채 재실행하면, 다음 워커 턴의 write-set 검사는 '호출 전 tree' 에 이미 그 변경이 들어 있어
+# unit scope 밖 수정까지 통과시키고, 바뀐 index 는 '이번 실행 전후가 같다'는 이유로 다음 검사를 그대로 통과한다. 그래서 마지막 검사 기록이 그 위반이면
+# 검사가 만든 변경이 실제로 해소됐는지(index 지문 == 검사 전 지문, 검사가 바꾼 경로 == 검사 전 내용) 확인하고, 아니면 모델·검사 호출 0회로 다시 멈춘다.
+# 판정은 scripts/fast-check.sh 의 check_readonly_violation_pending 하나다(엔진도 명령 실행 직전에 같은 판정을 한다). 자동 원복 없음.
+unit_check_require_readonly_restored() { # unit-id unit-dir
+  local ro_rc=0
+  check_readonly_violation_pending "$2/unit-check" all || ro_rc=$?
+  case "$ro_rc" in
+    1) return 0;;
+    0) ;;
+    *) env_error "unit $1: 직전 Unit 정적 검사의 읽기 전용 위반 복구 여부를 판정하지 못함(지문·스냅샷·표식 기록 실패)";;
+  esac
+  stop_need_user UNIT_CHECK_ERROR "unit $1: 직전 Unit 정적 검사가 읽기 전용 계약을 어겼고($CHECK_RO_KIND) 그 변경이 해소되지 않았다 — $CHECK_RO_DETAIL. 검사·워커를 다시 부르지 않았다(모델 호출 0회). 검사가 만든 변경은 unit 범위 검사를 거치지 않았으므로 그대로 이어 받지 않는다: 위 경로·index 를 검사 전 상태로 명시적으로 되돌리고 UNIT_CHECK_CMD 에서 자동 수정·포매팅·git add 를 뺀 뒤 재실행. 자동 원복 없음(기록을 지우거나 고쳐서 넘기지 않는다)"
+}
+# 완료 unit 전부의 검사 증거를 지금의 코드·정책 입력에 맞춘다(review·verify 진입마다 — 모델 호출 0회). 증거가 현재 것이면 아무것도 실행하지 않는다.
+# 같은 실행 안에서 뒤 unit(겹치는 scope)·수정자·worker-fix 가 이미 검사한 코드를 바꿨으면 그 unit 의 검사만 다시 돌린다. 위반이면 리뷰어·TEST_CMD 로 가지 않는다.
+unit_checks_refresh() { # where
+  { [ -f "$UNITS_MANIFEST_LOCK" ] && unit_check_configured; } || return 0
+  local u tree
+  tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패(Unit 정적 검사 증거 확인, $1)"
+  for u in $(unit_ids); do
+    unit_check_require_readonly_restored "$u" "$WORK_DIR/units/$u"
+    unit_check_evidence_current "$u" "$tree" || unit_check_reverify_done "$u" "$WORK_DIR/units/$u" "$1"
+  done
+}
+unit_check_reverify_done() { # unit-id unit-dir [where] — 완료 unit 의 검사 증거 갱신(워커·테스트 호출 0회). 사유는 직전 unit_check_evidence_current 가 남긴 UNIT_CHECK_EVIDENCE_WHY
+  local id="$1" rc=0 why="${UNIT_CHECK_EVIDENCE_WHY:-증거 없음}"
+  log "unit $id: 완료 체크포인트는 유효하지만 지금의 코드·UNIT_CHECK_CMD 로 통과한 증거가 없다($why${3:+, $3}) — 이전 PASS·완료 기록만으로 넘기지 않고, 워커 재호출 없이 검사만 다시 실행한다"
+  unit_check_run "$id" "$2" "unit $id (완료 unit 재검증${3:+ — $3})" || rc=$?
+  case "$rc" in
+    0) log "unit $id: 현재 코드·UNIT_CHECK_CMD 로 재검증 통과 — 완료 체크포인트 유지(증거: $CHECK_RECORD)";;
+    20) stop_need_user UNIT_CHECK_STALE_VIOLATION "unit $id: 완료된 unit 이 지금의 코드·UNIT_CHECK_CMD(${UNIT_CHECK_CMD:-}) 로는 규칙 위반이다 — 완료 당시의 PASS 는 지금 상태에 대한 것이 아니다(재검증 사유: $why). 완료 체크포인트·뒤 unit 을 건드리지 않고 워커·리뷰어도 다시 부르지 않았다(모델 호출 0회). 진단 원본: $CHECK_LOG (기록: $CHECK_RECORD). 복구: ① 진단이 가리키는 위반을 unit scope 안에서 직접 고친 뒤 재실행(검사부터 다시 — 통과하면 다음 단계로, 고친 코드는 전체 review 를 지난다) ② 검사 설정·검사 스크립트·규칙 변경이 의도한 것이 아니면 되돌리고 재실행 ③ 규칙이 합의 문서·conventions 와 충돌하면 어느 쪽이 맞는지 사용자가 정한다. 체크포인트·검사 기록을 지우거나 고쳐서 넘기지 않는다";;
+    30) unit_check_stop_error "$id";;
+    *) env_error "unit $id: Unit 정적 검사 헬퍼 실패(스냅샷·기록 불가, rc $rc) — 검사 결과를 알 수 없으므로 진행하지 않는다";;
+  esac
+}
+# 수정 턴에 넘길 진단 묶음: 정적 검사 위반(+ 같은 회차의 targeted test 결과)을 한 파일로 만든다 — 워커 프롬프트(worker-unit-fix.md)의 ${TEST_LOG} 가 이 파일을 가리킨다.
+# 프롬프트 템플릿은 워커 세션 계약 지문에 들어 있어 바꾸지 않는다(진행 중인 피처의 세션 전제를 깨지 않는다). 검사 위반 수정의 금지 사항은 이 파일 머리에 싣는다.
+unit_verify_diag_write() { # out check_log test_cmd test_log test_rc
+  {
+    echo "[UNIT VERIFY DIAGNOSTICS] 러너가 만든 진단 묶음이다. 이 unit 은 아래 결정론적 검증에서 실패했다 — 이번 수정 턴 한 번으로 전부 해결한다."
+    echo "① Unit 정적 검사(프로젝트가 제공한 결정론적 검사 명령: ${UNIT_CHECK_CMD:-}) = VIOLATION — 출력 원본: $2"
+    echo "   수정 규칙: 진단이 가리키는 위반만, 코드를 규칙에 맞게 고쳐서 없앤다. 검사 명령·검사 스크립트·규칙/설정 파일·conventions.md 를 고치지 않고, 억제 표시(suppress/ignore/disable 주석, 예외 목록 추가)를 넣지 않는다."
+    echo "   검사 도구의 자동 수정·포매터 일괄 실행도 하지 않는다 — 진단이 가리킨 위치를 직접 고친다. 규칙을 따르면 합의 문서의 REQUIRED 결정·conventions 와 충돌하거나 unit scope 밖 파일을 바꿔야 하면 임의로 정하지 말고 UNDECIDED 로 보고한다."
+    echo "   수정이 끝나면 러너가 같은 검사와 targeted test 를 다시 실행한다(검사 명령을 직접 돌려 확인할 필요는 없다)."
+    if [ "$5" -eq 0 ]; then echo "② targeted test($3) = PASS — 이 테스트는 통과했다. 수정 뒤에도 통과해야 한다."
+    else echo "② targeted test($3) = FAIL (exit $5) — 출력 원본: $4"; fi
+    echo
+    echo "----- ① Unit 정적 검사 출력 원본 ($2) -----"
+    cat "$2"
+    if [ "$5" -ne 0 ]; then echo; echo "----- ② targeted test 출력 원본 ($4) -----"; cat "$4"; fi
+  } > "$1.tmp" && mv "$1.tmp" "$1"
+}
+# 이 unit 의 검증 회차 번호(targeted-test-NN.log · unit-verify-NN.diag.log)의 지금까지 최댓값. 재개한 실행이 01 부터 다시 세면 앞선 실행의 로그를 덮어쓰고,
+# append-only 기록(targeted-test.history.jsonl)의 과거 행이 다른 실행의 출력을 가리키게 된다 — 번호는 unit 디렉터리 안에서 이어서 센다(로그·기록 둘 다 본다).
+unit_verify_last_n() { # unit-dir
+  local dir="$1" f n max=0
+  for f in "$dir"/targeted-test-[0-9]*.log "$dir"/unit-verify-[0-9]*.diag.log; do
+    [ -e "$f" ] || continue
+    n="${f##*/}"; n="${n#targeted-test-}"; n="${n#unit-verify-}"; n="${n%%.*}"
+    case "$n" in ''|*[!0-9]*) continue;; esac
+    [ "$((10#$n))" -le "$max" ] || max=$((10#$n))
+  done
+  if [ -f "$dir/targeted-test.history.jsonl" ]; then
+    n="$(jq -R 'fromjson? | objects | .n | numbers' "$dir/targeted-test.history.jsonl" 2>/dev/null | jq -s 'max // 0 | floor')" || n=0
+    case "$n" in ''|*[!0-9]*) n=0;; esac
+    [ "$n" -le "$max" ] || max="$n"
+  fi
+  printf '%s' "$max"
+}
 run_unit() { # unit-id
   local id="$1" unit_dir="$WORK_DIR/units/$1" test_cmd test_log test_rc test_retries=0 test_n=0 title
   local pending=()   # 이번 시도의 결과 파일(워커 → test-fix 순). targeted test 최종 PASS 전까지 context_updates 는 pending 이다
-  if unit_done_valid "$id"; then log "unit $id: 완료 체크포인트 유효(spec + 현재 계약 지문) — 건너뜀"; return 0; fi
+  unit_check_require_readonly_restored "$id" "$unit_dir"
+  if unit_done_valid "$id"; then
+    unit_check_evidence_current "$id" || unit_check_reverify_done "$id" "$unit_dir"
+    log "unit $id: 완료 체크포인트 유효(spec + 현재 계약 지문) — 건너뜀"; return 0
+  fi
   [ ! -f "$unit_dir/done.json" ] || log "unit $id: 완료 체크포인트가 현재 spec·계약에 대해 유효하지 않음($(unit_contract_status "$id")) — 과거 DONE 을 재사용하지 않고 다시 실행"
   # (계약이 바뀐 unit 만 여기까지 온다 — 다른 unit 의 독립 절 변경은 이 unit 을 무효화하지 않으므로 불필요한 연쇄 stale 을 만들지 않는다.)
   # 직렬 의존성: 이 unit 을 (다시) 실행해야 하는데 뒤 unit 이 이미 완료돼 있으면 그 완료는 옛 결과 위에 쌓인 것이고 worktree 에도 그 코드가 남아 있다.
@@ -786,23 +923,52 @@ run_unit() { # unit-id
     RUN_TAG=worker run_worker worker-unit.md "$unit_dir"
     pending+=("$unit_dir/worker-result.json")
   fi
+  local check_rc check_violation check_log="" fix_log test_t0
+  test_n="$(unit_verify_last_n "$unit_dir")"   # 앞선 실행의 로그를 덮어쓰지 않는다 — 이번 실행의 회차는 그 다음 번호부터
   while :; do
     test_n=$((test_n + 1)); test_log="$unit_dir/targeted-test-$(printf '%02d' "$test_n").log"
+    [ ! -e "$test_log" ] || env_error "unit $id: targeted test 로그 경로가 이미 있다($test_log) — 과거 실행의 증거를 덮어쓰지 않는다"
+    # ① Unit 정적 검사(선택). 위반이어도 targeted test 까지 돌린 뒤 두 진단을 한 수정 턴으로 보낸다. 실행 오류는 여기서 멈춘다(테스트·워커 호출 없음).
+    check_violation=0; check_rc=0
+    ! unit_check_configured || write_state worker RUNNING "" "unit $id: unit check #$test_n"
+    unit_check_run "$id" "$unit_dir" "unit $id #$test_n" || check_rc=$?
+    case "$check_rc" in
+      0|10) ;;
+      20) check_violation=1; check_log="$CHECK_LOG";;
+      30) unit_check_stop_error "$id";;
+      *) env_error "unit $id: Unit 정적 검사 헬퍼 실패(스냅샷·기록 불가, rc $check_rc) — 검사 결과를 알 수 없으므로 진행하지 않는다";;
+    esac
+    # ② targeted test
     write_state worker RUNNING "" "unit $id: targeted test #$test_n"
     log "unit $id: targeted test: $test_cmd"
+    test_t0=$SECONDS
     set +e; bash -c "$test_cmd" > "$test_log" 2>&1; test_rc=$?; set -e
     cp "$test_log" "$unit_dir/targeted-test.log"
-    [ "$test_rc" -ne 0 ] || break
-    log "unit $id: targeted test 실패 (exit $test_rc) — $test_log"; tail -30 "$test_log"
-    [ "$test_retries" -lt "$MAX_TEST_RETRIES" ] \
-      || stop_need_user UNIT_TEST_RETRIES_EXHAUSTED "unit $id: targeted test 실패 $((test_retries + 1))회 — $test_log. 자동 복구 없음"
+    # 실행 기록(append-only 증거 — 재개 판정에 쓰지 않는다): DONE 뒤 분석(post-run-report)이 실패·재시도 횟수를 로그 추측 없이 센다
+    jq -nc --arg id "$id" --argjson n "$test_n" --argjson rc "$test_rc" --arg log "$test_log" --argjson d "$((SECONDS - test_t0))" --arg now "$(date '+%FT%T%z')" \
+      '{unit_id:$id, n:$n, status:(if $rc==0 then "PASS" else "FAIL" end), exit_code:$rc, log:$log, duration_sec:$d, at:$now}' >> "$unit_dir/targeted-test.history.jsonl" \
+      || env_error "unit $id: targeted test 실행 기록 저장 실패"
+    [ "$test_rc" -ne 0 ] || [ "$check_violation" -eq 1 ] || break
+    [ "$test_rc" -eq 0 ] || { log "unit $id: targeted test 실패 (exit $test_rc) — $test_log"; tail -30 "$test_log"; }
+    if [ "$test_retries" -ge "$MAX_TEST_RETRIES" ]; then
+      [ "$test_rc" -eq 0 ] \
+        || stop_need_user UNIT_TEST_RETRIES_EXHAUSTED "unit $id: targeted test 실패 $((test_retries + 1))회 — $test_log. 자동 복구 없음$([ "$check_violation" -eq 0 ] || printf ' (같은 회차의 Unit 정적 검사도 규칙 위반: %s)' "$check_log")"
+      stop_need_user UNIT_CHECK_RETRIES_EXHAUSTED "unit $id: Unit 정적 검사(${UNIT_CHECK_CMD:-})의 규칙 위반이 자동 수정 한도(MAX_TEST_RETRIES=$MAX_TEST_RETRIES, targeted test 수정과 공유 — 이 unit 에서 이미 ${test_retries}회 사용) 뒤에도 남아 있다 — done.json 을 확정하지 않았고 추가 자동 수정도 하지 않는다(targeted test 는 통과). 진단 원본: $check_log (기록: $CHECK_RECORD). 복구: 진단이 가리키는 위반을 unit scope 안에서 직접 고치거나, 규칙·검사 명령 쪽이 틀렸으면 프로젝트의 검사 설정을 고친 뒤 같은 명령으로 재실행 — 검사 설정만 고쳤으면 이 unit 의 검사부터, 코드를 직접 고쳤으면(작업 트리가 직전 결과와 달라진다) 기존 재개 규칙대로 이 unit 의 워커 턴부터 다시 돌고, 검사·targeted test 를 통과해야 완료된다. 규칙이 합의 문서·conventions 와 충돌하면 어느 쪽이 맞는지 사용자가 정한다. 체크포인트·검사 기록을 지우거나 고쳐서 넘기지 않는다"
+    fi
     test_retries=$((test_retries + 1))
     write_state worker RUNNING "" "unit $id: test-fix $test_retries/$MAX_TEST_RETRIES"
-    # 수정은 unit 범위 안에서만(같은 fresh 세션 규칙, 같은 사후 검사) — 리뷰어를 부르지 않고 바로 재테스트한다
-    TEST_LOG="$test_log" RUN_TAG="test-fix-$(printf '%02d' "$test_retries")" run_worker worker-unit-fix.md "$unit_dir"
+    # 수정 턴의 진단: 테스트만 실패했으면 종전대로 테스트 로그, 정적 검사 위반이 있으면 검사 진단(+ 테스트 결과)을 묶은 파일 — 어느 경우든 수정 턴은 1회다
+    fix_log="$test_log"
+    if [ "$check_violation" -eq 1 ]; then
+      fix_log="$unit_dir/unit-verify-$(printf '%02d' "$test_n").diag.log"
+      unit_verify_diag_write "$fix_log" "$check_log" "$test_cmd" "$test_log" "$test_rc" || env_error "unit $id: 검증 진단 묶음 기록 실패: $fix_log"
+      log "unit $id: Unit 정적 검사 위반$([ "$test_rc" -eq 0 ] || printf ' + targeted test 실패') → 수정 턴 1회 ($test_retries/$MAX_TEST_RETRIES, 진단 $fix_log)"
+    fi
+    # 수정은 unit 범위 안에서만(같은 fresh 세션 규칙, 같은 사후 검사) — 리뷰어를 부르지 않고 바로 재검증한다
+    TEST_LOG="$fix_log" RUN_TAG="test-fix-$(printf '%02d' "$test_retries")" run_worker worker-unit-fix.md "$unit_dir"
     pending+=("$unit_dir/test-fix-$(printf '%02d' "$test_retries")-result.json")
   done
-  log "unit $id: targeted test 통과"
+  log "unit $id: targeted test 통과$(! unit_check_configured || printf ' · Unit 정적 검사 통과')"
   # context 확정: PASS 뒤에만, 워커 → 수정 순서로 보존한다(fold 는 impl_context_write 가 한다). done.json 보다 먼저 써야 체크포인트가 원천을 가리킨다
   { local f; for f in "${pending[@]}"; do context_update_of "$f" "$(basename "$f" -result.json)"; done; } \
     | jq -s --arg id "$id" --argjson v "$IMPL_CONTEXT_VERSION" '{version:$v, unit_id:$id, updates:.}' > "$unit_dir/context-updates.json.tmp" \
@@ -1060,6 +1226,8 @@ while :; do
       esac;;
 
     review)
+      # 리뷰어를 부르기 전에 완료 unit 의 정적 검사 증거가 지금의 코드에 대한 것인지 확인한다(모델 0회 — 아니면 그 unit 의 검사만 재실행, 위반이면 사용자에게).
+      unit_checks_refresh "review 진입"
       # --new-review-attempt 는 이 실행의 첫 리뷰 루프 호출에만 전달한다(verify 실패 뒤의 재리뷰까지 새 시도로 만들지 않는다)
       set +e; FEATURE_REVIEW_NEW_ATTEMPT="$NEW_REVIEW_ATTEMPT" bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
       NEW_REVIEW_ATTEMPT=0
@@ -1109,8 +1277,14 @@ while :; do
         6)
           # 프로젝트 빠른 검사 실행 오류: 통과도 위반도 아니다. 코드 수정으로 풀 수 없으므로 워커·수정자를 부르지 않고 사용자에게 돌려보낸다(재실행 = 검사부터).
           [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
-          stop_need_user FAST_CHECK_ERROR "프로젝트 빠른 검사($(fast_check_cmd))를 끝까지 실행하지 못했다 — $(jq -r '.kind' "$WORK_DIR/state.json"): $(jq -r '.detail' "$WORK_DIR/state.json"). 통과·생략·규칙 위반 어느 것으로도 처리하지 않았고 리뷰어·수정자·워커를 부르지 않았다(자동 코드 수정 없음). 로그: $(jq -r '.log' "$WORK_DIR/state.json"), 기록: $(jq -r '.record' "$WORK_DIR/state.json"). 복구(kind 별): COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 확인 / TIMEOUT = 검사 범위를 줄이거나(FAST_CHECK_CHANGED_FILES) config.sh 의 FAST_CHECK_TIMEOUT_SEC 조정 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 명령이 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약을 따르도록 프로젝트 어댑터를 고친다 / INVALID_CONFIG = FAST_CHECK_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED·INDEX_MODIFIED = 검사가 파일이나 index 를 바꿨다: 기록의 modified_paths 를 확인해 되돌릴지 유지할지 사용자가 정하고(자동 원복 없음) 명령에서 자동 수정·포매팅을 뺀다. 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다. FAST_CHECK_CMD 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만"
+          stop_need_user FAST_CHECK_ERROR "프로젝트 빠른 검사($(fast_check_cmd))를 끝까지 실행하지 못했다 — $(jq -r '.kind' "$WORK_DIR/state.json"): $(jq -r '.detail' "$WORK_DIR/state.json"). 통과·생략·규칙 위반 어느 것으로도 처리하지 않았고 리뷰어·수정자·워커를 부르지 않았다(자동 코드 수정 없음). 로그: $(jq -r '.log' "$WORK_DIR/state.json"), 기록: $(jq -r '.record' "$WORK_DIR/state.json"). 복구(kind 별): COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 확인 / TIMEOUT = 검사 범위를 줄이거나(FAST_CHECK_CHANGED_FILES) config.sh 의 FAST_CHECK_TIMEOUT_SEC 조정 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 명령이 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약을 따르도록 프로젝트 어댑터를 고친다 / INVALID_CONFIG = FAST_CHECK_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED = 검사가 파일을 바꿨다: 기록의 modified_paths 를 확인해 되돌릴지 유지할지 사용자가 정하고(자동 원복 없음) 명령에서 자동 수정·포매팅을 뺀다 / INDEX_MODIFIED = 검사가 git index 를 바꿨다: index 를 검사 전 상태로 직접 되돌린다(자동 복구 없음) — 되돌리기 전의 재실행은 검사 명령을 실행하지 않고 다시 멈춘다. 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다. FAST_CHECK_CMD 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만"
           ;;
+        7)
+          # 수정자가 완료 unit 의 검사 대상 코드를 바꿨다: 리뷰 루프가 다음 리뷰어를 부르기 전에 돌려보냈다(체크포인트 = 다음 라운드 REVIEWER_PENDING).
+          # review 재진입의 unit_checks_refresh 가 그 unit 의 검사만 다시 돌린다(모델 0회) — 통과하면 같은 attempt 의 리뷰어부터, 위반이면 UNIT_CHECK_STALE_VIOLATION.
+          [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_mark_review_progressed || env_error "doc-gap-resume.json 갱신 실패"
+          log "수정자 변경 뒤 Unit 정적 검사 증거가 낡음(unit $(jq -r '.unit' "$WORK_DIR/state.json"): $(jq -r '.why' "$WORK_DIR/state.json")) → 리뷰어 호출 전에 검사만 재실행"
+          STAGE=review; continue;;
         *) env_error "impl-review-loop 실패 (exit $rc)";;
       esac;;
 
@@ -1122,9 +1296,51 @@ while :; do
         log "승인 지문 불일치 → 재리뷰"; STAGE=review; continue
       fi
       STALE_COUNT=0
-      test_log="$WORK_DIR/reviews/verify-$(date '+%Y%m%d-%H%M%S').log"
+      # 승인된 코드가 완료 unit 의 정적 검사 증거와 같은 코드인지 확인한다 — 리뷰 루프 안에서 수정자가 이미 검사한 코드를 고쳤으면 그 unit 의 검사만 다시 돌린다(모델 0회).
+      unit_checks_refresh "verify 진입"
+      # ---------- 위험도별 추가 검증(선택 — RISK_VERIFY_CMD, 엔진은 scripts/fast-check.sh 의 risk_verify_run) ----------
+      # 리뷰 승인(승인 지문 유효) 뒤, 전체 TEST_CMD 앞에서 프로젝트 명령 하나가 변경의 위험도를 판정하고 필요한 추가 검증을 직접 수행한다. 하네스는 위험도 규칙을 모른다.
+      # 성공 캐시는 없다 — verify 에 들어올 때마다(수정 뒤 재승인, 재개 포함) 지금의 승인된 코드로 다시 실행한다. 새 모델 호출·새 수정 루프도 없다:
+      #   PASS / SKIPPED(미설정) → 종전대로 TEST_CMD
+      #   VIOLATION → TEST_CMD 실패와 같은 경로·같은 한도(MAX_TEST_RETRIES, test_retries 공유): 기존 worker-fix 1회 → review(재승인 필수) → verify(재검증)
+      #   ERROR(도구 누락·타임아웃·읽기 전용 위반·결과 JSON 없음/형식 오류) → 자동 수정 없이 사용자(RISK_VERIFY_ERROR)
+      #   NEEDS_USER(위험도 UNKNOWN / needs_human) → 자동 수정·모델 추측 없이 사용자(RISK_VERIFY_NEEDS_USER)
+      rv_rc=0; risk_verify_run "verify (승인 $(cat "$WORK_DIR/approved.fingerprint" | cut -c1-12))" || rv_rc=$?
+      case "$rv_rc" in
+        0) log "위험도별 추가 검증 통과 — risk_level $(jq -r '.risk_level' "$CHECK_RECORD"), 실행한 검증 $(jq -c '[.checks[]? | "\(.name // "?")=\(.status // "?")"]' "$CHECK_RECORD")";;
+        10) ;;
+        20)
+          rv_level="$(jq -r '.risk_level // "UNKNOWN"' "$CHECK_RECORD")"
+          log "위험도별 추가 검증 실패(규칙·검증 위반, risk_level $rv_level) — $CHECK_LOG"
+          [ "$TEST_RETRIES" -ge "$MAX_TEST_RETRIES" ] && stop_need_user RISK_VERIFY_RETRIES_EXHAUSTED "위험도별 추가 검증(${RISK_VERIFY_CMD:-})의 위반이 자동 수정 한도(MAX_TEST_RETRIES=$MAX_TEST_RETRIES, 최종 테스트 수정과 공유 — 이미 ${TEST_RETRIES}회 사용) 뒤에도 남아 있다(risk_level $rv_level) — TEST_CMD 를 실행하지 않았고 DONE 이 아니다. 진단 원본: $CHECK_LOG (기록: $CHECK_RECORD, 이전 실행: $WORK_DIR/risk-verify/history.jsonl). 복구: 진단이 가리키는 문제를 feature-scope 범위 안에서 직접 고치거나(고친 코드는 재리뷰·재검증을 지난다) 검증 명령 쪽이 틀렸으면 프로젝트 설정을 고친 뒤 같은 명령으로 재실행. 체크포인트·run-state·지문을 지우거나 고쳐서 넘기지 않는다"
+          TEST_RETRIES=$((TEST_RETRIES + 1))
+          write_state verify RUNNING "" "worker-fix $TEST_RETRIES/$MAX_TEST_RETRIES (risk-verify)"
+          # 기존 worker-fix 프롬프트(세션 계약 지문에 포함 — 바꾸지 않는다)의 ${TEST_LOG} 로 진단 묶음을 넘긴다. 수정 뒤 기존 승인은 무효 → 재리뷰 → verify 재진입 시 재검증.
+          rv_diag="${CHECK_LOG%.log}.diag.log"
+          {
+            echo "[RISK VERIFY DIAGNOSTICS] 러너가 만든 진단 묶음이다. 리뷰 승인 뒤 프로젝트의 위험도별 추가 검증(${RISK_VERIFY_CMD:-})이 위반을 보고했다(risk_level $rv_level, 전체 테스트는 아직 실행 전)."
+            echo "수정 규칙: 진단이 가리키는 문제만 코드에서 고친다. 검증 명령·검증 스크립트·규칙/설정 파일을 고치거나 검증을 건너뛰게 만들지 않는다. 수정이 제품 정책·설계 결정을 요구하면 임의로 정하지 말고 UNDECIDED 로 보고한다."
+            echo "실행한 검증: $(jq -c '.checks // []' "$CHECK_RECORD")"
+            echo; echo "----- 검증 출력 원본 ($CHECK_LOG) -----"; cat "$CHECK_LOG"
+          } > "$rv_diag.tmp" && mv "$rv_diag.tmp" "$rv_diag" || env_error "위험도별 검증 진단 묶음 기록 실패: $rv_diag"
+          TEST_LOG="$rv_diag" run_worker worker-fix.md
+          STAGE=review; continue;;   # 워커 수정 후 기존 승인은 무효 → 재리뷰 필수 → 승인되면 verify 가 검증부터 다시 한다
+        30) stop_need_user RISK_VERIFY_ERROR "위험도별 추가 검증(${RISK_VERIFY_CMD:-})을 끝까지 실행하지 못했다 — $CHECK_KIND: $CHECK_DETAIL. 통과·생략·위반 어느 것으로도 처리하지 않았고 워커·리뷰어를 부르지 않았으며 TEST_CMD 도 실행하지 않았다(DONE 아님, 자동 코드 수정 없음). 로그: $CHECK_LOG, 기록: $CHECK_RECORD. 복구(kind 별): RESULT_INVALID = 명령이 exit 0 일 때 \$RISK_VERIFY_RESULT 에 {\"risk_level\":\"LOW|MEDIUM|HIGH|CRITICAL|UNKNOWN\", \"checks\":[{\"name\":…,\"status\":\"PASS|FAIL|SKIPPED\"}]} 를 쓰도록 프로젝트 어댑터를 고친다(결과가 없으면 위험도를 LOW 로 가정하지 않는다) / RESULT_INCONSISTENT = exit 0 인데 checks 에 FAIL 이 있다: 실패한 검증이 있으면 명령이 exit 1 + 진단을 내도록 어댑터를 고친다(코드 위반으로 처리하지 않았다 — 워커 수정 없음) / COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 / TIMEOUT = RISK_VERIFY_TIMEOUT_SEC 조정 또는 검증 범위 축소 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약 / INVALID_CONFIG = RISK_VERIFY_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED = 검증이 소스를 바꿨다: 기록의 modified_paths 를 확인해 되돌릴지 사용자가 정하고(자동 원복 없음 — 범위 안 변경이 남으면 승인 지문이 달라져 재리뷰를 지난다) 명령이 작업 트리 밖(임시 디렉터리)에서 산출물을 만들게 고친다 / INDEX_MODIFIED = 검증이 git index 를 바꿨다: index 를 검증 전 상태로 직접 되돌린다(자동 복구 없음) — 되돌리기 전의 재실행은 검증 명령·모델 호출 0회로 다시 멈춘다. 고친 뒤 같은 명령으로 재실행하면 검증부터 다시 돈다. RISK_VERIFY_CMD 를 비워 검증을 끄는 것은 사용자가 명시적으로 정할 때만";;
+        40) stop_need_user RISK_VERIFY_NEEDS_USER "위험도별 추가 검증(${RISK_VERIFY_CMD:-})이 자동으로 통과시킬 수 없는 결과를 냈다 — $CHECK_KIND: $CHECK_DETAIL. 위험도를 LOW 로 가정하지 않았고 모델에게 판정·수정을 맡기지 않았으며 TEST_CMD 도 실행하지 않았다(DONE 아님). 판정 근거: $(jq -c '.reasons // []' "$CHECK_RECORD"), 실행한 검증: $(jq -c '.checks // []' "$CHECK_RECORD"), 로그: $CHECK_LOG, 기록: $CHECK_RECORD. 사용자에게 보고하고 결정을 받는다: RISK_UNKNOWN = 이 변경을 분류할 규칙을 프로젝트의 검증 명령에 추가한다 / HUMAN_REVIEW_REQUIRED = 프로젝트가 정한 확인 절차(검증 명령이 요구하는 승인 조건)를 사용자가 수행한다. 그 뒤 같은 명령으로 재실행하면 검증부터 다시 돈다. 사용자 지시 없이 RISK_VERIFY_CMD 를 비우거나 결과를 고쳐서 넘기지 않는다";;
+        *) env_error "위험도별 추가 검증 헬퍼 실패(스냅샷·기록 불가, rc $rv_rc) — 검증 결과를 알 수 없으므로 진행하지 않는다";;
+      esac
+      # 로그 경로는 실행마다 고유해야 한다 — 같은 초에 verify 가 두 번 돌면(빠른 실패 → 수정 → 재승인) 초 단위 이름이 겹쳐,
+      # append-only 기록(verify.history.jsonl)의 앞 행이 가리키는 로그를 덮어쓴다. 겹치면 -2, -3 … 을 붙인다(기존 이름 형식은 그대로).
+      verify_stamp="$(date '+%Y%m%d-%H%M%S')"; verify_dup=1
+      test_log="$WORK_DIR/reviews/verify-$verify_stamp.log"
+      while [ -e "$test_log" ]; do verify_dup=$((verify_dup + 1)); test_log="$WORK_DIR/reviews/verify-$verify_stamp-$verify_dup.log"; done
       log "전체 테스트: $TEST_CMD"
+      verify_t0=$SECONDS
       set +e; { bash -c "$TEST_CMD" && { log "린트: $LINT_CMD"; bash -c "$LINT_CMD"; }; } > "$test_log" 2>&1; rc=$?; set -e
+      # 실행 기록(append-only 증거 — 재개 판정에 쓰지 않는다): DONE 뒤 분석이 최종 검증 실패·재시도 횟수를 센다
+      jq -nc --argjson rc "$rc" --arg log "$test_log" --argjson d "$((SECONDS - verify_t0))" --arg now "$(date '+%FT%T%z')" \
+        '{status:(if $rc==0 then "PASS" else "FAIL" end), exit_code:$rc, log:$log, duration_sec:$d, at:$now}' >> "$WORK_DIR/reviews/verify.history.jsonl" \
+        || env_error "최종 검증 실행 기록 저장 실패"
       if [ $rc -ne 0 ]; then
         log "테스트/린트 실패 (exit $rc) — $test_log"; tail -30 "$test_log"
         [ "$TEST_RETRIES" -ge "$MAX_TEST_RETRIES" ] && stop_need_user TEST_RETRIES_EXHAUSTED "테스트 실패 $((TEST_RETRIES + 1))회 — $test_log"
@@ -1150,6 +1366,7 @@ while :; do
       # [Added] 완료 보고: usage_summary 의 같은 숫자로 Claude 보고 비용 + Codex 추정 비용(API 표준 요금 환산) + 추정 불가 건수를 모두 적는다.
       # reported+estimated 는 실제 청구액이 아니다. interactive 오케스트레이터 자체 비용은 usage.jsonl 범위 밖이라 섞지 않는다. (중단 경로도 같은 함수)
       report_usage_on_exit
+      post_run_report_ensure   # DONE 기록 뒤의 회고(모델 호출 0회) — 실패해도 경고만 남기고 DONE(exit 0)은 그대로다
       log "DONE"
       skill_reference_hint DONE ""
       exit 0;;

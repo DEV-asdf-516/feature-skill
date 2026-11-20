@@ -11,6 +11,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id>
 러너가 Phase 0 에서 확정한 worktree 로 들어가 `preflight → design → impl → worker → review → verify → done`을 연결한다. worker 는 전체 feature 를 워커 한 번에 맡기지 않고 `implementation-units.json` 의 구현 단위를 순서대로 직렬 실행한다(아래 "구현 단위 직렬 실행")
 — unit 사이에는 review/verify 가 없고, 모든 unit 이 끝난 뒤 기존 전체 review(`impl-review-loop.sh`) 를 한 번, 이어서 verify(`TEST_CMD` → `LINT_CMD`, 실패하면 워커 수정 → 재리뷰) 를 기존과 같은 의미로 수행한다. 복잡도·중복·dead code 분석은 프로젝트가 `LINT_CMD`에 구성한다
 — 프로젝트가 `FAST_CHECK_CMD`(선택)를 설정했으면 리뷰어를 부르기 직전마다 그 빠른 검사를 먼저 돌린다(계약·실행 시점·결과 처리는 `references/pipeline-contracts.md` 의 "프로젝트 빠른 검사", 미설정이면 생략 로그만 남는다)
+— 같은 방식의 선택 검사가 둘 더 있다: `UNIT_CHECK_CMD`(unit 마다 targeted test 앞의 정적 검사)와 `RISK_VERIFY_CMD`(리뷰 승인 뒤 `TEST_CMD` 앞의 위험도별 추가 검증). 계약은 `references/pipeline-contracts.md` 의 "Unit 정적 검사 · 위험도별 추가 검증", 미설정이면 생략 로그만 남는다
 — 스킬은 언어 독립이라 자체 코드 검사를 갖지 않고, 커버리지 % 게이트도 두지 않는다(숫자 채우기 테스트 유발). 실시간 로그 창(`feature-live`)은 러너가 연다 — **오케스트레이터는 `feature-live` 를 직접 실행하지 않는다.** 러너가 `.agent-work/.feature-live.lock/viewer.pid` 의 PID 생존으로 이미 열려 있는지 확인하고 절대 경로로 새 터미널을 연다.
 열려 있는지 궁금하면 그 pid 파일만 본다(`kill -0 "$(cat .agent-work/.feature-live.lock/viewer.pid)"`). 사람이 수동으로 열 때만 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"` 를 쓴다(피처 worktree 에는 `feature-live` 가 gitignore 되지 않은 경우에만 snapshot 으로 복사된다
 — 없으면 원본 저장소 루트의 파일을 worktree 로 `cd` 한 뒤 절대 경로로 실행한다). 진행은 피처 worktree 의 `.agent-work/live.log`와 `run-state.json`으로 관찰한다. **종료 코드로만 다음 행동을 정한다.**
@@ -97,9 +98,30 @@ gap 과 무관한 절은 이 경로에서 고치지 않는다. 재실행은 검�
 - `TIMEOUT`: `FAST_CHECK_TIMEOUT_SEC`(기본 120초) 초과로 종료시켰다. 검사 범위를 줄이거나(`FAST_CHECK_CHANGED_FILES`) 제한을 조정.
 - `UNEXPECTED_EXIT`: 0(정상)·1(위반) 이외의 종료 코드. `NO_DIAGNOSTICS`: exit 1 인데 출력이 비어 있어 고칠 대상을 알 수 없다. 둘 다 프로젝트 어댑터가 종료 코드 계약을 따르게 고친다.
 - `INVALID_CONFIG`: `FAST_CHECK_TIMEOUT_SEC` 가 양의 정수가 아니다(명령은 실행되지 않았다).
-- `WORKTREE_MODIFIED` / `INDEX_MODIFIED`: 검사가 읽기 전용 계약을 어기고 파일이나 git index 를 바꿨다(자동 수정·포매팅·`git add`). 변경은 **원복하지 않고 그대로** 있다 — `fast-check/last.json` 의 `modified_paths`·`out_of_scope_paths` 를 보고하고, 되돌릴지 유지할지는 사용자가 정한다(자동 원복 금지). 명령에서 자동 수정을 뺀다.
+- `WORKTREE_MODIFIED` / `INDEX_MODIFIED`: 검사가 읽기 전용 계약을 어기고 파일이나 git index 를 바꿨다(자동 수정·포매팅·`git add`). 변경은 **원복하지 않고 그대로** 있다 — `fast-check/last.json` 의 `modified_paths`·`out_of_scope_paths` 를 보고하고, 파일 변경을 되돌릴지 유지할지는 사용자가 정한다(자동 원복 금지). 명령에서 자동 수정을 뺀다. index 변경(`INDEX_MODIFIED`)은 index 가 검사 전 상태로 돌아오기 전에는 재실행이 검사 명령을 실행하지 않고 같은 사유로 다시 멈춘다 — 사용자 확인 뒤 직접 되돌린다.
 
 원인을 고친 뒤 같은 명령으로 재실행하면 검사부터 다시 돈다(고치지 않은 재실행은 모델 호출 0회로 같은 사유). 검사가 바꾼 코드를 유지하면 그 코드는 재검사·재리뷰를 지난다 — 이전 승인은 지문이 달라 재사용되지 않는다. `FAST_CHECK_CMD` 를 비워 검사를 끄는 것은 사용자가 명시적으로 정할 때만 한다.
+
+### `UNIT_CHECK_RETRIES_EXHAUSTED` / `UNIT_CHECK_ERROR` / `UNIT_CHECK_STALE_VIOLATION` — exit 2 `NEED_USER`
+
+Unit 정적 검사(`config.sh` 의 `UNIT_CHECK_CMD`, 계약은 `references/pipeline-contracts.md` 의 "Unit 정적 검사 · 위험도별 추가 검증")에서 멈췄다. 세 경우 모두 그 unit 의 `done.json` 은 새로 확정되지 않았고 다음 unit·리뷰로 가지 않았다. detail 의 `units/<id>/unit-check/check-NNNN.log`(검사 출력 원본)와 `last.json` 을 사용자에게 보고한다.
+
+- `UNIT_CHECK_RETRIES_EXHAUSTED`: 규칙 위반이 unit 수정 한도(`MAX_TEST_RETRIES`, targeted test 수정과 공유) 뒤에도 남았다(targeted test 는 통과). 추가 자동 수정은 없다. 사용자가 ① 위반을 unit scope 안에서 직접 고치거나 ② 규칙·검사 명령 쪽이 틀렸으면 프로젝트의 검사 설정을 고치거나 ③ 규칙이 합의 문서·conventions 와 충돌하면 어느 쪽이 맞는지 정한다. 그대로 재실행하면 모델 호출 0회로 같은 사유다. 검사 설정만 고쳤으면 검사부터, 코드를 직접 고쳤으면 기존 재개 규칙대로 그 unit 의 워커 턴부터 다시 돈다.
+- `UNIT_CHECK_ERROR`: 검사를 끝까지 실행하지 못했다(통과·생략·위반 어느 것도 아니다 — 워커·테스트 호출 없음). kind 는 `FAST_CHECK_ERROR` 와 같다(`COMMAND_NOT_RUNNABLE`·`TIMEOUT`·`UNEXPECTED_EXIT`·`NO_DIAGNOSTICS`·`INVALID_CONFIG`·`WORKTREE_MODIFIED`·`INDEX_MODIFIED`). 원인을 고친 뒤 재실행하면 워커 재호출 없이 그 unit 의 검사부터 다시 돈다.
+  `WORKTREE_MODIFIED` 는 검사가 파일을, `INDEX_MODIFIED` 는 git index 를 바꾼 것이다 — 변경은 원복되지 않고 남아 있으며, **검사가 만든 변경이 해소되기 전에 재실행하면 검사·모델 0회로 다시 멈춘다.** 해소 = 검사가 바꾼 경로(`last.json` 의 `modified_paths`)가 검사 전 내용(`tree_before`)으로 돌아오고 index 가 검사 전 상태로 돌아온 것이다. 다른 파일을 더 고치거나 검사 명령만 고치는 것은 해소가 아니다. 사용자 확인 뒤 그 경로·index 를 직접 되돌리고 명령에서 자동 수정·포매팅·`git add` 를 뺀다(자동 원복 금지 — detail 에 아직 남은 경로가 적힌다).
+- `UNIT_CHECK_STALE_VIOLATION`: 이미 완료된 unit 이 **지금의 코드·지금의** `UNIT_CHECK_CMD` 로는 위반이다 — 완료 당시의 PASS 는 지금 상태에 대한 것이 아니다(detail 의 '재검증 사유': 완료 뒤 검사를 새로 켰거나 명령을 바꿈 / 검사 뒤 그 unit 의 코드가 바뀜 — 뒤 unit·수정자·worker-fix·수동 수정 / 검사 스크립트·규칙(`UNIT_CHECK_POLICY_PATHS` 로 선언한 경로 포함)이 바뀜). 수정자가 만든 위반이면 다음 리뷰어를 부르기 전에 멈춘 것이다. review·verify 진입에서 났으면 리뷰어·`TEST_CMD` 는 호출되지 않았다. 완료 체크포인트·뒤 unit 은 그대로이고 워커를 다시 부르지 않았다. 사용자가 ① 위반을 unit scope 안에서 직접 고치거나(재실행은 검사부터 — 통과하면 다음 단계로 가고 고친 코드는 전체 review 를 지난다) ② 설정·검사 스크립트 변경이 의도가 아니면 되돌린다.
+
+하지 않는 것: `units/<id>/unit-check/`·`done.json`·`run-state.json` 을 지우거나 고쳐서 넘기기, 사용자 지시 없이 `UNIT_CHECK_CMD` 를 비우기, 억제 주석으로 위반 숨기기. 수정 턴이 낸 미결정은 `UNDECIDED`, unit scope 밖 수정은 `UNIT_SCOPE_VIOLATION` 으로 온다(기존 절 그대로).
+
+### `RISK_VERIFY_RETRIES_EXHAUSTED` / `RISK_VERIFY_ERROR` / `RISK_VERIFY_NEEDS_USER` — exit 2 `NEED_USER`
+
+리뷰 승인 뒤의 위험도별 추가 검증(`config.sh` 의 `RISK_VERIFY_CMD`)에서 멈췄다. 세 경우 모두 `TEST_CMD` 는 실행되지 않았고 `DONE` 이 아니다. detail 의 `risk-verify/check-NNNN.log`·`last.json`(`risk_level`·`checks`·`reasons`)을 사용자에게 보고한다.
+
+- `RISK_VERIFY_RETRIES_EXHAUSTED`: 검증 위반이 워커 수정 한도(`MAX_TEST_RETRIES`, 최종 테스트 수정과 공유) 뒤에도 남았다. 사용자가 범위 안에서 직접 고치면(고친 코드는 재리뷰 → 재검증을 지난다) 또는 검증 명령 쪽을 고치면 같은 명령으로 재실행한다. 그대로 재실행하면 검증 1회·모델 0회로 같은 사유다.
+- `RISK_VERIFY_ERROR`: 검증을 끝까지 실행하지 못했다 — 워커를 부르지 않았고 한도도 쓰지 않았다. kind 는 `FAST_CHECK_ERROR` 의 것에 `RESULT_INVALID`(exit 0 인데 `$RISK_VERIFY_RESULT` 결과 JSON 이 없거나 형식이 틀림 — `checks`·`reasons` 항목 형식 포함. 위험도를 LOW 로 가정하지 않는다)와 `RESULT_INCONSISTENT`(exit 0 인데 `checks` 에 `FAIL` 이 있음 — 통과도 코드 위반도 아니다: 실패한 검증이 있으면 exit 1 + 진단을 내도록 검증 명령을 고친다. 워커에게 코드를 고치게 하지 않는다)가 더해진다. 프로젝트 어댑터·환경을 고친 뒤 재실행. 검증이 소스를 바꿨으면(`WORKTREE_MODIFIED`) 되돌릴지는 사용자가 정하고, 범위 안 변경이 남으면 재리뷰를 지난다. 검증이 git index 를 바꿨으면(`INDEX_MODIFIED`) **index 를 검증 전 상태로 되돌리기 전의 재실행은 검증 명령·모델 0회로 다시 멈춘다** — 사용자 확인 뒤 직접 되돌린다(자동 복구 금지).
+- `RISK_VERIFY_NEEDS_USER`: 검증 명령이 위험도를 판정하지 못했거나(`RISK_UNKNOWN`) 사람의 확인을 요구했다(`HUMAN_REVIEW_REQUIRED`). **위험도를 추측하거나 LOW 로 간주해 진행하지 않는다.** 판정 근거(`reasons`)와 실행한 검증(`checks`)을 그대로 보고하고 사용자 결정을 받는다 — 분류 규칙을 프로젝트 검증 명령에 추가하거나, 프로젝트가 정한 확인 절차를 사용자가 수행한 뒤 재실행한다.
+
+하지 않는 것: 사용자 지시 없이 `RISK_VERIFY_CMD` 를 비우기, 결과 JSON·`risk-verify/` 기록·`run-state.json` 을 고쳐서 넘기기, 검증 명령·규칙을 워커에게 고치게 하기.
 
 ### `REVIEW_OUTPUT_INVALID` — exit 2 `NEED_USER`
 
@@ -156,7 +178,7 @@ unit 워커가 전체 범위 안이지만 현재 unit 의 scope 밖 경로를 �
 
 ### `UNIT_TEST_RETRIES_EXHAUSTED` — exit 2 `NEED_USER`
 
-unit 의 `targeted_test` 가 `MAX_TEST_RETRIES` 회 수정 뒤에도 실패. `units/<id>/targeted-test-NN.log` 를 정리해 사용자 보고
+unit 의 `targeted_test` 가 `MAX_TEST_RETRIES` 회 수정 뒤에도 실패. `units/<id>/targeted-test-NN.log` 를 정리해 사용자 보고(Unit 정적 검사가 설정돼 있고 같은 회차에 위반도 남았으면 detail 에 그 진단 로그가 함께 적힌다 — 한도는 둘이 공유한다)
 
 ### `DESIGNER_SCOPE_VIOLATION` — exit 2 `NEED_USER`
 

@@ -108,8 +108,17 @@ grep -q '^FAST_CHECK_CMD=""$' "$TARGET_SKILL/config.sh.new" || fail "config.sh.n
 [ -x "$TARGET_SKILL/scripts/fast-check.sh" ] && [ -f "$TARGET_SKILL/prompts/worker-check-fix.md" ] || fail "빠른 검사 스크립트·프롬프트가 설치되지 않음"
 echo "$legacy_output" | grep -q "\[INFO\] 선택 기능 '프로젝트 빠른 검사' 미설정" || fail "빠른 검사 미설정 안내(INFO)가 없음"
 echo "$legacy_output" | grep -q '\[FAIL\]' && fail "빠른 검사 미설정 config 를 혼합 설치로 오판함"
+# Unit 정적 검사·위험도별 추가 검증도 같다: 설정 줄이 없는 기존 config.sh 는 병합 없이 업데이트되고(혼합 설치 아님), 설정 줄을 대신 써 넣지 않으며, 새 스크립트는 설치된다.
+grep -v '^UNIT_CHECK_\|^RISK_VERIFY_' "$SCRATCH/config.with-fast-check" > "$TARGET_SKILL/config.sh"
+gates_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1)" || fail "검증 게이트 설정 줄이 없는 기존 config 에서 설치가 실패함: $gates_output"
+grep -q '^UNIT_CHECK_\|^RISK_VERIFY_' "$TARGET_SKILL/config.sh" && fail "검증 게이트 미설정 config: 설치가 사용자 config 에 설정 줄을 써 넣음"
+grep -q '^UNIT_CHECK_CMD=""$' "$TARGET_SKILL/config.sh.new" && grep -q '^RISK_VERIFY_CMD=""$' "$TARGET_SKILL/config.sh.new" || fail "config.sh.new 에 UNIT_CHECK_CMD/RISK_VERIFY_CMD 기본값(빈 값 = 미설정)이 없음"
+[ -x "$TARGET_SKILL/scripts/post-run-report.sh" ] && grep -q '^unit_check_run()' "$TARGET_SKILL/scripts/fast-check.sh" && grep -q '^risk_verify_run()' "$TARGET_SKILL/scripts/fast-check.sh" \
+  || fail "검증 게이트·사후 분석 스크립트가 설치되지 않음"
+echo "$gates_output" | grep -q "\[INFO\] 선택 기능 'Unit 정적 검사'·'위험도별 추가 검증' 미설정" || fail "검증 게이트 미설정 안내(INFO)가 없음"
+echo "$gates_output" | grep -q '\[FAIL\]' && fail "검증 게이트 미설정 config 를 혼합 설치로 오판함"
 cp "$SCRATCH/config.with-fast-check" "$TARGET_SKILL/config.sh"
-bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1 | grep -q "프로젝트 빠른 검사' 미설정" && fail "설정 줄이 있는 config 인데 미설정 안내가 나옴"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1 | grep -q "프로젝트 빠른 검사' 미설정\|'위험도별 추가 검증' 미설정" && fail "설정 줄이 있는 config 인데 미설정 안내가 나옴"
 echo "[OK] 3a. 빠른 검사 설정 줄 없는 기존 config — 병합 없이 업데이트·사용자 설정 보존·설정 줄 미삽입·INFO 안내"
 
 # ---------- 3b. 역할별 모델/effort + 선택 conventions 규칙 병합 ----------

@@ -115,6 +115,11 @@ if ! grep -q '^FAST_CHECK_CMD=' "$TARGET_SKILL_DIR/config.sh"; then
   echo "[INFO] 선택 기능 '프로젝트 빠른 검사' 미설정: $TARGET_SKILL_DIR/config.sh 에 FAST_CHECK_CMD 줄이 없습니다 — 지금 그대로 동작합니다(리뷰 전 검사 생략, 기존 설정 변경 없음)."
   echo "       쓰려면 config.sh.new 의 '프로젝트 빠른 검사 (선택)' 블록(FAST_CHECK_CMD / FAST_CHECK_TIMEOUT_SEC)을 사용자 설정 영역에 옮겨 적으세요. 진행 중인 피처가 없을 때 켭니다. (README '프로젝트 빠른 검사')"
 fi
+# 같은 방식의 선택 설정 둘(Unit 정적 검사·위험도별 추가 검증): 헬퍼는 scripts/fast-check.sh 에 있어 줄이 없어도 미설정으로 그대로 동작한다(런타임 계약 표식 불변, 필수 작업 아님).
+if ! grep -q '^UNIT_CHECK_CMD=' "$TARGET_SKILL_DIR/config.sh" || ! grep -q '^RISK_VERIFY_CMD=' "$TARGET_SKILL_DIR/config.sh"; then
+  echo "[INFO] 선택 기능 'Unit 정적 검사'·'위험도별 추가 검증' 미설정: $TARGET_SKILL_DIR/config.sh 에 UNIT_CHECK_CMD / RISK_VERIFY_CMD 줄이 없습니다 — 지금 그대로 동작합니다(검사 생략, 기존 설정 변경 없음)."
+  echo "       쓰려면 config.sh.new 의 'Unit 정적 검사 (선택)'·'위험도별 추가 검증 (선택)' 블록을 사용자 설정 영역에 옮겨 적으세요. (README '검증 게이트')"
+fi
 
 # ---------- 2. Claude 훅 스크립트 + core_rules.md ----------
 # 훅 스크립트도 프로젝트별로 커스터마이즈될 수 있어 기존 파일은 보존한다.
