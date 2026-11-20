@@ -34,7 +34,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 - **사용자 결정은 `decisions.md` 에 추가만 한다.** `- [USER-QUESTION][scope=design|impl] <질문> → <답>`. scope = 그 결정이 처음 영향을 주는 단계(요구·외부 동작·설계 → `design`, 구현 수단만 → `impl`). 에스컬레이션·gap 의 답은 러너 detail 이 준 셋째 태그(`[escalation=…]`/`[review-issue=…]`/`[worker-gap=…]`)를 표기 그대로 붙인다. 기존 줄 수정·삭제, 빈 답·플레이스홀더 금지. 유일한 예외: `DECISION_SCOPE_REQUIRED` 로 멈췄을 때 detail 이 가리킨 scope 없는 옛 `- [USER-QUESTION] …` 줄에, 사용자와 확인한 `[scope=design|impl]` 태그만 붙인다(질문·답 문구는 그대로, 이미 scope 가 있는 줄은 대상 아님). 요구 자체가 바뀌면 gap 답으로 우회하지 않고 request.md `## 요구 변경/추가` 에 append 한다.
 - **`USER_RESOLVED` 는 검증자 PASS 가 아니다.** 사용자 결정으로 단계를 넘어가도 리뷰 JSON 의 BLOCK 과 review/verify/DONE 게이트는 그대로다.
 - **`DOC_GAP` 은 사용자 결정으로 종결된다.** 답을 approach.md 에 최소한으로 동기화하고, 검증자·디자이너 재승인을 요청하지 않으며, gap 과 무관한 절을 고치지 않는다.
-- **워커가 진입한 뒤에는 완료 unit 의 참조 절을 임의로 고치지 않는다.** 절 본문이 한 글자라도 바뀌면 그 unit 과 뒤 unit 을 다시 실행해야 한다(`UNIT_CONTRACT_STALE`·`UNIT_CHECKPOINT_CHAIN_STALE`). 측정 결과·관찰·메모는 참조 절 밖에 적고, 계약을 실제로 바꿔야 하면 **먼저** 영향받는 완료 unit 과 재실행 범위를 사용자에게 알리고 결정을 받는다(`references/exit-states-resume.md`).
+- **워커가 진입한 뒤에는 합의 문서를 임의로 고치지 않는다.** 참조 절 본문이 한 글자라도 바뀌면 그 unit 과 뒤 unit 을 다시 실행해야 하고(`UNIT_CONTRACT_STALE`·`UNIT_CHECKPOINT_CHAIN_STALE`), 참조되지 않는 절이라도 합의 문서 안이면 검증자 재합의가 돈다. 측정 결과·관찰·메모는 합의 문서 밖(`.agent-work/notes.md`)에 적는다. 고친 뒤에는 재실행 전에 `--contract-impact` 로 영향을 확인하고, 계약을 실제로 바꿔야 하면 그 재실행 범위를 사용자에게 알려 결정을 받는다(`references/exit-states-resume.md`).
 - **체크포인트·지문을 손으로 고치지 않는다.** `consensus-*.json`·`review-impl.json`·`doc-gap-resume.json`·`user-escalation-resume-*.json`·`*.lock.json`·`worker-baseline.tree`·`worker-session.json`·세션·가드 파일을 수정·재계산·삭제해 진행시키지 않는다. 참조 문서가 허용한 조작만, 사용자 확인 뒤에.
 - **자동 원복 금지(변경 소유권).** 범위 밖 변경·불확실한 워커 결과·기준선/manifest 변조는 보존하고 사용자에게 보고한다. `git restore`/`checkout --`/`reset --hard` 로 되돌리지 않는다. 워커·리뷰어·수정자는 파일 삭제 금지.
 - **자동 승인·임의 복구 금지.** 판정은 스키마 검증된 JSON(PASS/BLOCK, APPROVE/REQUEST_CHANGES, DONE/UNDECIDED)만 신뢰한다. "대충 통과 간주"·같은 프롬프트 재전송·세션 초기화·fresh 세션 강제를 하지 않는다. 마지막 APPROVE 뒤 코드가 바뀌면 재리뷰 없이 끝내지 않는다.
@@ -50,6 +50,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id>                        # 
 bash <skill_dir>/scripts/feature-run.sh --feature <id> --new                  # 같은 worktree 에서 처음부터 다시(이전 산출물은 archive 로 mv)
 bash <skill_dir>/scripts/feature-run.sh --feature <id> --new-review-attempt   # REVIEW_OUTPUT_INVALID 뒤, 사용자 승인 시에만
 bash <skill_dir>/scripts/feature-run.sh --feature <id> --finalize             # DONE 뒤, 사용자 승인 시에만(원본 working tree 에서)
+bash <skill_dir>/scripts/feature-run.sh --feature <id> --contract-impact      # 읽기 전용(모델 0회): 지금 문서로 재실행하면 다시 도는 합의·unit 미리 보기
 ```
 
 - **worktree 기준.** 러너가 `--feature <id>` 로 전용 worktree(`<저장소 옆>/<repo>-feature-<id>`, branch `feature/<id>`)를 정한다. request.md·design.md·implementation.md·approach.md·feature-scope.json·implementation-units.json·decisions.md 와 `.agent-work/` 는 전부 **그 worktree 안에서만** 다룬다(경로: 로그의 `피처 worktree:` 줄). 원본 저장소의 같은 이름 파일은 기준이 아니다.

@@ -20,7 +20,8 @@
 #   U11. 증거는 코드·정책 입력에 결속: 검사 PASS 뒤 그 unit 의 코드가 바뀌면(worker-fix · 수정자 · 겹치는 scope 의 뒤 unit · 사용자 수동 수정) 검사만 다시,
 #        명령 문자열이 같아도 검사 스크립트가 바뀌면 다시 — 모델 호출 없이, 위반이면 리뷰어·TEST_CMD 전에 멈춘다. 다른 unit 만의 변경은 무효화하지 않는다
 #   U12. 정책 입력이 다른 unit 의 scope 안에 있을 때: UNIT_CHECK_POLICY_PATHS 로 선언했거나 명령 문자열이 그 파일을 가리키면 그 파일이 바뀔 때 완료 unit 을 다시 검사한다.
-#        선언도 없고 명령에도 없으면 재검사하지 않는다(문서화된 한계 — 하네스는 검사기가 무엇을 읽는지 모른다). 선언한 경로가 없으면(오타) 검사 없이 ENV_ERROR
+#        선언도 없고 명령에도 없으면 재검사하지 않는다(문서화된 한계 — 하네스는 검사기가 무엇을 읽는지 모른다). 선언한 경로가 없으면(오타) 워커 호출 전에 ENV_ERROR —
+#        첫 unit 이 만들 파일(그 unit 의 scope 안)만 유예하고, 만들어지지 않으면 그 unit 의 검사에서 멈춘다
 #   (U11f 보강) 수정자가 검사한 코드를 고치면 다음 리뷰어 호출 **전에** 검사만 다시 — 위반이면 두 번째 리뷰어를 부르지 않는다
 #   (U6 보강) 읽기 전용 위반 뒤 다른 파일을 더 고쳐도 차단 유지 / index 를 되돌리기 전의 재실행은 통과하지 못한다  (U8 보강) 재개가 앞선 targeted test 로그를 덮어쓰지 않는다
 # 위험도별 추가 검증:
@@ -225,6 +226,7 @@ echo "impl $n" >> "$ufile"
 { [ "$n" != 01 ] || [ ! -f "$MOCK_STATE/worker-risky" ]; } || echo "RISKY call by worker" >> src/a.txt
 { [ "$n" != 02 ] || [ ! -f "$MOCK_STATE/worker-02-touches-a" ]; } || echo "shared line by unit 02" >> src/a.txt
 { [ "$n" != 02 ] || [ ! -f "$MOCK_STATE/worker-02-touches-rules" ]; } || echo "rule set revised by unit 02" >> tools/rules.txt
+{ [ "$n" != 01 ] || [ ! -f "$MOCK_STATE/worker-01-creates-rules" ]; } || echo "rule set created by unit 01" > tools/new-rules.txt
 emit "$done_json"
 exit 0
 EOF
@@ -538,12 +540,36 @@ rc="$(run_runner)"
 # (d) 선언한 경로가 작업 트리에 없으면(오타) 빈 지문으로 넘어가지 않는다 — 검사 명령을 실행하지 않고 환경 오류
 reset_tree; set_cfg UNIT_CHECK_CMD "tools/unit-check.sh"; set_cfg UNIT_CHECK_POLICY_PATHS "tools/rulez.txt"
 rc="$(run_runner)"
-[ "$rc" -eq 1 ] && [ "$(status)" = ENV_ERROR ] && [ "$(seq_all)" = "worker:01" ] || fail "U12d: 없는 정책 경로가 ENV_ERROR(검사 0회)가 아님(exit $rc, $(status)): $(seq_all)"
+[ "$rc" -eq 1 ] && [ "$(status)" = ENV_ERROR ] && [ ! -s "$MOCK_LOG" ] || fail "U12d: 없는 정책 경로가 워커 호출 전의 ENV_ERROR(모델·검사 0회)가 아님(exit $rc, $(status)): $(seq_all)"
 grep -q "UNIT_CHECK_POLICY_PATHS 의 경로 'tools/rulez.txt'" "$TMP/run.log" || fail "U12d: 어느 경로가 틀렸는지 로그에 없음"
 [ ! -f .agent-work/units/01-a/done.json ] || fail "U12d: 정책 경로 오류인데 unit 이 완료됨"
+set_cfg UNIT_CHECK_POLICY_PATHS "tools/rules.txt"   # 설정을 고치면 같은 명령으로 처음부터 정상 진행한다
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(seq_all)" = "$UNIT_CLEAN_SEQ|reviewer|full-test|full-lint" ] || fail "U12d: 정책 경로를 고친 뒤의 재실행이 정상 흐름이 아님(exit $rc): $(seq_all)"
+# (e) 아직 없는 경로라도 첫 unit 이 만들 파일(그 unit 의 scope 안)이면 사전 검사를 통과한다 — 워커가 만들면 그 unit 의 검사부터 정책 입력에 들어간다
+jq '.units[0].scope.files = ["src/a.txt","tools/new-rules.txt"] | .units[1].scope.files = ["src/b.txt","tools/later-rules.txt"]' "$TMP/units.keep" > .agent-work/implementation-units.json
+jq '.files = ["src/a.txt","src/b.txt","tools/new-rules.txt","tools/later-rules.txt"]' "$TMP/scope.keep" > .agent-work/feature-scope.json
+reset_tree; fake_pass impl
+set_cfg UNIT_CHECK_CMD "tools/unit-check.sh"; set_cfg UNIT_CHECK_POLICY_PATHS "tools/new-rules.txt"; flag worker-01-creates-rules
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(status)" = DONE ] && [ "$(seq_all)" = "$UNIT_CLEAN_SEQ|reviewer|full-test|full-lint" ] || fail "U12e: 첫 unit 이 만들 정책 파일의 선언이 사전 검사에서 막힘(exit $rc, $(status)/$(reason)): $(seq_all)"
+grep -q "UNIT_CHECK_POLICY_PATHS 의 경로 'tools/new-rules.txt' 는 아직 없지만 첫 unit(01-a)의 scope 안" "$TMP/run.log" || fail "U12e: 유예한 경로가 로그에 없음"
+# 유예는 통과가 아니다 — 워커가 그 파일을 만들지 않으면 종전대로 그 unit 의 검사에서 멈춘다(실행 시점 규칙 그대로)
+git clean -qfd tools; reset_tree; set_cfg UNIT_CHECK_CMD "tools/unit-check.sh"; set_cfg UNIT_CHECK_POLICY_PATHS "tools/new-rules.txt"
+rc="$(run_runner)"
+[ "$rc" -eq 1 ] && [ "$(status)" = ENV_ERROR ] && [ "$(seq_all)" = "worker:01" ] && [ ! -f .agent-work/units/01-a/done.json ] || fail "U12e: 워커가 만들지 않은 정책 파일이 그 unit 의 검사에서 잡히지 않음(exit $rc, $(status)): $(seq_all)"
+# (f) 뒤 unit 만 만들 수 있는 경로는 첫 unit 의 검사 시점에 없다 → 워커 호출 전에 멈춘다
+reset_tree; set_cfg UNIT_CHECK_CMD "tools/unit-check.sh"; set_cfg UNIT_CHECK_POLICY_PATHS "tools/later-rules.txt"
+rc="$(run_runner)"
+[ "$rc" -eq 1 ] && [ "$(status)" = ENV_ERROR ] && [ ! -s "$MOCK_LOG" ] || fail "U12f: 뒤 unit 만 만들 수 있는 정책 경로가 워커 호출 전에 막히지 않음(exit $rc, $(status)): $(seq_all)"
+grep -q "UNIT_CHECK_POLICY_PATHS 의 경로 'tools/later-rules.txt'" "$TMP/run.log" || fail "U12f: 어느 경로가 틀렸는지 로그에 없음"
+# 검사를 끄면(미설정) 선언은 보지 않는다 — 설정하지 않은 프로젝트의 흐름은 그대로다
+reset_tree; set_cfg UNIT_CHECK_POLICY_PATHS "tools/rulez.txt"
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ "$(seq_all)" = "$BASE_SEQ" ] || fail "U12f: UNIT_CHECK_CMD 미설정인데 정책 경로 선언이 흐름을 바꿈(exit $rc): $(seq_all)"
 cp "$TMP/units.keep" .agent-work/implementation-units.json; cp "$TMP/scope.keep" .agent-work/feature-scope.json
 reset_tree; fake_pass impl
-pass "U12: 다른 unit 의 scope 안 정책 파일 — 선언(UNIT_CHECK_POLICY_PATHS)·명령 문자열에 있으면 변경 시 완료 unit 재검사, 없으면 재검사 없음(문서화된 한계), 없는 경로 선언은 ENV_ERROR"
+pass "U12: 다른 unit 의 scope 안 정책 파일 — 선언(UNIT_CHECK_POLICY_PATHS)·명령 문자열에 있으면 변경 시 완료 unit 재검사, 없으면 재검사 없음(문서화된 한계), 없는 경로 선언은 워커 호출 전에 ENV_ERROR(첫 unit 이 만들 파일만 유예)"
 
 # ===================== 위험도별 추가 검증 =====================
 # ===== R2: LOW → 추가 검사 없음 =====

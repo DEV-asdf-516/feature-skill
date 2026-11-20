@@ -194,6 +194,30 @@ unit_check_policy_extra_paths() {
     done ) | sort -u
   [ "${PIPESTATUS[0]}" -eq 0 ]
 }
+# ---------- 워커 호출 전 사전 검사: 선언한 정책 경로 ----------
+# 위 실행 시점 규칙(검사를 돌리는 순간 선언한 경로가 tree 에 없으면 실패)은 그대로다. 다만 그 판정은 첫 unit 의 워커 턴이 끝난 뒤에야 나온다 —
+# 오타 하나를 워커 호출이 끝난 뒤에 알게 된다. 러너는 unit 루프에 들어가기 전에 아래 두 헬퍼로 '다음 검사 시점에도 없을 것이 확정된 경로'만 미리 가린다(검사 명령·모델 호출 0회).
+#   지금 tree 에 있다                                     → 통과
+#   없지만 첫 unit 이 아직 실행 전이고 그 unit 의 scope 안  → 통과(그 unit 의 워커가 만들 수 있다 — 만들지 않으면 실행 시점 규칙이 종전대로 잡는다)
+#   그 외(어느 unit 도 만들 수 없음 · 뒤 unit 만 만들 수 있음 · 첫 unit 이 이미 완료)  → 오류: 다음 검사가 반드시 실패한다
+# unit_check_policy_missing_paths <tree> → 선언했지만 그 tree 에 없는 경로(정규화, 한 줄 하나). 형식이 틀린 선언(빈 값·절대 경로)은 적힌 그대로 낸다.
+unit_check_policy_missing_paths() {
+  local tree="$1" tok p
+  ( set -f
+    for tok in ${UNIT_CHECK_POLICY_PATHS:-}; do
+      p="${tok#./}"; while [ "${p%/}" != "$p" ]; do p="${p%/}"; done
+      if [ -z "$p" ] || [ "${p#/}" != "$p" ]; then printf '%s\n' "$tok"; continue; fi
+      git cat-file -e "$tree:$p" 2>/dev/null || printf '%s\n' "$p"
+    done ) | sort -u
+}
+# unit_scope_can_create <unit-id> <path> — 그 unit 의 scope 가 path(파일 또는 디렉터리)를 만들 수 있는가: files 의 항목이거나 그 상위 디렉터리, new_file_roots 의 안·자신·상위.
+unit_scope_can_create() {
+  jq -e --arg id "$1" --arg p "$2" '
+    [.units[] | select(.id==$id) | .scope
+     | ((.files // []) | any(. == $p or startswith($p + "/")))
+       or ([(.new_file_roots // [])[] | sub("/+$"; "")] | any(. == $p or (. as $r | $p | startswith($r + "/")) or startswith($p + "/")))] | any' \
+    "$(units_manifest_file)" >/dev/null 2>&1
+}
 unit_check_evidence_fingerprints() { # unit-id tree → "<subject> <policy>"
   local id="$1" tree="$2" manifest empty ps s p extra_list
   local subject=() policy=(.) extra=()

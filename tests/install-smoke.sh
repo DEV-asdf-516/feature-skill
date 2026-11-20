@@ -79,12 +79,12 @@ jq -e '[.hooks.SessionStart[]? | select(.matcher == "compact") | .hooks[]? | sel
 sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" > "$TARGET_SKILL/.config.smoke.sh"
 worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/.config.smoke.sh")" || fail "신규 설치: load_worker_rules 실패"
 rm -f "$TARGET_SKILL/.config.smoke.sh"
-echo "$worker_rules" | grep -q '\[WORKER SKILL:' && fail "신규 설치: 기본 설정에서 워커 스킬이 주입됨 (WORKER_SKILLS 는 비어 있어야 함)"
+grep -q '\[WORKER SKILL:' <<< "$worker_rules" && fail "신규 설치: 기본 설정에서 워커 스킬이 주입됨 (WORKER_SKILLS 는 비어 있어야 함)"
 echo "[OK] 1. 신규 설치"
 
 # ---------- 2. 재실행 멱등성 ----------
 rerun_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET")"
-echo "$rerun_output" | grep -q WARN && fail "재실행: 변경 없는데 WARN 발생"
+grep -q WARN <<< "$rerun_output" && fail "재실행: 변경 없는데 WARN 발생"
 echo "[OK] 2. 재실행 멱등성"
 
 # ---------- 3. 사용자 수정 보존 (+ .new 생성) ----------
@@ -106,8 +106,8 @@ grep -q 'npm test' "$TARGET_SKILL/config.sh" || fail "빠른 검사 미설정 co
 grep -q '^FAST_CHECK_' "$TARGET_SKILL/config.sh" && fail "빠른 검사 미설정 config: 설치가 사용자 config 에 설정 줄을 써 넣음"
 grep -q '^FAST_CHECK_CMD=""$' "$TARGET_SKILL/config.sh.new" || fail "config.sh.new 에 FAST_CHECK_CMD 기본값(빈 값 = 미설정)이 없음"
 [ -x "$TARGET_SKILL/scripts/fast-check.sh" ] && [ -f "$TARGET_SKILL/prompts/worker-check-fix.md" ] || fail "빠른 검사 스크립트·프롬프트가 설치되지 않음"
-echo "$legacy_output" | grep -q "\[INFO\] 선택 기능 '프로젝트 빠른 검사' 미설정" || fail "빠른 검사 미설정 안내(INFO)가 없음"
-echo "$legacy_output" | grep -q '\[FAIL\]' && fail "빠른 검사 미설정 config 를 혼합 설치로 오판함"
+grep -q "\[INFO\] 선택 기능 '프로젝트 빠른 검사' 미설정" <<< "$legacy_output" || fail "빠른 검사 미설정 안내(INFO)가 없음"
+grep -q '\[FAIL\]' <<< "$legacy_output" && fail "빠른 검사 미설정 config 를 혼합 설치로 오판함"
 # Unit 정적 검사·위험도별 추가 검증도 같다: 설정 줄이 없는 기존 config.sh 는 병합 없이 업데이트되고(혼합 설치 아님), 설정 줄을 대신 써 넣지 않으며, 새 스크립트는 설치된다.
 grep -v '^UNIT_CHECK_\|^RISK_VERIFY_' "$SCRATCH/config.with-fast-check" > "$TARGET_SKILL/config.sh"
 gates_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1)" || fail "검증 게이트 설정 줄이 없는 기존 config 에서 설치가 실패함: $gates_output"
@@ -115,8 +115,8 @@ grep -q '^UNIT_CHECK_\|^RISK_VERIFY_' "$TARGET_SKILL/config.sh" && fail "검증 
 grep -q '^UNIT_CHECK_CMD=""$' "$TARGET_SKILL/config.sh.new" && grep -q '^RISK_VERIFY_CMD=""$' "$TARGET_SKILL/config.sh.new" || fail "config.sh.new 에 UNIT_CHECK_CMD/RISK_VERIFY_CMD 기본값(빈 값 = 미설정)이 없음"
 [ -x "$TARGET_SKILL/scripts/post-run-report.sh" ] && grep -q '^unit_check_run()' "$TARGET_SKILL/scripts/fast-check.sh" && grep -q '^risk_verify_run()' "$TARGET_SKILL/scripts/fast-check.sh" \
   || fail "검증 게이트·사후 분석 스크립트가 설치되지 않음"
-echo "$gates_output" | grep -q "\[INFO\] 선택 기능 'Unit 정적 검사'·'위험도별 추가 검증' 미설정" || fail "검증 게이트 미설정 안내(INFO)가 없음"
-echo "$gates_output" | grep -q '\[FAIL\]' && fail "검증 게이트 미설정 config 를 혼합 설치로 오판함"
+grep -q "\[INFO\] 선택 기능 'Unit 정적 검사'·'위험도별 추가 검증' 미설정" <<< "$gates_output" || fail "검증 게이트 미설정 안내(INFO)가 없음"
+grep -q '\[FAIL\]' <<< "$gates_output" && fail "검증 게이트 미설정 config 를 혼합 설치로 오판함"
 cp "$SCRATCH/config.with-fast-check" "$TARGET_SKILL/config.sh"
 bash "$SOURCE_ROOT/install.sh" "$TARGET" 2>&1 | grep -q "프로젝트 빠른 검사' 미설정\|'위험도별 추가 검증' 미설정" && fail "설정 줄이 있는 config 인데 미설정 안내가 나옴"
 echo "[OK] 3a. 빠른 검사 설정 줄 없는 기존 config — 병합 없이 업데이트·사용자 설정 보존·설정 줄 미삽입·INFO 안내"
@@ -134,14 +134,14 @@ src_validator_effort="$(sed -n 's/^VALIDATOR_EFFORT="\([^"]*\)".*/\1/p' "$SOURCE
 conventions_without_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
 [ -z "$conventions_without_file" ] || fail "규칙 병합: conventions.md가 없는데 내용이 생성됨"
 worker_rules_without_conventions="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/config.sh")"
-echo "$worker_rules_without_conventions" | grep -q '커스텀 규칙' || fail "워커 규칙: core_rules.md 누락"
-echo "$worker_rules_without_conventions" | grep -q '\[PROJECT CONVENTIONS\]' \
+grep -q '커스텀 규칙' <<< "$worker_rules_without_conventions" || fail "워커 규칙: core_rules.md 누락"
+grep -q '\[PROJECT CONVENTIONS\]' <<< "$worker_rules_without_conventions" \
   && fail "워커 규칙: conventions.md가 없는데 구획이 생성됨"
 printf '# 프로젝트 컨벤션\n' > "$TARGET/conventions.md"
 conventions_with_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
-echo "$conventions_with_file" | grep -q '\[PROJECT CONVENTIONS\]' || fail "규칙 병합: conventions 구획 누락"
-echo "$conventions_with_file" | grep -q '프로젝트 컨벤션' || fail "규칙 병합: conventions.md 내용 누락"
-echo "$conventions_with_file" | grep -q '커스텀 규칙' && fail "규칙 분리: core_rules.md가 비워커 규칙에 포함됨"
+grep -q '\[PROJECT CONVENTIONS\]' <<< "$conventions_with_file" || fail "규칙 병합: conventions 구획 누락"
+grep -q '프로젝트 컨벤션' <<< "$conventions_with_file" || fail "규칙 병합: conventions.md 내용 누락"
+grep -q '커스텀 규칙' <<< "$conventions_with_file" && fail "규칙 분리: core_rules.md가 비워커 규칙에 포함됨"
 # 오케스트레이터 훅: 세션당 첫 프롬프트에만 주입(마커는 TMPDIR), 같은 session_id 재호출·--resume 은 무출력, 다른 세션은 다시 주입.
 # 파이프라인 child(FEATURE_ROLE_CHILD=1)는 새 세션이어도 무출력 — run_*_role 이 이미 명시 전달한다. session_id 없는 수동 실행은 매번 주입.
 HOOK_TMP="$SCRATCH/hook-tmp"; mkdir -p "$HOOK_TMP"
@@ -149,8 +149,8 @@ run_conventions_hook() { # session-json → stdout
   printf '%s' "$1" | CLAUDE_PROJECT_DIR="$TARGET" TMPDIR="$HOOK_TMP" bash "$TARGET/.claude/hooks/inject_conventions.sh"
 }
 orchestrator_rules="$(run_conventions_hook '{"session_id":"orch-1","prompt":"hi"}')"
-echo "$orchestrator_rules" | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: conventions.md 누락"
-echo "$orchestrator_rules" | grep -q '커스텀 규칙' && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
+grep -q '프로젝트 컨벤션' <<< "$orchestrator_rules" || fail "오케스트레이터 규칙: conventions.md 누락"
+grep -q '커스텀 규칙' <<< "$orchestrator_rules" && fail "오케스트레이터 규칙: core_rules.md가 주입됨"
 [ -z "$(run_conventions_hook '{"session_id":"orch-1","prompt":"second turn"}')" ] || fail "오케스트레이터 규칙: 같은 세션 두 번째 턴에 conventions 가 다시 주입됨"
 run_conventions_hook '{"session_id":"orch-2"}' | grep -q '프로젝트 컨벤션' || fail "오케스트레이터 규칙: 다른 세션에 주입되지 않음"
 [ -z "$(printf '%s' '{"session_id":"child-1"}' | FEATURE_ROLE_CHILD=1 CLAUDE_PROJECT_DIR="$TARGET" TMPDIR="$HOOK_TMP" bash "$TARGET/.claude/hooks/inject_conventions.sh")" ] \
@@ -165,11 +165,11 @@ run_compact_hook() { # project-dir stdin-json [env...] → stdout
 }
 (cd "$TARGET" && git add -A >/dev/null 2>&1 && git -c user.email=smoke@test -c user.name=smoke commit -qm fixture >/dev/null 2>&1) || fail "압축 복구 훅: 픽스처 커밋 실패"
 compact_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","hook_event_name":"SessionStart","source":"compact"}')"
-echo "$compact_out" | grep -q "$TARGET_SKILL/SKILL.md" && echo "$compact_out" | grep -q "$TARGET_SKILL/references/" \
+grep -q "$TARGET_SKILL/SKILL.md" <<< "$compact_out" && grep -q "$TARGET_SKILL/references/" <<< "$compact_out" \
   || fail "압축 복구 훅: SKILL.md·references 재확인 지침(절대 경로)이 없음"
 # conventions 는 본문이 아니라 경로 + 재확인 지침만 싣는다(훅 출력은 10,000자를 넘으면 잘려 전달된다 — 크기와 무관하게 다시 읽게 한다)
-echo "$compact_out" | grep -q "$TARGET/conventions.md 를 Read 로" || fail "압축 복구 훅: 피처 worktree 가 없는데 프로젝트 conventions.md 경로·재확인 지침이 없음"
-echo "$compact_out" | grep -q '프로젝트 컨벤션' && fail "압축 복구 훅: conventions 본문을 출력에 실음(경로만 줘야 한다)"
+grep -q "$TARGET/conventions.md 를 Read 로" <<< "$compact_out" || fail "압축 복구 훅: 피처 worktree 가 없는데 프로젝트 conventions.md 경로·재확인 지침이 없음"
+grep -q '프로젝트 컨벤션' <<< "$compact_out" && fail "압축 복구 훅: conventions 본문을 출력에 실음(경로만 줘야 한다)"
 # 큰 conventions.md(10,000자 초과)여도 출력은 한도보다 충분히 작고 본문이 섞이지 않는다
 cp "$TARGET/conventions.md" "$SCRATCH/conventions.keep"
 awk 'BEGIN { for (i = 0; i < 400; i++) print "- BIG-CONV-RULE 아주 긴 프로젝트 규칙 본문 " i }' >> "$TARGET/conventions.md"
@@ -177,10 +177,10 @@ awk 'BEGIN { for (i = 0; i < 400; i++) print "- BIG-CONV-RULE 아주 긴 프로�
 compact_big_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
 compact_big_chars="$(printf '%s' "$compact_big_out" | wc -m | tr -d ' ')"
 [ "$compact_big_chars" -lt 5000 ] || fail "압축 복구 훅: 출력이 ${compact_big_chars}자 — 훅 출력 한도(10,000자)에 가깝다"
-echo "$compact_big_out" | grep -q 'BIG-CONV-RULE' && fail "압축 복구 훅: 큰 conventions 본문이 출력에 실림"
-echo "$compact_big_out" | grep -q "$TARGET/conventions.md 를 Read 로" || fail "압축 복구 훅: 큰 conventions 에서 경로 안내가 없음"
+grep -q 'BIG-CONV-RULE' <<< "$compact_big_out" && fail "압축 복구 훅: 큰 conventions 본문이 출력에 실림"
+grep -q "$TARGET/conventions.md 를 Read 로" <<< "$compact_big_out" || fail "압축 복구 훅: 큰 conventions 에서 경로 안내가 없음"
 cp "$SCRATCH/conventions.keep" "$TARGET/conventions.md"
-echo "$compact_out" | grep -q '커스텀 규칙' && fail "압축 복구 훅: core_rules.md 가 오케스트레이터에 주입됨"
+grep -q '커스텀 규칙' <<< "$compact_out" && fail "압축 복구 훅: core_rules.md 가 오케스트레이터에 주입됨"
 # 같은 세션의 후속 프롬프트: 압축 뒤에도 UserPromptSubmit 훅은 다시 주입하지 않는다(반복 주입 없음 — 복구는 compact 훅 1회뿐)
 [ -z "$(run_conventions_hook '{"session_id":"orch-1","prompt":"after compact"}')" ] || fail "압축 복구 훅: 압축 뒤 UserPromptSubmit 훅이 conventions 를 다시 주입함"
 # compact 가 아닌 SessionStart(startup/resume/clear)·source 없는 호출: 무출력(matcher 없이 등록돼도 반복 주입하지 않는다)
@@ -197,14 +197,14 @@ COMPACT_WT="$SCRATCH/target-feature-wt1"
 git -C "$TARGET" worktree add -q -b feature/wt1 "$COMPACT_WT" HEAD >/dev/null 2>&1 || fail "압축 복구 훅: 픽스처 worktree 생성 실패"
 printf '# worktree 최신 컨벤션 WT-ONLY-RULE\n' > "$COMPACT_WT/conventions.md"
 compact_wt_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
-echo "$compact_wt_out" | grep -q '프로젝트 컨벤션' && fail "압축 복구 훅: 피처 worktree 가 있는데 원본 conventions 본문을 주입함(잘못된 worktree 규칙 적용)"
-echo "$compact_wt_out" | grep -q 'WT-ONLY-RULE' && fail "압축 복구 훅: 임의로 고른 worktree 의 conventions 본문을 주입함"
-echo "$compact_wt_out" | grep -q "feature-wt1/conventions.md" && echo "$compact_wt_out" | grep -q '임의로 고르지 말고' \
+grep -q '프로젝트 컨벤션' <<< "$compact_wt_out" && fail "압축 복구 훅: 피처 worktree 가 있는데 원본 conventions 본문을 주입함(잘못된 worktree 규칙 적용)"
+grep -q 'WT-ONLY-RULE' <<< "$compact_wt_out" && fail "압축 복구 훅: 임의로 고른 worktree 의 conventions 본문을 주입함"
+grep -q "feature-wt1/conventions.md" <<< "$compact_wt_out" && grep -q '임의로 고르지 말고' <<< "$compact_wt_out" \
   || fail "압축 복구 훅: 피처 worktree conventions 경로·재확인 지침이 없음"
 # 피처 worktree 가 많아도 후보 목록은 상한까지만 나열하고 출력은 한도보다 충분히 작다
 for i in $(seq 2 26); do git -C "$TARGET" worktree add -q -b "feature/wt$i" "$SCRATCH/target-feature-wt$i" HEAD >/dev/null 2>&1 || fail "압축 복구 훅: 픽스처 worktree $i 생성 실패"; done
 compact_many_out="$(run_compact_hook "$TARGET" '{"session_id":"orch-1","source":"compact"}')"
-[ "$(echo "$compact_many_out" | grep -c '/conventions.md$')" = 20 ] && echo "$compact_many_out" | grep -q '외 6개' \
+[ "$(echo "$compact_many_out" | grep -c '/conventions.md$')" = 20 ] && grep -q '외 6개' <<< "$compact_many_out" \
   || fail "압축 복구 훅: worktree 후보 목록 상한(20개 + 나머지 개수)이 지켜지지 않음"
 [ "$(printf '%s' "$compact_many_out" | wc -m | tr -d ' ')" -lt 8000 ] || fail "압축 복구 훅: worktree 가 많을 때 출력이 훅 한도에 가깝다"
 for i in $(seq 2 26); do git -C "$TARGET" worktree remove --force "$SCRATCH/target-feature-wt$i" >/dev/null 2>&1; git -C "$TARGET" branch -q -D "feature/wt$i" >/dev/null 2>&1 || true; done
@@ -212,8 +212,8 @@ git -C "$TARGET" worktree remove --force "$COMPACT_WT" >/dev/null 2>&1; git -C "
 # conventions.md 부재: 스킬 복구 지침만, conventions 블록 없음, exit 0
 NOCONV_TARGET="$SCRATCH/noconv"; git init -q "$NOCONV_TARGET"; bash "$SOURCE_ROOT/install.sh" "$NOCONV_TARGET" >/dev/null
 noconv_out="$(run_compact_hook "$NOCONV_TARGET" '{"session_id":"x","source":"compact"}')" || fail "압축 복구 훅: conventions.md 부재에서 non-zero 종료"
-echo "$noconv_out" | grep -q 'references/' || fail "압축 복구 훅: conventions.md 부재에서 스킬 복구 지침이 없음"
-echo "$noconv_out" | grep -q 'PROJECT CONVENTIONS\|conventions:' && fail "압축 복구 훅: conventions.md 가 없는데 conventions 안내가 출력됨"
+grep -q 'references/' <<< "$noconv_out" || fail "압축 복구 훅: conventions.md 부재에서 스킬 복구 지침이 없음"
+grep -q 'PROJECT CONVENTIONS\|conventions:' <<< "$noconv_out" && fail "압축 복구 훅: conventions.md 가 없는데 conventions 안내가 출력됨"
 [ -z "$(printf '%s' '{"session_id":"x"}' | CLAUDE_PROJECT_DIR="$NOCONV_TARGET" TMPDIR="$HOOK_TMP" bash "$NOCONV_TARGET/.claude/hooks/inject_conventions.sh")" ] \
   || fail "conventions 훅: conventions.md 부재인데 출력함"
 # run_*_role 의 claude 호출은 FEATURE_ROLE_CHILD=1 을 붙인다 (두 헬퍼 모두)
@@ -227,7 +227,7 @@ for ov in compact guided conservative; do
   [ -f "$TARGET_SKILL/prompts/validator-overlays/$ov.md" ] || fail "검증자 오버레이 미설치: $ov.md"
 done
 overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=""; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
-echo "$overlay_sol" | grep -q '^\[VALIDATOR PROFILE: compact\]$' || fail "검증자 프로필: sol 기본값이 compact 가 아님"
+grep -q '^\[VALIDATOR PROFILE: compact\]$' <<< "$overlay_sol" || fail "검증자 프로필: sol 기본값이 compact 가 아님"
 # 모델별 기본 매핑: gpt-6-astra 는 guided 여야 한다(매핑 누락으로 conservative 로 떨어지던 문제), 매핑에 없는 모델만 conservative
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6.2-astra 기본값이 guided 가 아님"
@@ -240,7 +240,7 @@ src_validator_model="$(sed -n 's/^VALIDATOR_MODEL="\([^"]*\)".*/\1/p' "$SOURCE_R
 [ "$(bash -c 'source "$1"; VALIDATOR_MODEL="$2" VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh" "$src_validator_model")" = "$src_validator_profile" ] \
   || fail "검증자 설정: 배포 VALIDATOR_MODEL($src_validator_model)의 매핑 기본값이 명시 VALIDATOR_PROFILE($src_validator_profile)과 다름"
 overlay_explicit="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=guided; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
-echo "$overlay_explicit" | grep -q '^\[VALIDATOR PROFILE: guided\]$' || fail "검증자 프로필: 명시 VALIDATOR_PROFILE 이 모델 기본값을 덮지 않음"
+grep -q '^\[VALIDATOR PROFILE: guided\]$' <<< "$overlay_explicit" || fail "검증자 프로필: 명시 VALIDATOR_PROFILE 이 모델 기본값을 덮지 않음"
 overlay_none="$(bash -c 'source "$1"; VALIDATOR_PROFILE=none; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
 [ -z "$overlay_none" ] || fail "검증자 프로필: none 인데 오버레이가 출력됨"
 bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay' _ "$TARGET_SKILL/config.sh" >/dev/null 2>&1 \
@@ -391,7 +391,7 @@ mkdir -p "$WRONG_EVENT_TARGET/.claude"
 jq -n '{hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: "$CLAUDE_PROJECT_DIR/.claude/hooks/pre_bash_guard.sh"}]}]}}' \
   > "$WRONG_EVENT_TARGET/.claude/settings.json"
 wrong_event_output="$(bash "$SOURCE_ROOT/install.sh" "$WRONG_EVENT_TARGET")"
-echo "$wrong_event_output" | grep -q 'PreToolUse 에 pre_bash_guard.sh 미등록' \
+grep -q 'PreToolUse 에 pre_bash_guard.sh 미등록' <<< "$wrong_event_output" \
   || fail "훅 이벤트 검사: 잘못된 이벤트 등록을 설치됨으로 오판"
 echo "[OK] 5. 훅 이벤트 단위 검사"
 
@@ -402,7 +402,7 @@ mkdir -p "$FAKE_COMMAND_TARGET/.claude"
 jq -n '{hooks: {PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: "echo disabled pre_bash_guard.sh"}]}]}}' \
   > "$FAKE_COMMAND_TARGET/.claude/settings.json"
 fake_command_output="$(bash "$SOURCE_ROOT/install.sh" "$FAKE_COMMAND_TARGET")"
-echo "$fake_command_output" | grep -q 'PreToolUse 에 pre_bash_guard.sh 미등록' \
+grep -q 'PreToolUse 에 pre_bash_guard.sh 미등록' <<< "$fake_command_output" \
   || fail "훅 command 검사: 비활성 문자열(echo disabled ...)을 설치됨으로 오판"
 echo "[OK] 5b. 가짜 command 문자열 미등록 판정"
 
@@ -413,9 +413,9 @@ mkdir -p "$LEGACY_HOOK_TARGET/.claude"
 jq -n '{hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: "$CLAUDE_PROJECT_DIR/.claude/hooks/inject_core_rules.sh"}]}]}}' \
   > "$LEGACY_HOOK_TARGET/.claude/settings.json"
 legacy_hook_output="$(bash "$SOURCE_ROOT/install.sh" "$LEGACY_HOOK_TARGET")"
-echo "$legacy_hook_output" | grep -q '레거시 inject_core_rules.sh' \
+grep -q '레거시 inject_core_rules.sh' <<< "$legacy_hook_output" \
   || fail "훅 마이그레이션: 레거시 core rules 주입 훅 교체 경고 누락"
-echo "$legacy_hook_output" | grep -q 'inject_conventions.sh로 교체' \
+grep -q 'inject_conventions.sh로 교체' <<< "$legacy_hook_output" \
   || fail "훅 마이그레이션: 교체 대상 안내 누락"
 echo "[OK] 5c. 레거시 core rules 훅 교체 안내"
 
@@ -426,11 +426,11 @@ mkdir -p "$LEGACY_CONV_TARGET/.claude/hooks"
 printf '%s\n' '#!/bin/bash' 'CONVENTIONS_FILE="$CLAUDE_PROJECT_DIR/conventions.md"' '[ -f "$CONVENTIONS_FILE" ] && cat "$CONVENTIONS_FILE"' 'exit 0' \
   > "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh"
 legacy_conv_output="$(bash "$SOURCE_ROOT/install.sh" "$LEGACY_CONV_TARGET")"
-echo "$legacy_conv_output" | grep -q 'inject_conventions.sh 가 구버전(매 턴 주입)' || fail "훅 마이그레이션: 구버전 conventions 훅 경고 누락"
+grep -q 'inject_conventions.sh 가 구버전(매 턴 주입)' <<< "$legacy_conv_output" || fail "훅 마이그레이션: 구버전 conventions 훅 경고 누락"
 [ -f "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh.new" ] || fail "훅 마이그레이션: inject_conventions.sh.new 미생성"
 grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh.new" || fail "훅 마이그레이션: .new 가 새 훅이 아님"
 grep -q 'FEATURE_ROLE_CHILD' "$LEGACY_CONV_TARGET/.claude/hooks/inject_conventions.sh" && fail "훅 마이그레이션: 보존돼야 할 구버전 훅이 덮어써짐"
-echo "$legacy_conv_output" | grep -q '수동 병합 필요' || fail "훅 마이그레이션: 구버전 훅인데 완료 메시지가 수동 병합을 요구하지 않음"
+grep -q '수동 병합 필요' <<< "$legacy_conv_output" || fail "훅 마이그레이션: 구버전 훅인데 완료 메시지가 수동 병합을 요구하지 않음"
 echo "[OK] 5d. 구버전 conventions 훅 → 교체 안내 + .new"
 
 # ---------- 5e. 기존 settings.json 에 SessionStart(compact) 훅 미등록 → 추가 안내(덮어쓰지 않음), 등록돼 있으면 조용 ----------
@@ -440,10 +440,10 @@ mkdir -p "$COMPACT_HOOK_TARGET/.claude"
 jq 'del(.hooks.SessionStart)' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
 cp "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before"
 compact_hook_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
-echo "$compact_hook_output" | grep -q 'SessionStart 에 compact_recovery.sh 미등록' || fail "SessionStart 훅 검사: 미등록 상태를 조용히 정상으로 보고함"
-echo "$compact_hook_output" | grep -q '"matcher": "compact"' || fail "SessionStart 훅 검사: 추가할 항목(matcher compact)이 안내되지 않음"
-echo "$compact_hook_output" | grep -q '수동 병합 필요' || fail "SessionStart 훅 검사: 수동 병합 필요로 마무리되지 않음"
-echo "$compact_hook_output" | grep -q 'UserPromptSubmit 에\|PreToolUse 에' && fail "SessionStart 훅 검사: 등록된 다른 훅까지 미등록으로 보고함"
+grep -q 'SessionStart 에 compact_recovery.sh 미등록' <<< "$compact_hook_output" || fail "SessionStart 훅 검사: 미등록 상태를 조용히 정상으로 보고함"
+grep -q '"matcher": "compact"' <<< "$compact_hook_output" || fail "SessionStart 훅 검사: 추가할 항목(matcher compact)이 안내되지 않음"
+grep -q '수동 병합 필요' <<< "$compact_hook_output" || fail "SessionStart 훅 검사: 수동 병합 필요로 마무리되지 않음"
+grep -q 'UserPromptSubmit 에\|PreToolUse 에' <<< "$compact_hook_output" && fail "SessionStart 훅 검사: 등록된 다른 훅까지 미등록으로 보고함"
 cmp -s "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before" || fail "SessionStart 훅 검사: 기존 settings.json 을 수정함"
 [ -x "$COMPACT_HOOK_TARGET/.claude/hooks/compact_recovery.sh" ] || fail "SessionStart 훅 검사: 훅 스크립트가 설치되지 않음"
 cp "$SOURCE_ROOT/.claude/settings.json" "$COMPACT_HOOK_TARGET/.claude/settings.json"
@@ -452,13 +452,13 @@ bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET" | grep -q 'WARN' && fail "
 jq '.hooks.SessionStart[0].matcher = "startup"' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
 cp "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before"
 wrong_matcher_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
-echo "$wrong_matcher_output" | grep -q 'SessionStart 에 compact_recovery.sh 가 있지만 matcher 가 "compact" 가 아닙니다' || fail "SessionStart 훅 검사: matcher=startup 등록을 정상으로 판정함"
-echo "$wrong_matcher_output" | grep -q '"matcher": "compact"' && echo "$wrong_matcher_output" | grep -q '수동 병합 필요' || fail "SessionStart 훅 검사: 잘못된 matcher 에 올바른 항목·수동 병합 안내가 없음"
+grep -q 'SessionStart 에 compact_recovery.sh 가 있지만 matcher 가 "compact" 가 아닙니다' <<< "$wrong_matcher_output" || fail "SessionStart 훅 검사: matcher=startup 등록을 정상으로 판정함"
+grep -q '"matcher": "compact"' <<< "$wrong_matcher_output" && grep -q '수동 병합 필요' <<< "$wrong_matcher_output" || fail "SessionStart 훅 검사: 잘못된 matcher 에 올바른 항목·수동 병합 안내가 없음"
 cmp -s "$COMPACT_HOOK_TARGET/.claude/settings.json" "$SCRATCH/compact-settings.before" || fail "SessionStart 훅 검사: 잘못된 matcher 의 settings.json 을 수정함"
 # matcher 가 없는 SessionStart 등록도 같다(모든 source 에서 실행 — 훅이 스스로 걸러 내지만 의도한 등록이 아니다)
 jq 'del(.hooks.SessionStart[0].matcher)' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
 no_matcher_output="$(bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET")"
-echo "$no_matcher_output" | grep -q 'matcher 가 "compact" 가 아닙니다' || fail "SessionStart 훅 검사: matcher 없는 등록을 정상으로 판정함"
+grep -q 'matcher 가 "compact" 가 아닙니다' <<< "$no_matcher_output" || fail "SessionStart 훅 검사: matcher 없는 등록을 정상으로 판정함"
 # compact 를 포함한 대안 목록 matcher 는 등록으로 인정한다
 jq '.hooks.SessionStart[0].matcher = "resume|compact"' "$SOURCE_ROOT/.claude/settings.json" > "$COMPACT_HOOK_TARGET/.claude/settings.json"
 bash "$SOURCE_ROOT/install.sh" "$COMPACT_HOOK_TARGET" | grep -q 'WARN' && fail "SessionStart 훅 검사: compact 를 포함한 matcher 인데 WARN 발생"
@@ -774,7 +774,7 @@ done
   || fail "feature-live lock: 실제 뷰어 PID와 기록값이 다름"
 
 duplicate_viewer_output="$("$LOG_TARGET/feature-live")"
-echo "$duplicate_viewer_output" | grep -q '이미 실행 중' \
+grep -q '이미 실행 중' <<< "$duplicate_viewer_output" \
   || fail "feature-live lock: 두 번째 실행이 기존 뷰어를 감지하지 못함"
 kill "$viewer_pid"
 wait "$viewer_pid" 2>/dev/null || true

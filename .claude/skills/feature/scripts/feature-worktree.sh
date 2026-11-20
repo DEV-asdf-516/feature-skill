@@ -100,16 +100,51 @@ feature_worktree_materialize() { # worktree-path tree
 }
 
 # 안전 게이트 설정이 gitignore 돼 snapshot 에 빠졌으면 원본에서 복사 (있으면 그대로 둔다). 복사 실패는 fail-closed — 게이트 없이 진행하지 않는다.
+FEATURE_GATE_ITEMS=".codex .claude/settings.json .claude/hooks"
+# 원본에는 있는데 worktree 에 없는 안전 게이트 설정을 한 줄에 하나씩 출력한다(읽기 전용 — 복사하지 않는다).
+feature_worktree_missing_gates() { # source-root worktree-path
+  local item
+  for item in $FEATURE_GATE_ITEMS; do
+    [ -e "$1/$item" ] && [ ! -e "$2/$item" ] && printf '%s\n' "$item"
+  done
+  return 0
+}
 feature_worktree_copy_gates() { # source-root worktree-path
   local src="$1" wt="$2" item
-  for item in .codex .claude/settings.json .claude/hooks; do
-    [ -e "$src/$item" ] && [ ! -e "$wt/$item" ] || continue
+  for item in $(feature_worktree_missing_gates "$src" "$wt"); do
     mkdir -p "$(dirname "$wt/$item")" && cp -R "$src/$item" "$wt/$item" \
       || { echo "[FAIL] 안전 게이트 설정 복사 실패: $item → $wt — 훅 없이 worktree 를 쓰지 않는다" >&2; return 1; }
     echo "[feature-run] 안전 게이트 설정 복사(gitignore 됨): $item → $wt"
   done
   [ -e "$wt/.codex" ] || echo "[WARN] $wt/.codex 없음 — codex 훅(worker_guard)이 이 worktree 에 적용되지 않는다." >&2
   return 0
+}
+
+# 이미 있는 경로가 이 저장소의 피처 worktree(루트·같은 common dir·main 아님·브랜치 일치)인지 본다. 읽기만 한다 — 아무것도 만들거나 복사하지 않는다.
+feature_worktree_check_existing() { # path branch main-root
+  local path="$1" branch="$2" main_root="$3" wt_root wt_common main_common wt_branch
+  wt_root="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || { echo "[FAIL] $path 가 있지만 git worktree 가 아님 — 다른 경로를 --worktree 로 지정하거나 정리 후 재실행" >&2; return 1; }
+  [ "$(cd "$wt_root" && pwd -P)" = "$(cd "$path" && pwd -P)" ] || { echo "[FAIL] $path 는 worktree 루트가 아님 ($wt_root 의 하위)" >&2; return 1; }
+  wt_common="$(cd "$path" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  main_common="$(cd "$main_root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  [ "$wt_common" = "$main_common" ] || { echo "[FAIL] $path 는 이 저장소의 worktree 가 아님 (common dir $wt_common)" >&2; return 1; }
+  [ "$(cd "$path" && pwd -P)" != "$(cd "$main_root" && pwd -P)" ] || { echo "[FAIL] 피처 worktree 경로가 main working tree 와 같음" >&2; return 1; }
+  wt_branch="$(git -C "$path" symbolic-ref --short -q HEAD || true)"
+  [ "$wt_branch" = "$branch" ] || { echo "[FAIL] $path 의 브랜치($wt_branch)가 피처 브랜치($branch)와 다름 — 다른 피처의 worktree 이거나 수동 변경. 정리 후 재실행" >&2; return 1; }
+}
+# 읽기 전용 미리 보기(--contract-impact)용: 기존 피처 worktree 를 찾아 검증만 한다. 부트스트랩과 달리 worktree·브랜치·feature.json 을 만들지 않고
+# 안전 게이트 설정도 복사하지 않는다(누락은 feature_worktree_missing_gates 로 보고만 한다). 결과: FEATURE_ROOT FEATURE_BRANCH FEATURE_WORKTREE_MODE=preview
+feature_worktree_locate_readonly() { # id [branch-override] [path-override]
+  local id="$1" branch="${2:-}" path="${3:-}" main_root
+  feature_id_valid "$id" || { echo "[FAIL] --feature 식별자는 영숫자로 시작하고 [A-Za-z0-9._-] 만 허용: '$id'" >&2; return 1; }
+  main_root="$(feature_main_root)" || return 1
+  [ -n "$branch" ] || branch="$(feature_branch_name "$id")"
+  [ -n "$path" ] || path="$(feature_worktree_path "$id" "$main_root")"
+  case "$path" in /*) ;; *) path="$(pwd)/$path";; esac
+  [ -d "$path" ] || { echo "[FAIL] 피처 worktree 가 없다($path) — 미리 보기는 worktree 를 만들지 않는다. 진행 중인 피처에만 쓴다" >&2; return 1; }
+  feature_worktree_check_existing "$path" "$branch" "$main_root" || return 1
+  FEATURE_BRANCH="$branch"; FEATURE_SNAPSHOT_TREE=""; FEATURE_WORKTREE_MODE=preview
+  FEATURE_ROOT="$(cd "$path" && pwd -P)"
 }
 
 # 결과: FEATURE_ROOT FEATURE_BRANCH FEATURE_WORKTREE_MODE(new|new-from-branch|reused) FEATURE_SNAPSHOT_TREE
@@ -132,15 +167,7 @@ feature_worktree_bootstrap() { # id [branch-override] [path-override]
 
   # ---------- 재실행: 기존 worktree 재사용 ----------
   if [ -e "$path" ]; then
-    local wt_root wt_common main_common wt_branch
-    wt_root="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)" || { echo "[FAIL] $path 가 있지만 git worktree 가 아님 — 다른 경로를 --worktree 로 지정하거나 정리 후 재실행" >&2; return 1; }
-    [ "$(cd "$wt_root" && pwd -P)" = "$(cd "$path" && pwd -P)" ] || { echo "[FAIL] $path 는 worktree 루트가 아님 ($wt_root 의 하위)" >&2; return 1; }
-    wt_common="$(cd "$path" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
-    main_common="$(cd "$main_root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
-    [ "$wt_common" = "$main_common" ] || { echo "[FAIL] $path 는 이 저장소의 worktree 가 아님 (common dir $wt_common)" >&2; return 1; }
-    [ "$(cd "$path" && pwd -P)" != "$(cd "$main_root" && pwd -P)" ] || { echo "[FAIL] 피처 worktree 경로가 main working tree 와 같음" >&2; return 1; }
-    wt_branch="$(git -C "$path" symbolic-ref --short -q HEAD || true)"
-    [ "$wt_branch" = "$branch" ] || { echo "[FAIL] $path 의 브랜치($wt_branch)가 피처 브랜치($branch)와 다름 — 다른 피처의 worktree 이거나 수동 변경. 정리 후 재실행" >&2; return 1; }
+    feature_worktree_check_existing "$path" "$branch" "$main_root" || return 1
     ! runner_active_in "$path" || { echo "[FAIL] $path 에서 러너가 이미 실행 중(pid $(cat "$path/$WORK_DIR/.runner.lock/pid")) — 같은 피처를 동시에 두 번 돌리지 않는다" >&2; return 1; }
     [ -f "$path/$WORK_DIR/feature.json" ] || echo "[WARN] $path/$WORK_DIR/feature.json 없음 — 이 러너가 만든 worktree 가 아니지만 브랜치가 일치해 재사용" >&2
     feature_worktree_copy_gates "$source_root" "$path" || return 1

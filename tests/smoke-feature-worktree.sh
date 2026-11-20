@@ -222,6 +222,34 @@ echo "$conv" | grep -q CONV-CHANGED && fail "사례9b: 원본의 이후 변경�
 echo "$conv" | grep -q "^$WT_H/.claude/hooks/core_rules.md$" || fail "사례9b: CORE_RULES_FILE 이 worktree 를 가리키지 않음"
 pass "사례9b: 규칙·conventions 경로가 worktree 로 재바인딩되고 하위 루프에도 상속 가능"
 
+# ===== 사례 9d: --contract-impact 는 기존 worktree 를 찾아 검증만 한다 — 부트스트랩·안전 게이트 복사·산출물 생성 없음 =====
+wt_sum() { (cd "$1" && find . -path ./.git -prune -o -type f ! -name live.log ! -path './.agent-work/.unit-contract/*' -print | sort | xargs shasum | shasum | cut -d' ' -f1); }
+mkdir -p "$TMP/gates-aside" && mv "$WT_A/.codex" "$TMP/gates-aside/codex" && mv "$WT_A/.claude/hooks" "$TMP/gates-aside/hooks"   # 게이트 설정이 빠진 기존 worktree
+sum_a="$(wt_sum "$WT_A")"; src_fp_before="$(src_fp)"
+rc="$(run_feature a --contract-impact)"
+[ "$rc" = 0 ] || { cat "$TMP/run-a.log"; fail "사례9d: 미리 보기 exit 0 기대, 실제 $rc"; }
+[ ! -e "$WT_A/.codex" ] && [ ! -e "$WT_A/.claude/hooks" ] || fail "사례9d: 미리 보기가 누락된 안전 게이트 설정을 worktree 에 복사함"
+[ "$(wt_sum "$WT_A")" = "$sum_a" ] && [ "$(src_fp)" = "$src_fp_before" ] && [ ! -e "$WT_A/.agent-work/.runner.lock" ] || fail "사례9d: 미리 보기가 worktree·원본의 파일을 바꿨거나 락을 남김"
+grep -q '안전 게이트 설정이 없다: .codex .claude/hooks' "$TMP/run-a.log" || { cat "$TMP/run-a.log"; fail "사례9d: 누락된 게이트 설정이 보고되지 않음"; }
+! grep -q '안전 게이트 설정 복사\|피처 worktree 재사용\|피처 worktree 생성' "$TMP/run-a.log" || fail "사례9d: 미리 보기가 부트스트랩 경로를 탐"
+# 수동 --worktree 경로도 복사하지 않는다
+rc="$( (cd "$SRC" && bash "$RUN" --worktree "$WT_A" --branch feature/a --contract-impact) > "$TMP/run-a-manual.log" 2>&1; echo $?)"
+[ "$rc" = 0 ] && [ ! -e "$WT_A/.codex" ] && [ ! -e "$WT_A/.claude/hooks" ] && [ "$(wt_sum "$WT_A")" = "$sum_a" ] || { cat "$TMP/run-a-manual.log"; fail "사례9d: 수동 --worktree 미리 보기가 게이트를 복사했거나 파일을 바꿈 (exit $rc)"; }
+# 없는 피처·브랜치가 다른 worktree 는 만들거나 고치지 않고 거부한다
+rc="$(run_feature zz --contract-impact)"
+[ "$rc" = 1 ] && [ ! -e "$WORK/proj-feature-zz" ] && ! git -C "$SRC" rev-parse --verify -q refs/heads/feature/zz >/dev/null || fail "사례9d: 없는 피처의 미리 보기가 worktree·브랜치를 만들었거나 거부하지 않음 (exit $rc)"
+rc="$(run_feature zz --worktree "$WT_A" --contract-impact)"
+[ "$rc" = 1 ] && grep -q '피처 브랜치(feature/zz)와 다름' "$TMP/run-zz.log" && [ "$(wt_sum "$WT_A")" = "$sum_a" ] || fail "사례9d: 다른 피처의 worktree 를 미리 보기가 거부하지 않음 (exit $rc)"
+# 산출물 디렉터리가 없는 worktree 에도 아무것도 만들지 않는다
+mv "$WT_A/.agent-work" "$TMP/gates-aside/agent-work"
+rc="$(run_feature a --contract-impact)"
+[ "$rc" = 0 ] && [ ! -e "$WT_A/.agent-work" ] && grep -q '진행 중인 피처 산출물이 없다' "$TMP/run-a.log" || { cat "$TMP/run-a.log"; fail "사례9d: 산출물 없는 worktree 에 미리 보기가 .agent-work 를 만듦 (exit $rc)"; }
+mv "$TMP/gates-aside/agent-work" "$WT_A/.agent-work"
+# 일반 재실행은 종전대로 누락된 게이트를 복사한다
+rc="$(run_feature a)"
+[ "$rc" = 3 ] && [ -f "$WT_A/.codex/hooks/worker_guard.sh" ] && [ -f "$WT_A/.claude/hooks/core_rules.md" ] || { cat "$TMP/run-a.log"; fail "사례9d: 일반 재실행이 누락된 게이트를 복사하지 않음 (exit $rc)"; }
+pass "사례9d: --contract-impact 는 기존 worktree 조회·검증만 — 게이트 복사·부트스트랩·산출물 생성 없음(누락은 보고), 일반 재실행은 종전대로 복사"
+
 # ===== 사례 9c: 안전 게이트 복사 실패는 fail-closed =====
 chmod 000 .codex
 rc="$(run_feature g)"

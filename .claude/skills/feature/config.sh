@@ -153,7 +153,8 @@ UNIT_CHECK_TIMEOUT_SEC=120   # 제한 시간(초, 양의 정수). 넘으면 실�
 # (선택) 검사가 읽는 규칙·설정 파일 중 **어느 unit 의 scope 안에 있는 것**을 공백으로 구분해 적는다(저장소 상대 경로 — 파일 또는 디렉터리, glob 없음).
 # 완료 unit 의 검사 PASS 는 '그때의 규칙'에 묶여 재사용된다. 어느 unit 의 scope 에도 없는 파일과 위 명령이 가리키는 스크립트 파일은 자동으로 규칙 입력에 들어가지만,
 # 이번 피처의 unit 이 직접 고치는 규칙 파일(예: 다른 unit 의 scope 에 든 lint 설정)은 하네스가 알 수 없다 — 여기 적어야 그 파일이 바뀔 때 완료 unit 을 다시 검사한다.
-# 적은 경로가 작업 트리에 없으면(오타·gitignore) 검사를 실행하지 않고 ENV_ERROR 로 멈춘다. 비어 있으면(또는 줄이 없으면) 자동 포함분만 쓴다.
+# 적은 경로가 작업 트리에 없으면(오타·gitignore) 워커를 부르기 전에 ENV_ERROR 로 멈춘다(첫 unit 이 만들 파일 — 그 unit 의 scope 안 — 만 그 unit 의 검사 때까지 유예).
+# 비어 있으면(또는 줄이 없으면) 자동 포함분만 쓴다.
 # 예: UNIT_CHECK_POLICY_PATHS="config/lint-rules.yml tools/checks"
 UNIT_CHECK_POLICY_PATHS=""
 

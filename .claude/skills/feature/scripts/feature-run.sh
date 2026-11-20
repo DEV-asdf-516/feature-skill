@@ -5,6 +5,7 @@
 # 사용법 (저장소 루트에서):
 #   feature-run.sh [--feature <id>] [--new [--archive-as <이름>]] [--branch <이름>] [--worktree <디렉터리>] [--new-review-attempt]
 #   feature-run.sh --feature <id> --finalize
+#   feature-run.sh [--feature <id>] --contract-impact
 #     --feature : 피처 전용 worktree 를 id 로 결정론적으로 확정(권장, scripts/feature-worktree.sh)
 #     --finalize: DONE 된 피처 worktree 의 결과(B→F delta)를 원본 working tree 에 커밋 없이 3-way 반영하고 worktree·브랜치를 정리.
 #                 사용자 승인 뒤에만 실행한다. 파이프라인 stage 가 아니며 DONE 의 의미를 바꾸지 않는다.
@@ -13,6 +14,10 @@
 #     --branch  : 워커 진입 전 해당 브랜치가 없으면 생성·체크아웃
 #     --new-review-attempt : REVIEW_OUTPUT_INVALID(리뷰어 출력 계약 위반)로 멈춘 리뷰 단계에 한정한 **명시적 새 리뷰 시도**. 무효 기록을 닫고 새 attempt Round 1(새 세션)로
 #                 리뷰한다. 피처 전체를 다시 시작하는 --new 가 아니며, 대기 중인 무효 출력이 없으면 아무 효과가 없다. 이 실행의 첫 리뷰 루프 호출에만 적용된다.
+#     --contract-impact : 미리 보기(모델·검사 명령 0회, run-state·체크포인트·지문 불변 — 쓰는 것은 파생물 .unit-contract/·live.log·실행 중 러너 락뿐). 지금 문서 상태로 재실행하면 어느 합의가 무효가 되고 어느 unit 이
+#                 다시 실행되는지(바뀐 참조 절·뒤 unit 사슬 포함)와, 진행된 unit 이 참조해 고치면 안 되는 절의 목록을 출력하고 끝낸다. 파이프라인 stage 가 아니다.
+#                 워커 진입 뒤 합의 문서를 고치기 전(동결 절 확인)·고친 뒤 재실행 전(영향 확인)에 쓴다. 기존 worktree 를 찾아 검증만 한다 — 부트스트랩하지 않고
+#                 안전 게이트 설정도 복사하지 않는다(누락은 보고만). run-state 가 DONE 이면 일반 재실행은 아무것도 다시 돌리지 않으므로 '잠재적 영향'으로 구분해 보고한다.
 #   인자 없이 다시 실행하면 run-state.json 의 stage 에서 재개한다. 합의·리뷰 루프는 자체 체크포인트
 #   (consensus-<target>.json, review-impl.json)로 round/substep 까지 이어가며, stage 결정은 consensus_stage_accepted(검증자 PASS 또는
 #   합의 에스컬레이션의 유효한 사용자 수리 USER_RESOLVED)로 교차 확인한다.
@@ -138,7 +143,7 @@ conventions_read_hint() { # status — 한 줄에 이어 붙일 문구(해당 �
 }
 
 # ---------- 인자 ----------
-NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0; NEW_REVIEW_ATTEMPT=0
+NEW=0; ARCHIVE_AS=""; BRANCH=""; WORKTREE=""; FEATURE_ID=""; FINALIZE=0; NEW_REVIEW_ATTEMPT=0; CONTRACT_IMPACT=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --new) NEW=1;;
@@ -148,6 +153,7 @@ while [ $# -gt 0 ]; do
     --feature) FEATURE_ID="$2"; shift;;
     --finalize) FINALIZE=1;;
     --new-review-attempt) NEW_REVIEW_ATTEMPT=1;;
+    --contract-impact) CONTRACT_IMPACT=1;;
     *) echo "[FAIL] 알 수 없는 인자: $1" >&2; exit 1;;
   esac
   shift
@@ -169,6 +175,22 @@ if [ "$FINALIZE" = 1 ]; then
   esac
 fi
 
+# ---------- --contract-impact: 읽기 전용 미리 보기의 인자 검사 ----------
+# 미리 보기는 아무것도 만들지 않는다 — 피처 worktree 를 부트스트랩하지 않고(기존 것을 찾아 검증만), 안전 게이트 설정을 복사하지 않고,
+# 산출물을 옮기는 --new 나 리뷰 시도를 여는 --new-review-attempt 와 함께 쓰지 않는다.
+IMPACT_GATE_SOURCE=""   # 미리 보기에서 worktree 로 옮겨 가기 전의 원본 root — 누락된 안전 게이트 설정을 복사 없이 보고하는 데만 쓴다
+if [ "$CONTRACT_IMPACT" = 1 ]; then
+  [ "$FINALIZE" = 0 ] && [ "$NEW" = 0 ] && [ "$NEW_REVIEW_ATTEMPT" = 0 ] \
+    || { echo "[FAIL] --contract-impact 는 읽기 전용 미리 보기다 — --new / --finalize / --new-review-attempt 와 함께 쓸 수 없다" >&2; exit 1; }
+  source "$SKILL_DIR/scripts/feature-worktree.sh"
+  if [ -n "$FEATURE_ID" ]; then
+    feature_worktree_locate_readonly "$FEATURE_ID" "$BRANCH" "$WORKTREE" || { echo "[FAIL] --contract-impact: 기존 피처 worktree 를 확인하지 못함 (--feature $FEATURE_ID)" >&2; exit 1; }
+  else
+    [ -z "$WORKTREE" ] || [ -d "$WORKTREE" ] \
+      || { echo "[FAIL] --contract-impact: 피처 worktree 가 없다($WORKTREE) — 미리 보기는 worktree 를 만들지 않는다. 진행 중인 피처에만 쓴다" >&2; exit 1; }
+  fi
+fi
+
 # ---------- --feature <id>: 결정론적 전용 worktree 부트스트랩 (기본 모드) ----------
 # branch feature/<id>, 경로 <main root 옆>/<repo>-feature-<id> 를 id 로 정한다. 없으면 원본의 dirty 상태(미커밋 tracked 변경·untracked)를
 # bootstrap 커밋 없이 snapshot tree 로 옮겨 만들고, 있으면 그 worktree 와 그 안의 .agent-work 를 이어서 쓴다. --branch/--worktree 를
@@ -176,7 +198,9 @@ fi
 FEATURE_WORKTREE_MODE=""; FEATURE_SNAPSHOT_TREE=""
 if [ -n "$FEATURE_ID" ]; then
   source "$SKILL_DIR/scripts/feature-worktree.sh"
-  feature_worktree_bootstrap "$FEATURE_ID" "$BRANCH" "$WORKTREE" || { echo "[FAIL] 피처 worktree 부트스트랩 실패 (--feature $FEATURE_ID)" >&2; exit 1; }
+  # 미리 보기는 위에서 feature_worktree_locate_readonly 로 기존 worktree 를 찾았다 — 부트스트랩(생성·게이트 복사·feature.json 기록)을 거치지 않는다
+  [ "$CONTRACT_IMPACT" = 1 ] \
+    || feature_worktree_bootstrap "$FEATURE_ID" "$BRANCH" "$WORKTREE" || { echo "[FAIL] 피처 worktree 부트스트랩 실패 (--feature $FEATURE_ID)" >&2; exit 1; }
   WORKTREE="$FEATURE_ROOT"; BRANCH="$FEATURE_BRANCH"
 fi
 
@@ -199,10 +223,17 @@ if [ -n "$WORKTREE" ]; then
   [ "$(git -C "$wt_root" rev-parse --git-common-dir)" != "$(git -C "$wt_root" rev-parse --git-dir)" ] \
     || [ "$wt_root" != "$ROOT" ] || { echo "[FAIL] --worktree 가 현재 main working tree 를 가리킴 — 분리된 디렉터리여야 한다" >&2; exit 1; }
   # gitignore 된 안전 게이트 설정(.codex, .claude/settings.json, .claude/hooks)은 --feature 모드와 같이 원본에서 복사한다(실패는 중단)
-  [ -n "$FEATURE_ID" ] || { source "$SKILL_DIR/scripts/feature-worktree.sh"; feature_worktree_copy_gates "$ROOT" "$wt_root" || exit 1; }
+  # 미리 보기는 복사하지 않는다 — 누락은 contract_impact_report 가 보고만 한다
+  [ -n "$FEATURE_ID" ] || [ "$CONTRACT_IMPACT" = 1 ] || { source "$SKILL_DIR/scripts/feature-worktree.sh"; feature_worktree_copy_gates "$ROOT" "$wt_root" || exit 1; }
+  [ "$CONTRACT_IMPACT" = 0 ] || [ "$(cd "$wt_root" && pwd -P)" = "$(cd "$ROOT" && pwd -P)" ] || IMPACT_GATE_SOURCE="$ROOT"
   ROOT="$wt_root"
 fi
 cd "$ROOT"
+# 미리 보기는 산출물 디렉터리도 만들지 않는다 — 없으면 고정된 계약이 없는 것이다
+if [ "$CONTRACT_IMPACT" = 1 ] && [ ! -d "$WORK_DIR" ]; then
+  echo "[CONTRACT IMPACT] $ROOT/$WORK_DIR 없음 — 진행 중인 피처 산출물이 없다. 아직 고정된 계약이 없다(아무것도 만들지 않았다)"
+  exit 0
+fi
 
 # 프로젝트 종속 경로 재바인딩 — 소스는 worktree 로 격리됐는데 규칙 파일·conventions·프로젝트 로컬 워커 스킬을 원본에서 읽으면
 # 원본의 이후 변경이 이 실행에 새어 든다. 실행 엔진 위치(SKILL_DIR/FEATURE_SKILL_DIR)는 그대로 두고 프로젝트 경로만 바꾼다.
@@ -212,7 +243,8 @@ if [ "$(cd "$PROJECT_ROOT" && pwd -P)" != "$(pwd -P)" ]; then
   PROJECT_ROOT="$ROOT"
   CORE_RULES_FILE="$PROJECT_ROOT/.claude/hooks/core_rules.md"
   CONVENTIONS_FILE="$PROJECT_ROOT/conventions.md"
-  [ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] worktree 에 core_rules.md 없음: $CORE_RULES_FILE — .claude/hooks 를 커밋하거나 복사하라" >&2; exit 1; }
+  # 미리 보기는 워커 규칙을 읽지 않고 게이트 설정을 복사하지도 않는다 — 누락은 보고만 하고(contract_impact_report) 여기서 멈추지 않는다
+  [ -f "$CORE_RULES_FILE" ] || [ "$CONTRACT_IMPACT" = 1 ] || { echo "[FAIL] worktree 에 core_rules.md 없음: $CORE_RULES_FILE — .claude/hooks 를 커밋하거나 복사하라" >&2; exit 1; }
   echo "[feature-run] 프로젝트 경로 재바인딩: $PROJECT_ROOT (규칙·conventions·워커 스킬을 이 worktree 에서 읽는다)"
 fi
 
@@ -335,6 +367,9 @@ on_unexpected_exit() { # rc
   write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "예기치 않은 종료 (exit $1)"
   [ -z "${WORK_DIR:-}" ] || report_usage_on_exit
 }
+# 미리 보기는 어느 종료 경로(preflight 의 env_error·예기치 않은 종료 포함)에서도 run-state·usage-summary 를 쓰지 않는다 —
+# 조회가 DONE 을 ENV_ERROR 로 덮으면 다음 일반 재실행이 DONE 조기 종료를 지나쳐 다시 돈다. 사유는 로그·종료 코드로만 남는다.
+if [ "$CONTRACT_IMPACT" = 1 ]; then write_state() { :; }; report_usage_on_exit() { :; }; fi
 trap 'rc=$?; case $rc in 0|2|3) ;; *) on_unexpected_exit "$rc";; esac; release_runner_lock' EXIT
 [ -z "$FEATURE_ID" ] || log "피처 worktree: $ROOT (feature $FEATURE_ID, branch $BRANCH, $FEATURE_WORKTREE_MODE${FEATURE_SNAPSHOT_TREE:+, snapshot tree $FEATURE_SNAPSHOT_TREE}) — 문서·산출물은 $ROOT/$WORK_DIR"
 
@@ -459,8 +494,8 @@ done
 [ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 source "$SKILL_DIR/scripts/fast-check.sh"
 # Unit 정적 검사·위험도별 검증은 같은 파일의 엔진을 쓴다. scripts/ 만 옛 버전이면(헬퍼 없음) 설정된 검사를 조용히 건너뛰게 되므로 혼합 설치로 멈춘다.
-declare -F unit_check_run risk_verify_run >/dev/null \
-  || env_error "scripts/fast-check.sh 에 unit_check_run/risk_verify_run 이 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+declare -F unit_check_run risk_verify_run unit_check_policy_missing_paths >/dev/null \
+  || env_error "scripts/fast-check.sh 에 unit_check_run/risk_verify_run/unit_check_policy_missing_paths 가 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 # DONE 뒤 사후 분석 보고서(선택 산출물): 없거나 실패해도 파이프라인 결과를 바꾸지 않으므로 누락은 경고로만 남긴다.
 post_run_report_ensure() { # 실패는 경고·진단으로만 — 종료 코드·run-state 를 바꾸지 않는다
   if ! declare -F post_run_report_write >/dev/null; then log "[WARN] 사후 분석 보고서 생략 — scripts/post-run-report.sh 없음(DONE 은 그대로)"; return 0; fi
@@ -478,6 +513,129 @@ post_run_report_ensure() { # 실패는 경고·진단으로만 — 종료 코드
 for p in worker-unit.md worker-unit-fix.md worker-fix.md worker-review-gap.md worker-check-fix.md; do
   [ -f "$SKILL_DIR/prompts/$p" ] || env_error "프롬프트 없음: $p"
 done
+
+# ---------- --contract-impact: 계약 문서 변경의 영향 미리 보기 (읽기 전용 — 모델·검사 명령 0회, run-state·체크포인트·지문 불변) ----------
+# 워커가 진입한 뒤 합의 문서를 고치면 두 가지 비용이 생긴다: ① 합의 PASS 지문은 문서 전체를 해시하므로 참조되지 않는 절·메모 한 줄도 그 단계 검증자 재합의를 부른다
+# ② unit 계약 지문은 references 가 가리키는 절 본문을 해시하므로 그 절을 고치면 그 unit 이(뒤 unit 이 완료돼 있으면 사슬째) 다시 실행된다.
+# 러너는 재실행하면 이 판정대로 곧장 진행한다(유료 호출 포함). 이 미리 보기는 같은 판정 함수를 호출만 해서 '지금 재실행하면 일어날 일'을 먼저 보여 준다 —
+# 판정을 바꾸거나 새 상태를 만들지 않고, 의미가 같은 변경인지도 판단하지 않는다(원문으로 되돌리면 지문이 다시 맞는다). 쓰는 것은 계약 렌더링 파생물(.unit-contract/)과
+# live.log 의 출력 사본, 실행 동안의 러너 락뿐이다. worktree 부트스트랩·안전 게이트 복사·run-state 기록은 하지 않는다.
+# run-state 가 DONE 이면 일반 재실행은 재개 지점 결정에서 곧장 끝난다(합의·unit 을 다시 보지 않는다). 그 동작은 그대로 두고, 여기서는 아래 판정이
+# '재실행하면 일어날 일'이 아니라 '문서 변경의 잠재적 영향'임을 구분해 알린다.
+# 기준 계약 → 현재 계약에서 달라진 블록의 머리줄('=== … ===' 단위 대조, 판정 없음). gap 연결은 보지 않는다.
+contract_impact_changed_blocks() { # unit-id
+  local dir; dir="$(unit_contract_dir "$1")"
+  [ -f "$dir/baseline/contract.txt" ] || return 1
+  unit_contract_current "$1" || return 1   # 상태 판정은 subshell 에서 돌았다 — 현재 계약 렌더링 경로(UC_DIR)를 이 셸에서 다시 잡는다
+  jq -nr --rawfile a "$dir/baseline/contract.txt" --rawfile b "$UC_DIR/contract.txt" '
+    def blocks: split("\n") | reduce .[] as $l ({cur:"", m:{}};
+      if ($l|test("^=== .* ===$")) then .cur=$l | .m[$l]="" else .m[.cur] = ((.m[.cur] // "") + $l + "\n") end) | .m;
+    ($a|blocks) as $A | ($b|blocks) as $B
+    | [(($A + $B) | keys[]) | select($A[.] != $B[.]) | sub("^=== "; "") | sub(" ===$"; "")] | join(" / ")'
+}
+contract_impact_report() {
+  local t note invalid="" id ud st blocks later seen u rerun="" confirm="" progressed="" first_rerun="" has_design done_state=0 missing_gates=""
+  [ -f "$STATE" ] && jq -e '.status=="DONE"' "$STATE" >/dev/null 2>&1 && done_state=1
+  if [ "$done_state" -eq 1 ]; then
+    echo "[CONTRACT IMPACT] 읽기 전용 미리 보기 — 모델·검사 명령 0회, run-state·체크포인트 불변. 이 피처는 이미 DONE 이다($ROOT/$WORK_DIR)"
+    echo "  [DONE] 일반 재실행은 합의·unit 을 다시 확인하지 않고 모델 0회로 즉시 끝난다. 아래의 '재실행하면 …'은 실제로 일어날 일이 아니라 DONE 이 아니었다면의 판정, 곧 문서 변경의 잠재적 영향이다"
+  else
+    echo "[CONTRACT IMPACT] 읽기 전용 미리 보기 — 모델·검사 명령 0회, run-state·체크포인트 불변. 지금 문서 상태로 재실행하면 일어날 일이다($ROOT/$WORK_DIR)"
+  fi
+  [ -z "$IMPACT_GATE_SOURCE" ] || missing_gates="$(feature_worktree_missing_gates "$IMPACT_GATE_SOURCE" "$ROOT" | paste -sd' ' -)"
+  [ -z "$missing_gates" ] || echo "  [주의] 이 worktree 에 안전 게이트 설정이 없다: $missing_gates — 미리 보기는 복사하지 않는다(일반 재실행이 원본 $IMPACT_GATE_SOURCE 에서 복사한다)"
+  if [ ! -f "$WORK_DIR/design.md" ]; then echo "  design.md 없음 — 설계 전이다. 아직 고정된 계약이 없다"; return 0; fi
+  echo "■ 합의"
+  for t in design impl; do
+    if consensus_pass_current "$t"; then note="유효(검증자 PASS) — 검증자 재호출 없음"
+    elif user_escalation_resolved_current "$t"; then note="유효(사용자 수리 USER_RESOLVED) — 검증자 재호출 없음"
+    elif [ "$t" = impl ] && doc_gap_resolved_current; then note="유효(사용자가 해결한 gap 의 반영) — 검증자 재호출 없음"
+    elif [ "$t" = impl ] && doc_gap_pending; then note="구현 후 gap 대기 중($(doc_gap_next_step)) — gap 경로가 먼저다(검증자 재호출 없음). gap 답·approach.md 동기화 밖의 변경은 그 경로에서 거부된다"
+    elif [ ! -f "$WORK_DIR/consensus-$t.json" ]; then note="아직 합의 전"
+    else note="무효 — 합의 입력(문서 전체·이 단계의 사용자 결정·conventions)이 PASS 당시와 다르다 → 재실행하면 $t 검증자부터 다시 돈다(유료 호출)"; invalid="$invalid$t "
+    fi
+    echo "  $t: $note"
+  done
+  if [ ! -f "$UNITS_MANIFEST_LOCK" ] && ! units_manifest_present; then
+    echo "■ 구현 단위: 없음 — 워커 진입 전이다. 문서 수정은 unit 재실행을 일으키지 않는다"; return 0
+  fi
+  if [ ! -f "$UNITS_MANIFEST_LOCK" ]; then echo "■ 구현 단위: 워커 진입 전(lock 없음) — 진행된 unit 이 없어 문서 수정은 unit 재실행을 일으키지 않는다"; return 0; fi
+  echo "■ 구현 단위 ($(basename "$UNITS_MANIFEST_LOCK") 순서)"
+  if units_manifest_present && ! cmp -s "$UNITS_MANIFEST_FILE" "$UNITS_MANIFEST_LOCK"; then
+    echo "  [주의] implementation-units.json 이 워커 진입 때 확정한 lock 과 다르다 → 재실행하면 UNITS_MANIFEST_CHANGED 로 멈춘다(아래는 lock 기준)"
+  fi
+  for id in $(unit_ids); do
+    ud="$WORK_DIR/units/$id"
+    if ! { [ -f "$ud/done.json" ] || [ -f "$ud/worker-before.tree" ] || [ -f "$ud/worker-result.json" ]; }; then
+      if unit_contract_current "$id"; then echo "  $id: 미시작 — 현재 문서로 처음 실행된다(문서 변경으로 다시 드는 비용 없음)"
+      else echo "  $id: 미시작 — references 를 현재 문서에서 해석할 수 없다($UC_WHY) → 워커 호출 전에 멈춘다"; fi
+      continue
+    fi
+    progressed="$progressed$id "
+    if [ ! -f "$ud/done.json" ]; then
+      if unit_worker_contract_current "$id" "$ud"; then echo "  $id: 진행 중 — 워커가 받은 계약 그대로다. 이어서 실행된다"
+      else echo "  $id: 진행 중 — 워커가 받은 계약과 현재 계약이 다르다 → 변경 계약으로 워커 턴을 다시 돈다(워커 호출)"; rerun="$rerun$id "; [ -n "$first_rerun" ] || first_rerun="$id"; fi
+      continue
+    fi
+    st="$(unit_contract_status "$id")"
+    if unit_done_valid "$id"; then
+      if [ "$st" = CURRENT ]; then echo "  $id: 완료 유지 — 계약 그대로(워커 0회)"
+      else echo "  $id: 완료 유지 — 달라진 절은 사용자가 해결한 gap 의 반영으로 확인된다(워커 0회)"; fi
+      continue
+    fi
+    case "$st" in
+      IMPACT_REQUIRED) confirm="$confirm$id "
+        echo "  $id: 완료 — 전역 입력(request.md·conventions.md·unit 에 묶이지 않은 사용자 결정·references 에 절이 없는 design.md)만 바뀌었다 → UNIT_CONTRACT_IMPACT_REQUIRED: 사용자가 영향 여부를 확정해야 한다(모델 0회로 멈춘다)";;
+      NO_BASELINE) confirm="$confirm$id "
+        echo "  $id: 완료 — 계약 스냅샷이 없는 과거 산출물 → UNIT_CONTRACT_IMPACT_REQUIRED: 사용자가 영향 여부를 확정해야 한다";;
+      UNRESOLVED) confirm="$confirm$id "; unit_contract_current "$id" || true
+        echo "  $id: 완료 — references 를 현재 문서에서 해석할 수 없다($UC_WHY) → UNIT_CONTRACT_IMPACT_REQUIRED: heading 을 복구하거나 references 를 고쳐야 한다";;
+      *) rerun="$rerun$id "; [ -n "$first_rerun" ] || first_rerun="$id"
+        blocks="$(contract_impact_changed_blocks "$id" 2>/dev/null)" || blocks=""
+        echo "  $id: 완료였지만 계약이 바뀌었다 → 재실행하면 변경 계약으로 워커 턴 + targeted test 를 다시 돈다(워커 호출)"
+        echo "      바뀐 부분: ${blocks:-(특정하지 못함 — 완료 기록의 spec·형식 불일치일 수 있다)}"
+        echo "      되돌릴 원문: $(unit_contract_dir "$id")/baseline/contract.txt (본문을 이 내용과 같게 되돌리면 완료 체크포인트가 그대로 쓰인다)";;
+    esac
+  done
+  if [ -n "$first_rerun" ]; then
+    later=""; seen=0
+    for u in $(unit_ids); do
+      if [ "$seen" -eq 1 ] && [ -f "$WORK_DIR/units/$u/done.json" ]; then later="$later$u "; fi
+      [ "$u" != "$first_rerun" ] || seen=1
+    done
+    [ -z "$later" ] || echo "  [사슬] $first_rerun 뒤에 완료된 unit(${later% })이 있다 → 워커를 부르기 전에 UNIT_CHECKPOINT_CHAIN_STALE 로 멈춘다. 변경을 유지하려면 사용자가 worktree 를 $first_rerun 시작 시점으로 되돌리고 그 unit 들도 다시 실행해야 한다"
+  fi
+  echo "■ 고치면 비용이 드는 곳"
+  echo "  합의 문서 전체: request.md·design.md 는 design 과 impl, implementation.md·approach.md·implementation-units.json·feature-scope.json 은 impl 합의의 입력이다 — 참조되지 않는 절·메모 한 줄도 그 단계 검증자 재합의를 부른다"
+  if [ -n "$progressed" ]; then
+    echo "  진행된 unit 이 참조하는 절(본문이 한 글자라도 바뀌면 그 unit 이 다시 실행된다):"
+    for id in $progressed; do
+      has_design=0
+      while IFS= read -r t; do
+        [ -n "$t" ] || continue
+        echo "    $t  ← $id"
+        case "$t" in design.md*) has_design=1;; esac
+      done < <(jq -r '.references[]' <<< "$(unit_json "$id")")
+      [ "$has_design" -eq 1 ] || echo "    design.md 전체(이 unit 의 references 에 design.md#<절> 이 없다 — 어디를 고쳐도 영향 확정이 필요하다)  ← $id"
+    done
+    echo "  전역 입력(request.md·conventions.md·unit 태그 없는 [USER-QUESTION] 줄): 바뀌면 완료 unit 마다 사용자의 영향 확정이 필요하다"
+  fi
+  echo "  측정 결과·관찰·진행 메모는 합의 문서가 아닌 별도 파일(예: $WORK_DIR/notes.md — 어떤 지문에도 들어가지 않는다)에 적는다"
+  echo "■ 요약: 검증자 재합의 ${invalid:-없음 }/ 워커 재실행 unit ${rerun:-없음 }/ 사용자 영향 확정 필요 unit ${confirm:-없음}"
+  if [ "$done_state" -eq 1 ] && [ -n "$invalid$rerun$confirm" ]; then
+    echo "  [DONE] 위 항목은 잠재적 영향이다 — run-state 가 DONE 이라 일반 재실행은 이 가운데 아무것도 다시 돌리지 않는다(모델 0회). 즉 지금의 문서 변경은 재실행으로 구현에 반영되지 않고, 완료된 구현은 변경 전 문서를 기준으로 한다. 의도한 변경이 아니면 문서를 원문으로 되돌린 뒤 이 명령으로 다시 확인한다. 변경을 구현에 반영해야 하면 러너가 DONE 을 스스로 풀지 않으므로 위 범위를 사용자에게 알리고 결정을 받는다"
+  elif [ "$done_state" -eq 1 ]; then
+    echo "  [DONE] 문서는 완료 당시 계약 그대로다 — 일반 재실행도 모델 0회로 즉시 끝난다"
+  elif [ -n "$invalid$rerun$confirm" ]; then
+    echo "  워커가 코드를 다시 고치면 전체 리뷰(리뷰어 호출)와 최종 테스트도 다시 지난다. 의도한 계약 변경이 아니면 문서를 원문으로 되돌린 뒤 이 명령으로 다시 확인한다. 의도한 변경이면 위 재실행 범위를 사용자에게 알리고 결정을 받은 뒤 재실행한다"
+  else
+    echo "  지금 재실행해도 문서 변경 때문에 다시 드는 모델 호출은 없다"
+  fi
+}
+if [ "$CONTRACT_IMPACT" = 1 ]; then
+  contract_impact_report
+  exit 0
+fi
 
 if [ "$NEW" = 1 ]; then
   # 이전 산출물은 삭제하지 않고 archive/ 로 이동 (rm 금지)
@@ -796,6 +954,25 @@ unit_check_require_readonly_restored() { # unit-id unit-dir
   esac
   stop_need_user UNIT_CHECK_ERROR "unit $1: 직전 Unit 정적 검사가 읽기 전용 계약을 어겼고($CHECK_RO_KIND) 그 변경이 해소되지 않았다 — $CHECK_RO_DETAIL. 검사·워커를 다시 부르지 않았다(모델 호출 0회). 검사가 만든 변경은 unit 범위 검사를 거치지 않았으므로 그대로 이어 받지 않는다: 위 경로·index 를 검사 전 상태로 명시적으로 되돌리고 UNIT_CHECK_CMD 에서 자동 수정·포매팅·git add 를 뺀 뒤 재실행. 자동 원복 없음(기록을 지우거나 고쳐서 넘기지 않는다)"
 }
+# unit 루프 직전의 설정 사전 검사(모델·검사 명령 0회): UNIT_CHECK_POLICY_PATHS 에 선언한 경로 가운데 다음 검사 시점에도 없을 것이 확정된 것을 워커 호출 전에 가린다.
+# 실행 시점 규칙(scripts/fast-check.sh — 검사를 돌릴 때 선언한 경로가 없으면 ENV_ERROR)을 바꾸지 않고 판정 시점만 앞당긴다: 오타를 첫 unit 의 워커 턴이 끝난 뒤에 알게 되지 않는다.
+# 첫 unit 이 아직 실행 전이고 그 unit 의 scope 가 만들 수 있는 경로는 통과시킨다(워커가 만들기로 한 규칙 파일). 그 밖의 없는 경로는 어느 워커 턴 뒤에도 검사가 실패한다.
+unit_check_policy_preflight() {
+  unit_check_configured || return 0
+  [ -n "${UNIT_CHECK_POLICY_PATHS//[[:space:]]/}" ] || return 0
+  local tree missing first first_pending=0 p bad="" deferred=""
+  tree="$(snapshot_worktree_tree)" || env_error "작업 트리 스냅샷 실패(UNIT_CHECK_POLICY_PATHS 사전 검사)"
+  missing="$(unit_check_policy_missing_paths "$tree")" || env_error "UNIT_CHECK_POLICY_PATHS 사전 검사 실패"
+  [ -n "$missing" ] || return 0
+  first="$(jq -r '.units[0].id' "$(units_manifest_file)")" || env_error "구현 단위 manifest 를 읽지 못함(UNIT_CHECK_POLICY_PATHS 사전 검사)"
+  unit_done_valid "$first" || first_pending=1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ "$first_pending" -eq 1 ] && unit_scope_can_create "$first" "$p"; then deferred="$deferred'$p' "; else bad="$bad'$p' "; fi
+  done <<< "$missing"
+  [ -z "$deferred" ] || log "UNIT_CHECK_POLICY_PATHS 의 경로 ${deferred% } 는 아직 없지만 첫 unit($first)의 scope 안이다 — 그 워커가 만들 파일로 보고 진행한다(만들어지지 않으면 그 unit 의 검사에서 멈춘다)"
+  [ -z "$bad" ] || env_error "UNIT_CHECK_POLICY_PATHS 의 경로 ${bad% } 가 작업 트리 스냅샷에 없고, 다음 Unit 정적 검사 전에 만들어질 수도 없다(오타이거나 gitignore 된 경로, 저장소 상대 경로가 아님, 또는 첫 unit($first)의 scope 밖 — 뒤 unit 이 만드는 파일은 그 전 unit 의 검사 시점에 없다) — 워커를 부르지 않았다(모델·검사 명령 0회). config.sh 의 UNIT_CHECK_POLICY_PATHS 를 고친 뒤 재실행"
+}
 # 완료 unit 전부의 검사 증거를 지금의 코드·정책 입력에 맞춘다(review·verify 진입마다 — 모델 호출 0회). 증거가 현재 것이면 아무것도 실행하지 않는다.
 # 같은 실행 안에서 뒤 unit(겹치는 scope)·수정자·worker-fix 가 이미 검사한 코드를 바꿨으면 그 unit 의 검사만 다시 돌린다. 위반이면 리뷰어·TEST_CMD 로 가지 않는다.
 unit_checks_refresh() { # where
@@ -1103,6 +1280,7 @@ while :; do
       bad_refs="$(units_unresolved_references "$UNITS_MANIFEST_LOCK" | paste -sd';' -)"
       [ -z "$bad_refs" ] || stop_need_user UNIT_CONTRACT_IMPACT_REQUIRED "unit references 를 현재 문서에서 해석할 수 없다 — '영향 없음'으로 넘어가지 않는다(모델 호출 0회): $bad_refs. 삭제·개명된 heading 을 복구하거나 references 를 정확한 절로 고친 뒤 재실행(manifest 를 고치면 impl 재합의)"
       units_contract_preflight apply
+      unit_check_policy_preflight
       for unit_id in $(unit_ids); do
         run_unit "$unit_id"
       done

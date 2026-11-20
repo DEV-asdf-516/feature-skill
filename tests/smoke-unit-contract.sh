@@ -283,6 +283,60 @@ rc="$(run_runner)"
 [ "$(reason)" != UNIT_CHECKPOINT_CHAIN_STALE ] && [ "$(reason)" != UNIT_CONTRACT_STALE ] && [ -z "$(workers)" ] || fail "R12b: 절 원복 뒤에도 재실행을 요구하거나 워커를 다시 부름 (rc $rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"
 pass "R12: 계약이 바뀐 선행 unit + 완료된 후행 unit → 기존 UNIT_CHECKPOINT_CHAIN_STALE, 자동 restore·재실행 없음 / 절을 원래 내용으로 되돌리면 체크포인트 그대로(워커 0회)"
 
+# ===== R18: --contract-impact — 계약 문서 변경의 영향 미리 보기(읽기 전용: 모델 0회, run-state·체크포인트 불변) =====
+state_sum() { find .agent-work -type f ! -name live.log ! -path '.agent-work/.unit-contract/*' | sort | xargs shasum | shasum | cut -d' ' -f1; }
+preview() { : > "$MOCK_LOG"; bash "$RUN" --contract-impact "$@" > "$TMP/impact.log" 2>&1; echo $?; }
+preview_has() { grep -q -- "$1" "$TMP/impact.log"; }
+restore_rv; sum0="$(state_sum)"
+rc="$(preview)"
+[ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] && [ "$(state_sum)" = "$sum0" ] || { cat "$TMP/impact.log"; fail "R18a: 미리 보기가 exit 0·모델 0회·상태 불변이 아님(rc $rc): $(paste -sd'|' "$MOCK_LOG")"; }
+preview_has 'design: 유효' && preview_has 'impl: 유효' && preview_has '02-unit: 완료 유지' && preview_has '다시 드는 모델 호출은 없다' || { cat "$TMP/impact.log"; fail "R18a: 변경 없는 상태의 보고가 '재실행 비용 없음'이 아님"; }
+preview_has 'approach.md#A02  ← 02-unit' && preview_has 'approach.md#B04  ← 04-unit' || fail "R18a: 진행된 unit 이 참조하는 절 목록이 없음"
+# (b) 완료 unit 의 참조 절 수정 → 재합의 + 그 unit 재실행 + 뒤 unit 사슬을 재실행 전에 보여 준다
+cp .agent-work/approach.md "$TMP/approach.orig"
+set_section approach.md A02 'how unit 02 is built — 방식 변경'
+sum1="$(state_sum)"; rc="$(preview)"
+[ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] && [ "$(state_sum)" = "$sum1" ] || fail "R18b: 미리 보기가 모델을 호출했거나 상태를 바꿈(rc $rc): $(paste -sd'|' "$MOCK_LOG")"
+preview_has 'design: 유효' && preview_has 'impl: 무효' || { cat "$TMP/impact.log"; fail "R18b: approach.md 변경이 impl 재합의로 보고되지 않음"; }
+preview_has '02-unit: 완료였지만 계약이 바뀌었다' && preview_has '바뀐 부분: reference: approach.md#A02' && preview_has 'units/02-unit/contract/baseline/contract.txt' \
+  || { cat "$TMP/impact.log"; fail "R18b: stale unit·바뀐 절·되돌릴 원문이 보고되지 않음"; }
+preview_has '01-unit: 완료 유지' && preview_has '\[사슬\] 02-unit 뒤에 완료된 unit(03-unit 04-unit)' && preview_has '워커 재실행 unit 02-unit' || { cat "$TMP/impact.log"; fail "R18b: 독립 unit 유지·뒤 unit 사슬·요약이 보고되지 않음"; }
+# (c) 원문으로 되돌리면 다시 '비용 없음' (바이트 단위 원문 — 합의 지문은 문서 전체를 해시하므로 빈 줄 하나만 달라도 재합의 대상이다)
+cp "$TMP/approach.orig" .agent-work/approach.md
+rc="$(preview)"; [ "$rc" -eq 0 ] && preview_has '다시 드는 모델 호출은 없다' && [ "$(state_sum)" = "$sum0" ] || fail "R18c: 절을 원문으로 되돌렸는데 미리 보기가 비용 없음으로 돌아오지 않음"
+# (d) 어느 unit 도 참조하지 않는 절(메모)도 합의 문서 안이면 재합의를 부른다 — unit 은 유지. 실제 재실행이 미리 보기와 같은지도 본다
+printf '\n## notes\nmeasured value 12ms\n' >> .agent-work/approach.md
+rc="$(preview)"
+[ "$rc" -eq 0 ] && preview_has 'impl: 무효' && preview_has '검증자 재합의 impl' && preview_has '워커 재실행 unit 없음' && preview_has '02-unit: 완료 유지' || { cat "$TMP/impact.log"; fail "R18d: 참조되지 않는 절의 메모가 'impl 재합의 · unit 유지'로 보고되지 않음"; }
+rc="$(run_runner)"
+[ "$(calls 'validator impl')" -eq 1 ] && [ "$(calls 'validator design')" -eq 0 ] && [ -z "$(workers)" ] || fail "R18d: 실제 재실행이 미리 보기(impl 검증자 1회·워커 0회)와 다름: $(paste -sd'|' "$MOCK_LOG")"
+# (e) 미리 보기는 아무것도 만들지 않는다: 산출물을 옮기는 인자와 함께 쓰지 못하고, 없는 worktree 를 만들지 않는다
+restore_rv; sum0="$(state_sum)"
+rc="$(preview --new)"; [ "$rc" -eq 1 ] && [ "$(state_sum)" = "$sum0" ] && [ ! -d .agent-work/archive ] || fail "R18e: --contract-impact --new 가 거부되지 않았거나 산출물을 옮김(rc $rc)"
+rc="$(preview --worktree "$TMP/no-such-worktree" --branch smoke/none)"; [ "$rc" -eq 1 ] && [ ! -e "$TMP/no-such-worktree" ] || fail "R18e: 없는 worktree 를 미리 보기가 만들었거나 거부하지 않음(rc $rc)"
+# (f) run-state 가 DONE 이면 일반 재실행은 아무것도 다시 돌리지 않는다 — 미리 보기는 같은 판정을 '잠재적 영향'으로 구분해 보고한다(러너 동작은 그대로)
+restore_rv
+jq '.status="DONE" | .stage="done" | .reason=null' .agent-work/run-state.json > "$TMP/state.done" && cp "$TMP/state.done" .agent-work/run-state.json
+sum_done="$(state_sum)"; rc="$(preview)"
+[ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] && [ "$(state_sum)" = "$sum_done" ] || { cat "$TMP/impact.log"; fail "R18f: DONE 상태의 미리 보기가 exit 0·모델 0회·상태 불변이 아님(rc $rc)"; }
+preview_has '이미 DONE 이다' && preview_has '완료 당시 계약 그대로다' && ! preview_has '잠재적 영향이다 — run-state' || { cat "$TMP/impact.log"; fail "R18f: 변경 없는 DONE 이 'DONE·계약 그대로'로 보고되지 않음"; }
+set_section approach.md A02 'how unit 02 is built — DONE 뒤 변경'
+sum_done2="$(state_sum)"; rc="$(preview)"
+[ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] && [ "$(state_sum)" = "$sum_done2" ] || fail "R18f: DONE 뒤 문서 변경의 미리 보기가 상태를 바꿨거나 모델을 호출함(rc $rc)"
+preview_has 'impl: 무효' && preview_has '02-unit: 완료였지만 계약이 바뀌었다' && preview_has '잠재적 영향이다 — run-state 가 DONE' && preview_has '재실행으로 구현에 반영되지 않고' \
+  || { cat "$TMP/impact.log"; fail "R18f: DONE 뒤 문서 변경이 '잠재적 영향 — 일반 재실행은 다시 돌리지 않음'으로 구분되지 않음"; }
+rc="$(run_runner)"
+[ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] && grep -q '이미 DONE 상태' "$TMP/run.log" && jq -e '.status=="DONE"' .agent-work/run-state.json >/dev/null \
+  || { tail -20 "$TMP/run.log"; fail "R18f: DONE 의 실제 재실행이 미리 보기의 안내(모델 0회 즉시 종료)와 다름 (rc $rc): $(paste -sd'|' "$MOCK_LOG")"; }
+# (g) 미리 보기는 실패 경로에서도 run-state 를 쓰지 않는다 — preflight 오류가 DONE 을 ENV_ERROR 로 덮으면 다음 일반 재실행이 DONE 조기 종료를 지나친다
+restore_rv; cp "$TMP/state.done" .agent-work/run-state.json; sum_done="$(state_sum)"
+printf '\nFEATURE_RUNTIME_CONTRACT_VERSION=999\n' >> "$CFG"
+rc="$(preview)"
+[ "$rc" -eq 1 ] && [ "$(state_sum)" = "$sum_done" ] && jq -e '.status=="DONE"' .agent-work/run-state.json >/dev/null && [ ! -e .agent-work/.runner.lock ] \
+  || { cat "$TMP/impact.log"; fail "R18g: 실패한 미리 보기가 run-state·산출물을 바꿨거나 락을 남김(rc $rc, status $(jq -r .status .agent-work/run-state.json))"; }
+restore_rv
+pass "R18: --contract-impact — 모델 0회·상태 불변으로 재합의 대상·재실행 unit·바뀐 절·뒤 unit 사슬·참조 절 목록을 보고, 원문 복구 시 비용 없음, 참조되지 않는 절의 메모도 재합의 대상임을 보고(실제 재실행과 일치), DONE 은 잠재적 영향으로 구분(일반 재실행은 모델 0회 즉시 종료), 실패 경로에서도 run-state 불변"
+
 # ===== R10: 해석 불가 references·전역 입력 변경 → 영향 없음으로 넘어가지 않고 모델 0회 =====
 restore_rv   # (a) 참조 절 삭제
 awk '$0=="## 03"{skip=1; next} /^## /{skip=0} !skip{print}' .agent-work/implementation.md > "$TMP/doc.tmp" && cp "$TMP/doc.tmp" .agent-work/implementation.md
