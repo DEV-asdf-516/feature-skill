@@ -512,7 +512,17 @@ pass "R: codex 워커 — 거부된 호출은 resume marker 를 지우지 않음
 # run_worker 는 결과 JSON·호출 후 tree 를 남긴 뒤에 doc-gap-resume.json 을 쓴다. 그 사이에 러너가 죽은 상태를 만든다: 정상 UNDECIDED 중단에서 체크포인트만 없앤다.
 reset_tree; flag worker-violation; flag checkfix-undecided
 rc="$(run_runner)"
-[ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] && jq -e '.active==true' .agent-work/check-fix.pending.json >/dev/null || fail "P: 픽스처 — 미결정 수정 턴 중단 상태가 아님(exit $rc, $(reason))"
+[ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || fail "P: 픽스처 — 미결정 수정 턴 중단 상태가 아님(exit $rc, $(reason))"
+# P0: 정상 종료한 미결정 턴은 사용자에게 돌아가기 전에 진행 기록을 닫는다(한도 미소모) — 재실행의 재개 판정에 기대지 않는다
+jq -e '.active==false and .outcome=="UNDECIDED" and .tag=="check-fix-01"' .agent-work/check-fix.pending.json >/dev/null && jq -e '.fast_check_retries==0' .agent-work/run-state.json >/dev/null \
+  || fail "P0: 미결정을 사용자에게 돌려줬는데 수정 턴 진행 기록이 active 로 남음: $(cat .agent-work/check-fix.pending.json)"
+jq -e '.next_step=="WAITING_USER" and .origin=="worker"' .agent-work/doc-gap-resume.json >/dev/null || fail "P0: 미결정 체크포인트가 없음"
+cp .agent-work/check-fix.pending.json "$TMP/pending.closed"
+rc="$(run_runner)"   # 답 없이 재실행 — 닫힌 기록을 다시 판정하지 않고 사용자 대기
+[ "$rc" -eq 2 ] && [ "$(status)" = NEED_USER ] && [ ! -s "$MOCK_LOG" ] && cmp -s .agent-work/check-fix.pending.json "$TMP/pending.closed" || fail "P0: 답 없는 재실행이 호출 0회·기록 불변의 사용자 대기가 아님(exit $rc, $(status)/$(reason)): $(seq_all)"
+# 체크포인트 기록 전에 러너가 죽은 상태(진행 기록은 아직 active, 체크포인트 없음)를 만든다 — 이전 버전이 남긴 active 기록의 복구 경로이기도 하다
+reopen_pending() { jq '.active=true | del(.outcome, .closed_at)' .agent-work/check-fix.pending.json > .agent-work/check-fix.pending.json.tmp && mv .agent-work/check-fix.pending.json.tmp .agent-work/check-fix.pending.json; }
+reopen_pending
 mv .agent-work/doc-gap-resume.json .agent-work/doc-gap-resume.json.lost; interrupted_running
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || fail "P: 체크포인트 없이 중단된 미결정 턴의 재실행이 NEED_USER/UNDECIDED 가 아님(exit $rc, $(status)/$(reason)): $(seq_all)"
@@ -534,13 +544,21 @@ restore_approach
 # P2: 같은 중단인데 작업 트리가 그 턴의 호출 후 tree 와 다르다 → 미결정을 다시 기록하지 않고 멈춘다
 reset_tree; flag worker-violation; flag checkfix-undecided
 rc="$(run_runner)"; [ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || fail "P2: 픽스처 실패(exit $rc, $(reason))"
+reopen_pending
 mv .agent-work/doc-gap-resume.json .agent-work/doc-gap-resume.json.lost; interrupted_running
 echo "edited after the interrupted turn" >> src/a.txt
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = WORKER_OUTCOME_UNCERTAIN ] && [ ! -s "$MOCK_LOG" ] || fail "P2: WORKER_OUTCOME_UNCERTAIN·호출 0회 기대(exit $rc, $(reason)): $(seq_all)"
 [ ! -f .agent-work/doc-gap-resume.json ] && jq -e '.active==true' .agent-work/check-fix.pending.json >/dev/null || fail "P2: 다른 코드 상태 위에 미결정을 기록했거나 진행 기록을 닫음"
 jq -r '.detail' .agent-work/run-state.json | grep -q 'rule conflicts with approach' || fail "P2: 중단 사유에 미결정 항목이 없음"
-pass "P: 미결정 수정 턴이 체크포인트 전에 중단 — 재실행은 호출 0회로 미결정 복구 → NEED_USER(UNDECIDED), 결정 뒤 수정 재개 → DONE / tree 가 달라졌으면 WORKER_OUTCOME_UNCERTAIN"
+# P3: 이전 버전이 남긴 상태(체크포인트는 있고 진행 기록만 active) — 재개 판정이 종전대로 닫고 사용자 결정 경로로 간다
+reset_tree; flag worker-violation; flag checkfix-undecided
+rc="$(run_runner)"; [ "$rc" -eq 2 ] && [ "$(reason)" = UNDECIDED ] || fail "P3: 픽스처 실패(exit $rc, $(reason))"
+reopen_pending
+rc="$(run_runner)"
+[ "$rc" -eq 2 ] && [ "$(status)" = NEED_USER ] && [ ! -s "$MOCK_LOG" ] && jq -e '.active==false and .outcome=="UNDECIDED"' .agent-work/check-fix.pending.json >/dev/null \
+  || fail "P3: 남아 있던 active 기록이 재개 판정으로 닫히지 않음(exit $rc, $(status)/$(reason)): $(seq_all)"
+pass "P: 미결정 수정 턴은 사용자에게 돌아가기 전에 진행 기록을 닫는다(한도 미소모, 남은 active 기록은 재개 판정이 닫음) / 체크포인트 전에 중단 — 재실행은 호출 0회로 미결정 복구 → NEED_USER(UNDECIDED), 결정 뒤 수정 재개 → DONE / tree 가 달라졌으면 WORKER_OUTCOME_UNCERTAIN"
 
 # ===== 사례 Q: 끝난 수정 턴의 확정 도중 중단 → 재실행이 다시 확정해도 한 번만 반영 =====
 reset_tree; flag worker-violation

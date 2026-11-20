@@ -647,6 +647,8 @@ source "$SKILL_DIR/scripts/notify-done.sh"
 #                                                              UNDECIDED 면 이 턴의 미결정 체크포인트(doc-gap-resume.json)가 실제로 있는지 확인한다 — 있으면 사용자 결정 경로가 이어 받고,
 #                                                              없으면(체크포인트 기록 전에 중단) 결과 JSON 에서 다시 기록해 NEED_USER(UNDECIDED) 로 멈춘다. 다시 기록할 수 없으면 WORKER_OUTCOME_UNCERTAIN
 #   범위 안 변경 + 결과 없음/깨짐(undecided paths 무효 포함)   → WORKER_OUTCOME_UNCERTAIN
+# 정상 종료한 턴은 그 자리에서 닫는다: DONE 은 check_fix_turn_accept, UNDECIDED 는 check_fix_pending_close_undecided(run_worker 가 체크포인트를 기록한 직후).
+# 위 재개 판정은 '닫히기 전에 멈춘 실행'만 맡는다 — 사용자에게 미결정을 돌려준 뒤에도 진행 기록이 active 로 남아 doc-gap 재개와 겹치는 일이 없다.
 # 확정은 멱등이다: 진행 기록이 호출 전 한도 값(retries_before)을 들고, 리뷰 입력 병합은 호출 전 worker-result.json 사본(<tag>-merge-base.json)에서 다시 만든다 —
 # 확정 도중(한도 저장 뒤·기록 닫기 전) 러너가 죽어 같은 DONE 을 다시 확정해도 한도와 병합 결과는 한 번 반영한 것과 같다.
 # 기록은 지우지 않고 active=false 로 닫는다. 이 파일을 지우거나 고쳐서 넘어가는 것은 복구가 아니다.
@@ -683,6 +685,17 @@ check_fix_gap_checkpoint_recorded() { # result after_tree
   [ -n "$(doc_gap_next_step)" ] || return 1
   jq -e --arg result "$1" --arg tree "$2" --arg started "$(jq -r '.started_at // ""' "$CHECK_FIX_PENDING")" \
     '.origin=="worker" and (.unit_id // "")=="" and .result==$result and .source_tree==$tree and $started != "" and (.recorded_at // "") >= $started' "$DOC_GAP_RESUME" >/dev/null 2>&1
+}
+# 수정 턴이 미결정(UNDECIDED)으로 정상 종료한 직후(run_worker 가 체크포인트를 기록한 뒤, 사용자에게 돌아가기 전)에 진행 기록을 닫는다.
+# 닫는 조건은 재개 판정(check_fix_pending_resolve)의 UNDECIDED 분기와 같다: 진행 기록이 이 tag 의 것이고, 사용자 결정 체크포인트가 이 턴의 결과·호출 후 tree 를 들고 있다.
+# 하나라도 확인되지 않으면 열어 둔다 — 다음 실행의 재개 판정이 종전대로 판정한다(체크포인트 기록 전에 죽은 실행·이전 버전이 남긴 active 기록의 복구 경로는 그대로다).
+# 한도는 쓰지 않는다(끝난 수정 턴이 아니다). 모델 호출·새 상태 파일 없음.
+check_fix_pending_close_undecided() { # tag result after_tree
+  check_fix_pending_active || return 0
+  [ "$(jq -r '.tag // ""' "$CHECK_FIX_PENDING")" = "$1" ] || return 0
+  check_fix_gap_checkpoint_recorded "$2" "$3" || return 0
+  check_fix_pending_close UNDECIDED
+  log "빠른 검사 수정 턴($1)은 미결정으로 끝났다 — 진행 기록을 닫는다(사용자 결정 뒤 doc-gap 경로가 이어 받는다, 한도 미소모)"
 }
 check_fix_pending_resolve() {
   check_fix_pending_active || return 0

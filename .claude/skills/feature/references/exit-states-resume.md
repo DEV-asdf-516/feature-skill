@@ -141,6 +141,15 @@ unit 계약의 영향 여부를 러너가 정할 수 없음(모델 0회): ① �
 
 unit 완료 확정 직전 또는 review/verify/DONE 진입 직전에, 완료 체크포인트가 현재 계약(문서 절 본문·그 unit 의 사용자 결정·unit JSON)에 대해 유효하지 않음이 드러남(같은 실행 도중 문서·결정이 바뀐 경우). 이전 완료·승인은 재사용되지 않았다. 같은 명령으로 재실행하면 합의 상태를 다시 확인한 뒤 첫 stale unit 부터 `[CHANGED CONTRACT]` 를 받은 워커 턴 → targeted test 로 새 `done.json` 을 만든다
 
+**실행 중 계약 문서 수정(예방과 복구)** — unit 계약 지문은 `references` 가 가리키는 절의 본문 그대로를 해시한다. 의미가 같은 문장 손질·메모 추가도 그 unit 을 stale 로 만들고, 뒤 unit 이 이미 완료돼 있으면 `UNIT_CHECKPOINT_CHAIN_STALE` 로 이어진다(의미 동등성은 판정하지 않는다 — 의도된 안전장치다).
+
+- 측정 결과·관찰·진행 메모: 완료 unit 의 참조 절 **밖**에 적는다(참조되지 않는 절·별도 메모).
+- 참조 절을 실수로 고쳤다: 절 본문을 원래 내용으로 되돌리고 재실행 — 지문이 다시 맞아 완료 체크포인트가 그대로 쓰인다(워커 0회). 원문은 `units/<id>/contract/baseline/contract.txt` 에 있다.
+- 구현 계약을 실제로 바꿔야 한다: 그 unit 과 뒤의 완료 unit 이 다시 실행된다. 고치기 **전에** 영향 unit·재실행 범위를 사용자에게 알리고 결정을 받는다.
+- 영향을 판단할 수 없다: 임의로 '영향 없음'으로 두지 않는다 — 재실행 비용을 알리고 사용자가 정한다.
+
+계약 변경을 유지할 때만 뒤 unit 재실행이 필요하다. 자동으로 뒤 unit 을 다시 돌리거나 모델에게 변경의 무해성을 판정시키지 않는다.
+
 ### `SCOPE_MISSING` — exit 3 `NEED_DOCS`
 
 `feature-scope.json` 이 없다. 아래 "구현 문서 작성" 3번대로 작성 후 재실행
@@ -174,7 +183,7 @@ unit 워커가 전체 범위 안이지만 현재 unit 의 scope 밖 경로를 �
 ### `UNIT_CHECKPOINT_CHAIN_STALE` — exit 2 `NEED_USER`
 
 다시 실행해야 하는 unit N 뒤에 완료 체크포인트가 있는 unit 이 있음(`detail` 에 목록과 N 의 `before.tree`). 뒤 unit 은 옛 N 결과 위에 작성됐고 그 코드가 worktree 에 남아 있으므로 spec_hash 가 그대로여도 재사용하지 않는다. 자동 원복·replay 없음
-— 사용자가 worktree 를 N 의 `before.tree` 로 되돌리고 뒤 unit 의 `units/<id>/` 를 치운 뒤 재실행
+— 사용자가 worktree 를 N 의 `before.tree` 로 되돌리고 뒤 unit 의 `units/<id>/` 를 치운 뒤 재실행. N 이 다시 실행 대상이 된 이유가 참조 절의 의도하지 않은 수정이면, 그 절을 원래 내용으로 되돌리는 것만으로 풀린다(위 "실행 중 계약 문서 수정")
 
 ### `UNIT_TEST_RETRIES_EXHAUSTED` — exit 2 `NEED_USER`
 

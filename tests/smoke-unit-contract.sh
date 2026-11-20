@@ -275,7 +275,13 @@ rc="$(run_runner)"
 [ -f .agent-work/units/03-unit/done.json ] && [ -f .agent-work/units/04-unit/done.json ] || fail "R12: 뒤 unit 체크포인트를 러너가 지움"
 jq -e '.completed_units==["01-unit"]' .agent-work/implementation-context.json >/dev/null 2>&1 || true   # (context 는 유효한 완료 prefix 로만 재구성된다 — 아래 함수 검사)
 ( source "$CFG"; impl_context_write && jq -e '.completed_units==["01-unit"]' "$IMPL_CONTEXT_FILE" >/dev/null ) || fail "R12: implementation-context 가 유효한 완료 prefix(01)로만 재구성되지 않음"
-pass "R12: 계약이 바뀐 선행 unit + 완료된 후행 unit → 기존 UNIT_CHECKPOINT_CHAIN_STALE, 자동 restore·재실행 없음"
+# R12b: 의도하지 않은 참조 절 수정은 원래 내용으로 되돌리면 풀린다 — 지문이 다시 맞아 완료 체크포인트가 그대로 쓰이고 워커는 0회
+set_section approach.md A02 'how unit 02 is built'
+[ "$( ( source "$CFG"; unit_contract_status 02-unit ) )" = CURRENT ] && ( source "$CFG"; unit_done_valid 02-unit && unit_done_valid 03-unit && unit_done_valid 04-unit ) \
+  || fail "R12b: 참조 절을 원래 내용으로 되돌렸는데 완료 체크포인트가 다시 유효해지지 않음($( ( source "$CFG"; unit_contract_status 02-unit ) ))"
+rc="$(run_runner)"
+[ "$(reason)" != UNIT_CHECKPOINT_CHAIN_STALE ] && [ "$(reason)" != UNIT_CONTRACT_STALE ] && [ -z "$(workers)" ] || fail "R12b: 절 원복 뒤에도 재실행을 요구하거나 워커를 다시 부름 (rc $rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"
+pass "R12: 계약이 바뀐 선행 unit + 완료된 후행 unit → 기존 UNIT_CHECKPOINT_CHAIN_STALE, 자동 restore·재실행 없음 / 절을 원래 내용으로 되돌리면 체크포인트 그대로(워커 0회)"
 
 # ===== R10: 해석 불가 references·전역 입력 변경 → 영향 없음으로 넘어가지 않고 모델 0회 =====
 restore_rv   # (a) 참조 절 삭제

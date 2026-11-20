@@ -609,6 +609,9 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
     # impl 재합의(검증자·디자이너)로 돌아가지 않는다: 체크포인트(doc-gap-resume.json, 이 호출 후 tree 포함)를 남기고 NEED_USER. 사용자가 답하면
     # 같은 워커(unit 이면 그 unit 부터, review-gap 이면 같은 리뷰로)가 바로 다시 돈다. 이 unit 은 완료 처리하지 않는다.
     doc_gap_record_worker "$result" "$unit_id" "${DOC_GAP_REVIEW:-}" "$after_tree" || env_error "doc-gap-resume.json 기록 실패"
+    # 이 턴이 빠른 검사 수정 턴(check-fix)이면 그 진행 기록을 사용자에게 돌아가기 전에 닫는다(러너가 정의한 함수 — 하네스 단독 실행에는 없다).
+    # 닫지 않으면 사용자는 미결정을 받았는데 내부 상태는 '수정 턴 진행 중'으로 남는다. 이 지점은 게이트·결과 계약·세션 수용·체크포인트 기록이 모두 끝난 뒤다.
+    ! declare -F check_fix_pending_close_undecided >/dev/null || check_fix_pending_close_undecided "$tag" "$result" "$after_tree"
     log "워커 미결정 항목 — 사용자 결정 필요:"; doc_gap_report
     stop_need_user UNDECIDED "워커${unit_id:+ (unit $unit_id)} 의 undecided 항목을 사용자에게 질문 → 답을 decisions.md 에 '- [USER-QUESTION][scope=impl][worker-gap=<key>] <질문> → <답>' 으로 기록 → approach.md 에 결정 반영 → 재실행(검증자·디자이너 없이 ${unit_id:+unit $unit_id 부터 }워커 재개). 단, 답이 구현 수단이 아니라 요구·외부 동작·설계 자체를 바꾸면 gap 답이 아니라 새 제품 요구다 — request.md 에 '요구 변경/추가' 를 append 하고 design.md 를 고친 뒤 '[USER-QUESTION][scope=design]' 로 기록한다(정상 design → impl 재합의, 이 gap 우회 경로 아님). 항목: $(doc_gap_field '[.gaps[] | "[\(.key)] \(.question) (options: \(.options|join(" | ")); tag: \(.tag))"] | join(" ; ")')"
   fi
