@@ -50,7 +50,7 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
+sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 cd "$TMP/repo" || exit 1
 git init -q
 printf '.agent-work/\n.claude/\n' > .gitignore
@@ -346,11 +346,11 @@ exec "$TMP/bin/$c" "\$@"
 EOF
   chmod +x "$TMP/bin/$c-tamper"
 done
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude-tamper\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-tamper\"|" "$CFG" && rm -f "$CFG.bak"
+sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude-tamper\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-tamper\"|" "$CFG" && rm -f "$CFG.bak"
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNITS_MANIFEST_CHANGED ] || { tail -20 "$TMP/run.log"; fail "E2: exit 2/UNITS_MANIFEST_CHANGED 기대, 실제 $rc/$(reason)"; }
 grep -q 'test-01' "$MOCK_LOG" && fail "E2: manifest 변경 후 targeted test 로 진행함"
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" "$CFG" && rm -f "$CFG.bak"
+sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" "$CFG" && rm -f "$CFG.bak"
 restore_units
 pass "E2: 워커 호출 중 manifest 변경 → 중단, targeted test 미진입"
 

@@ -14,7 +14,7 @@
 #   초안 작성은 interactive 오케스트레이터 세션이 직접 하며 그 모델은 이 설정으로 제어되지 않는다.
 DESIGN_REVISION_MODEL="claude-fable-5-2"
 DESIGNER_EFFORT="medium"
-VALIDATOR_MODEL="gpt-6.2-astra"     # 명세 검증자
+VALIDATOR_MODEL="gpt-6-astra"     # 명세 검증자
 VALIDATOR_EFFORT="medium" # 게이트 모드(구현을 막을 최소 사유만 판정)지만 문서 주장을 직접 호출 경로·conventions 와 교차 확인하므로 low 로 내리지 않는다. 전체 보안·아키텍처 감사는 별도 수동 audit 에서만 high
 VALIDATOR_PROFILE="guided"      # 판정 전략 오버레이(prompts/validator-overlays/<이름>.md). 명시 값이 모델별 기본값(validator_profile 헬퍼)보다 우선한다. 빈 값 = 모델별 기본값. compact | guided | conservative | none
 WORKER_MODEL="claude-opus-5-5"       # 구현 담당
@@ -39,6 +39,17 @@ VALIDATOR_CLI=""
 WORKER_CLI=""
 REVIEWER_CLI=""
 FIXER_CLI=""
+
+# --- Claude 모델의 실행 backend ---
+# 모델 ID 가 claude* 인 역할을 무엇으로 실행할지. 역할이 아니라 모델이 정한다 — 다섯 역할 모두 같은 규칙이다.
+#   native     : 현재 대화형 메인 Claude Code 세션의 네이티브 Agent(.claude/agents/feature-<역할>.md). Shell 은 요청을 발행하고 exit 42(NATIVE_AGENT_REQUIRED)로
+#                돌아가며, 메인이 dispatch 한 뒤 같은 명령을 재실행하면 훅이 캡처한 원문 결과를 Shell 이 검증·수용한다(scripts/native-agent-bridge.sh).
+#                `claude -p` 는 부르지 않는다. 실행 불가 시 CLI 로 자동 대체하지도 않는다.
+#   legacy_cli : 종전의 `claude -p` 비대화형 실행(CLAUDE_BIN). 이미 `claude -p` 로 진행 중인 피처를 마칠 때와 CLI 어댑터 회귀에만 명시적으로 고른다.
+# 기본값은 native 다. 이 줄이 없는 예전 config.sh 는 legacy_cli 로 동작한다(install 은 기존 config.sh 를 덮어쓰지 않는다).
+# gpt-*/o*/codex* 모델은 이 값과 무관하게 codex CLI 다. native 에서는 모델 이름과 어긋나는 <ROLE>_CLI 재정의를 허용하지 않는다(명시적 오류).
+# 진행 중인 피처의 세션(.session-*)은 backend 를 바꿔도 자동으로 옮겨 가지 않는다 — SESSION_CLI_MISMATCH / WORKER_SESSION_MISMATCH 로 멈춘다.
+CLAUDE_BACKEND="native"
 
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
@@ -203,7 +214,8 @@ WORKER_SKILLS=()
 # 헬퍼 '이름'이 같다는 사실은 본문이 호환된다는 증거가 아니다. 아래 헬퍼의 동작·출력 형식·체크포인트 필드 가운데 scripts/·schemas/·prompts/ 가 의존하는 것을 바꾸면 이 값을 올린다.
 # install.sh 는 대상 config.sh 의 값이 소스와 다르면(없음 포함) 활성 코드를 바꾸기 전에 중단하고(config.sh.new 병합 안내), feature-run.sh 도 시작할 때 자신이 요구하는 값과 대조한다.
 # 1: DOC_GAP 구조화 경로(undecided[].paths·gap paths)·legacy 위치 해석·WAITING_USER 수리 사전 검사(doc_gap_repair_preflight).
-FEATURE_RUNTIME_CONTRACT_VERSION=1
+# 2: 모델 기준 backend 라우팅(role_backend — claude_native / claude_cli / codex_cli)과 native Agent 인계(scripts/native-agent-bridge.sh, exit 42/43).
+FEATURE_RUNTIME_CONTRACT_VERSION=2
 
 # --- 저장소 상대 경로 공용 규칙 (jq 정의) ---
 # feature-scope / implementation-units 의 scope 경로, 워커 undecided[].paths, DOC_GAP 체크포인트의 paths 가 전부 이 정의를 쓴다(두 번째 경로 검사기를 만들지 않는다).
@@ -381,7 +393,7 @@ claude_session_commit() {
 # 이 key 의 '확정된' 세션이 있는가 (claude 평문 파일 또는 codex 원장). 다른 스크립트가 "후속 턴인가"를 판단할 때 이 predicate 만 쓴다 —
 # 저장 형식(.session-<key> / .session-<key>.codex.json)은 어댑터 내부 사정이다.
 session_exists() { # key
-  [ -f "$WORK_DIR/.session-$1" ] || [ -f "$WORK_DIR/.session-$1.codex.json" ]
+  [ -f "$WORK_DIR/.session-$1" ] || [ -f "$WORK_DIR/.session-$1.codex.json" ] || [ -f "$WORK_DIR/.session-$1.native.json" ]
 }
 
 # 역할이 결속되는 계약 버전 — 원장의 세션이 '어느 계약 아래의 대화'인지 기록·대조한다. 계약이 바뀌면 이전 세션은 무효다.
@@ -444,8 +456,8 @@ codex_session_begin() { # ROLE key model effort
     return 1
   fi
   # 같은 key 가 다른 CLI(claude 평문 세션)에 결속돼 있으면 조용히 fresh codex 세션으로 돌지 않는다 — CLI 변경은 새 key(새 attempt/--new)가 정상 경로.
-  if [ -f "$WORK_DIR/.session-$key" ]; then
-    echo "[FAIL] SESSION_CLI_MISMATCH: key '$key' 는 claude 세션($WORK_DIR/.session-$key)에 결속돼 있는데 지금은 codex 로 라우팅된다($role) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
+  if [ -f "$WORK_DIR/.session-$key" ] || [ -f "$WORK_DIR/.session-$key.native.json" ]; then
+    echo "[FAIL] SESSION_CLI_MISMATCH: key '$key' 는 claude 세션($WORK_DIR/.session-$key 또는 native Agent 원장 .native.json)에 결속돼 있는데 지금은 codex 로 라우팅된다($role) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
     return 1
   fi
   # 이전 invocation 이 스테이징만 하고 수용되지 못한 원장(.new)은 이번 호출의 것이 아니다 — 이번 스테이징이 생략돼도(thread id 미확정)
@@ -494,6 +506,10 @@ codex_session_check_resumed() { # key events_jsonl
 # (marker 는 확정 원장이 있을 때만 생기므로 원장 검사가 함께 덮는다).
 claude_session_cli_guard() { # ROLE key
   local ledger; ledger="$(codex_session_ledger "$2")"
+  if [ -f "$WORK_DIR/.session-$2.native.json" ]; then
+    echo "[FAIL] SESSION_CLI_MISMATCH: key '$2' 는 native Agent 세션($WORK_DIR/.session-$2.native.json)에 결속돼 있는데 지금은 claude CLI(legacy_cli)로 라우팅된다($1) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
+    return 1
+  fi
   [ -f "$ledger" ] || return 0
   echo "[FAIL] SESSION_CLI_MISMATCH: key '$2' 는 codex 세션 원장($ledger)에 결속돼 있는데 지금은 claude 로 라우팅된다($1) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
   return 1
@@ -504,6 +520,8 @@ claude_session_cli_guard() { # ROLE key
 role_session_accept() { # ROLE key [label]
   local role="$1" key="$2" label="${3:-}" cli ledger
   cli="$(role_cli "$role")" || return 1
+  # native Agent: typed 원장(.session-<key>.native.json)의 .new 를 확정한다 — 검증 계약(게이트 통과 뒤에만 accept)은 세 backend 공통이다.
+  if [ "$(role_backend "$role")" = claude_native ]; then native_session_accept "$role" "$key" "$label"; return $?; fi
   case "$cli" in
     claude) claude_session_commit "$key" ;;
     codex)
@@ -538,15 +556,38 @@ role_cli() { # ROLE(DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) → claude|codex
   override="${!override_var:-}"; model="$(role_model "$role")"
   if [ -n "$override" ]; then
     case "$override" in
-      claude|codex) printf '%s' "$override"; return 0 ;;
+      claude|codex) ;;
       *) echo "[FAIL] config.sh $override_var='$override' — claude 또는 codex 만 허용" >&2; return 1 ;;
     esac
+    # native 라우팅에서는 모델 이름이 backend 를 정한다 — 이름으로 판정되는 모델을 반대 CLI 로 강제하는 모순된 재정의를 조용히 받지 않는다.
+    # (이름으로 판정할 수 없는 모델에 대한 명시 지정은 그대로 허용한다. legacy_cli 는 종전 의미 그대로다.)
+    if [ "${CLAUDE_BACKEND:-legacy_cli}" = native ]; then
+      local by_name; by_name="$(cli_for_model "$model" || true)"
+      if [ -n "$by_name" ] && [ "$by_name" != "$override" ]; then
+        echo "[FAIL] ROLE_CLI_CONFLICT: $role 모델 '$model' 은 이름으로 $by_name 인데 config.sh $override_var='$override' 가 반대로 강제한다 — 모델 기준 라우팅(CLAUDE_BACKEND=native)에서는 허용하지 않는다. $override_var 를 비우거나 모델을 바꿔라" >&2
+        return 1
+      fi
+    fi
+    printf '%s' "$override"; return 0
   fi
   cli_for_model "$model" \
     || { echo "[FAIL] 모델 '$model'($role) 의 CLI 를 이름으로 정하지 못함 — config.sh 에 $override_var=claude|codex 를 지정" >&2; return 1; }
 }
-role_bin() { # ROLE → 실행 파일
-  case "$(role_cli "$1")" in claude) printf '%s' "$CLAUDE_BIN" ;; codex) printf '%s' "$CODEX_BIN" ;; *) return 1 ;; esac
+# 실행 backend: 모델(→ role_cli)과 CLAUDE_BACKEND 가 정한다. 역할 이름으로 분기하지 않는다.
+role_backend() { # ROLE → claude_native | claude_cli | codex_cli
+  local cli; cli="$(role_cli "$1")" || return 1
+  case "$cli" in
+    codex) printf 'codex_cli' ;;
+    claude)
+      case "${CLAUDE_BACKEND:-legacy_cli}" in
+        native) printf 'claude_native' ;;
+        legacy_cli) printf 'claude_cli' ;;
+        *) echo "[FAIL] config.sh CLAUDE_BACKEND='${CLAUDE_BACKEND}' — native 또는 legacy_cli 만 허용" >&2; return 1 ;;
+      esac ;;
+  esac
+}
+role_bin() { # ROLE → 실행 파일 (native Agent 는 실행 파일이 없다 — 빈 값)
+  case "$(role_backend "$1")" in claude_cli) printf '%s' "$CLAUDE_BIN" ;; codex_cli) printf '%s' "$CODEX_BIN" ;; claude_native) printf '' ;; *) return 1 ;; esac
 }
 require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실제로 쓰는 CLI 만 설치 확인
   local item bin
@@ -555,6 +596,7 @@ require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실�
       DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) bin="$(role_bin "$item")" || return 1 ;;
       *) bin="$item" ;;
     esac
+    [ -n "$bin" ] || continue   # native Agent 로 라우팅된 역할은 CLI 설치를 요구하지 않는다
     command -v "$bin" >/dev/null 2>&1 || { echo "[FAIL] '$bin' 미설치 (${item})" >&2; return 1; }
   done
 }
@@ -569,6 +611,13 @@ RUN_READONLY_INVOCATION_ID=""   # 마지막 run_readonly_json_role 의 invocatio
 run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json prompt conventions
   local role="$1" session="$2" label="$3" schema="$4" out="$5" prompt="$6" conv="$7" model effort cli rc=0 inv
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  # native Agent backend: 요청 발행(exit 42) 또는 캡처된 결과의 검증·물질화. 반환했다면 $out 은 이번 요청의 결과다(스키마·계약 검사는 호출자 그대로).
+  if [ "$(role_backend "$role")" = claude_native ]; then
+    native_role_call readonly "$role" "$session" "$label" "$prompt" "$conv" "$schema" "$out" "" || return 1
+    RUN_READONLY_INVOCATION_ID="$NATIVE_LAST_REQUEST_ID"
+    return 0
+  fi
+  native_pending_guard "$role" "$label"   # 다른 호출 지점의 native 요청이 남아 있으면 그 위에서 CLI 를 부르지 않는다(없으면 no-op)
   inv="$(new_invocation_id)"; RUN_READONLY_INVOCATION_ID="$inv"
   case "$cli" in
     codex)
@@ -671,6 +720,18 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
   local model effort cli rc=0 inv
   RUN_EDIT_ROLE_CLI_RC=0; RUN_EDIT_ROLE_RESULT_DIAG=""; RUN_EDIT_ROLE_INVOCATION_ID=""
   model="$(role_model "$role")"; effort="$(role_effort "$role")"; cli="$(role_cli "$role")" || return 1
+  # native Agent backend: 도구 제한은 agent 정의(tools allowlist — Agent·ScheduleWakeup 없음)가 강제하므로 claude 전용 추가 인자("$@")는 쓰지 않는다.
+  # 반환값은 CLI rc 와 같은 의미다(0 = 보고 수신, 1 = Agent 는 돌았지만 쓸 수 있는 보고 없음) — 호출자의 기존 게이트·가드가 그대로 판정한다.
+  if [ "$(role_backend "$role")" = claude_native ]; then
+    native_role_call edit "$role" "$session" "$label" "$prompt" "$conv" "$schema" "$out" "$raw" || rc=$?
+    RUN_EDIT_ROLE_INVOCATION_ID="$NATIVE_LAST_REQUEST_ID"; RUN_EDIT_ROLE_CLI_RC="$rc"
+    [ "$rc" -eq 0 ] || RUN_EDIT_ROLE_RESULT_DIAG="NATIVE_REPORT_UNUSABLE"
+    # 세션 확정 시점은 claude CLI 경로와 같다: 스키마 없는 편집 역할(디자이너·수정자)은 보고를 받은 호출(rc 0)에서 확정하고,
+    # 스키마 역할(워커)은 호출자의 role_session_accept 가 결과 검증 뒤에 확정한다.
+    if [ "$rc" -eq 0 ] && [ -z "$schema" ]; then native_session_accept "$role" "$session" "$label" || return 1; fi
+    return "$rc"
+  fi
+  native_pending_guard "$role" "$label"
   inv="$(new_invocation_id)"; RUN_EDIT_ROLE_INVOCATION_ID="$inv"   # CLI 실행 전 preflight 실패(위 return 1)는 invocation 이 아니다
   # [Added] 워커 전용 CLI 정책 — 배열로 조립(eval 없음). 다른 역할은 빈 배열.
   local policy_args=() policy_env=()
@@ -2841,6 +2902,21 @@ usage_cost_report_line() { # [usage.jsonl]
     + " — by_cli: " + ([ .by_cli | to_entries[] | "\(.key)=\(.value.invocations)건(reported \(.value.reported_cost_usd|money), estimated \(.value.estimated_cost_usd|money), unknown \(.value.cost_unknown_invocations))" ] | join(", "))'
 }
 
+# native Agent 인계(브리지)는 scripts/ 에 있다 — config.sh 본문과 버전이 어긋나지 않게 런타임 계약 표식(2)으로 묶여 있다.
+# 러너(feature-run.sh)는 시작할 때 이 파일의 존재를 확인한다(혼합 설치 → ENV_ERROR). config.sh 만 단독으로 source 하는 도구(usage 집계 등)를 위해
+# 파일이 없으면 여기서 죽지 않고, native 요청을 만들 수 없다는 사실만 호출 시점에 명시적으로 실패시킨다(CLI 로 대체하지 않는다).
+if [ -f "$FEATURE_SKILL_DIR/scripts/native-agent-bridge.sh" ]; then
+  source "$FEATURE_SKILL_DIR/scripts/native-agent-bridge.sh"
+else
+  native_pending_guard() { return 0; }
+  native_pending_backend_guard() { return 0; }
+  native_resume_active() { return 1; }
+  native_pre_begin() { return 0; }
+  native_pre_put() { return 0; }
+  native_role_call() { echo "[FAIL] native Agent 브리지 없음: $FEATURE_SKILL_DIR/scripts/native-agent-bridge.sh — scripts/ 와 config.sh 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라" >&2; return 1; }
+  native_session_accept() { native_role_call; }
+fi
+
 # =============================================================
 # 가드: 설정이 틀리면 이 파일을 source 하는 스크립트를 즉시 중단
 # =============================================================
@@ -2856,5 +2932,5 @@ for required_value in \
   "$TEST_CMD" "$LINT_CMD"; do
   [ -n "$required_value" ] || { echo "[FAIL] config.sh 역할별 모델/effort 및 프로젝트 명령은 비워둘 수 없습니다." >&2; exit 1; }
 done
-for _role in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do role_cli "$_role" >/dev/null || exit 1; done; unset _role
+for _role in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do role_backend "$_role" >/dev/null || exit 1; done; unset _role
 [ -f "$CORE_RULES_FILE" ] || { echo "[FAIL] core_rules.md 없음: $CORE_RULES_FILE" >&2; exit 1; }

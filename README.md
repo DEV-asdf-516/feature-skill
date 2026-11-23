@@ -10,6 +10,18 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 
 역할은 고정이지만 **어느 CLI 로 돌릴지는 모델 ID 로 정한다**: `claude*` → claude CLI, `gpt-*`/`o*`/`codex*` → codex CLI. 이름으로 정할 수 없는 모델은 `config.sh` 의 `<ROLE>_CLI=claude|codex` 로 명시한다. 아래 CLI 열은 기본 설정 기준이다. 각 역할이 요구하는 실행 형태(읽기 전용+스키마 JSON / 편집)는 두 CLI 의 플래그로 각각 옮겨진다(`config.sh` 의 `run_readonly_json_role` / `run_edit_role`).
 
+**Claude 모델의 실행 backend (`config.sh` `CLAUDE_BACKEND`).** `claude*` 모델을 무엇으로 실행할지는 역할이 아니라 이 설정 하나가 정한다. `gpt-*`/`o*`/`codex*` 는 값과 무관하게 codex CLI 다.
+
+| 값 | 실행 | 비고 |
+|---|---|---|
+| `native` (기본값) | 현재 대화형 메인 Claude Code 세션의 네이티브 Agent(`.claude/agents/feature-<역할>.md`) | `claude -p` 0회. Shell 이 요청을 발행하고 exit 42(`NATIVE_AGENT_REQUIRED`)로 돌아오면 메인이 dispatch 한 줄로 `Agent`/`SendMessage` 를 호출하고 같은 명령을 재실행한다. 훅(`feature_native_agent.sh`)이 전사에서 캡처한 원문만 Shell 이 검증·수용한다. 모델 이름과 어긋나는 `<ROLE>_CLI` 재정의는 오류다 |
+| `legacy_cli` | 종전의 `claude -p` | 이미 `claude -p` 로 진행 중인 피처를 마칠 때와 CLI 어댑터 회귀용 |
+
+- 현재 상태(2026-11-23): 다섯 역할 모두 native 인계가 연결돼 있고 mock 스모크 세 개를 통과한다 — `tests/smoke-native-bridge.sh`(브리지·훅 계약), `tests/smoke-native-worker.sh`(워커: unit 직렬·test-fix·verify worker-fix·세대 교체·결과 불확실), `tests/smoke-native-pipeline.sh`(설정은 다섯 역할 전부 native 지만 이 종단 시나리오가 실제로 호출하는 역할은 검증자·워커·리뷰어·수정자 넷이다 — 검증자가 PASS 하므로 디자이너 호출이 없다: 합의 → 워커 → check-fix → 리뷰어 → 수정자 → 종결 리뷰 → DONE, 리뷰 출력 계약 위반, 리뷰어 DOC_GAP → review-gap 워커, 수정자 실행 중 계약 문서·리뷰 JSON 변경과 `decisions.md` 기존 내용 변경·권한 밖 기록 추가의 불수용. native 디자이너는 `smoke-native-bridge.sh` 의 합의 루프 사례(BLOCK → 디자이너 → PASS)가 검증한다 — 다섯 역할을 한 번에 도는 단일 종단 사례는 없다). 기본값은 `native` 다(2026-11-23 전환). `claude -p` 어댑터를 검증하는 기존 스모크는 `CLAUDE_BACKEND="legacy_cli"` 를 명시해 고정한다. 이미 설치된 프로젝트의 `config.sh` 는 install 이 덮어쓰지 않으므로 그쪽 값이 그대로 유지된다(`CLAUDE_BACKEND` 줄이 없으면 `legacy_cli`).
+- **실모델 검증 범위**(Claude Code 2.1.330, 2026-11-23): 디자이너·워커·리뷰어·수정자의 신규 `Agent` 호출과 `SendMessage` 재개가 Shell 수용까지 확인됐다 — PreToolUse `updatedInput` 적용(프롬프트 해시 일치), agent 정의의 full model ID·effort 적용, 같은 agent id·대화 문맥 유지, 세션 cwd 밖 worktree 읽기·쓰기, SubagentStop 캡처. 검증자·리뷰어를 codex 로 둔 혼합 구성의 작은 피처 종단(DONE)도 확인됐다. 실모델 미검증: 검증자 native, 워커의 test-fix·check-fix·review-gap·verify worker-fix 호출 지점, 세대 교체, `--feature` worktree 모드, 다섯 역할 전부 Claude 인 종단, 그리고 PostToolUse 실행 확인(`DISPATCHING → DISPATCHED`)의 실제 페이로드(mock 과 기존 전사 대조만 했다). 관측된 주의점: `.claude/agents/` 디렉터리가 세션 시작 때 없었으면 세션 재시작이 필요하고, SubagentStop 이 보고 레코드가 전사에 쓰이기 전에 발화할 수 있어 훅이 잠깐 기다리며 다시 읽는다(끝까지 없으면 `NO_REPORT` — 성공으로 받지 않는다).
+- dispatch 상태는 `PREPARED → DISPATCHING → DISPATCHED → RESULT_READY → CONSUMED` 다. PreToolUse 는 시도만 기록하고(`DISPATCHING`), 같은 `tool_use_id` 의 PostToolUse 가 실행 성공을 확인해야 `DISPATCHED` 가 된다. 다른 PreToolUse 훅이 호출을 거부하면 러너가 메인 전사에서 거부를 확인해 `NATIVE_DISPATCH_DENIED`(NEED_USER)로 올린다 — 재시도는 사용자 결정 뒤 `native-agent-bridge.sh redispatch <request_id>`(같은 요청), 정리는 `discard`. 실행 여부가 불명인 요청은 자동으로 다시 보내지 않는다.
+- 진행 중인 피처의 세션은 backend 를 바꿔도 자동으로 옮겨 가지 않는다(`SESSION_CLI_MISMATCH`). 절차와 중단 코드는 `.claude/skills/feature/references/native-agent.md`.
+
 | 역할 | 모델·effort 설정 | CLI (기본 설정) | 하는 일 |
 |---|---|---|---|
 | **오케스트레이터** | (설정 없음 — interactive Claude Code 세션의 모델) | claude 대화 세션 | 요구 해석, 설계 문서·구현 문서 초안 작성, 최종 테스트 |
@@ -496,6 +508,7 @@ jq -s '{cost_usd: (map(.cost_usd // 0) | add), input_uncached: (map(.input_uncac
 ## 테스트
 
 ```bash
+bash tests/run-smokes.sh             # 무과금 스모크 전체를 병렬로(-j N, 이름 패턴 인자 가능). LLM 호출 없음
 bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 없음
 bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음

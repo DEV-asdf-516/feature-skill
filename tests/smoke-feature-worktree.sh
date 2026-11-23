@@ -47,7 +47,7 @@ cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$SRC/.claude/hooks/" 2>/dev/null 
 printf '{"hooks":{}}\n' > "$SRC/.claude/settings.json"
 mkdir -p "$SRC/.codex/hooks" && printf '#!/bin/sh\nexit 0\n' > "$SRC/.codex/hooks/worker_guard.sh"
 CFG="$SRC/.claude/skills/feature/config.sh"
-sed -i.bak 's|^CLAUDE_BIN=.*|CLAUDE_BIN="true"|; s|^CODEX_BIN=.*|CODEX_BIN="true"|; s/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$CFG" && rm -f "$CFG.bak"
+sed -i.bak 's|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND="legacy_cli"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN="true"|; s|^CODEX_BIN=.*|CODEX_BIN="true"|; s/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$CFG" && rm -f "$CFG.bak"
 RUN="$SRC/.claude/skills/feature/scripts/feature-run.sh"
 GIT="git -c user.email=smoke@test -c user.name=smoke"
 

@@ -184,7 +184,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
   bash "$SOURCE_ROOT/install.sh" "$target" >/dev/null
   cfg="$target/.claude/skills/feature/config.sh"
   cp "$SRC_CONFIG" "$cfg"   # 실제 워커 설정 그대로 — TEST_CMD/LINT_CMD 와 CLI 실행 파일(래퍼)만 바꾼다
-  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$SCRATCH/bin/real-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$SCRATCH/bin/real-codex\"|" "$cfg"
+  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$SCRATCH/bin/real-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$SCRATCH/bin/real-codex\"|" "$cfg"
   rm -f "$cfg.bak"
   cp -R "$case_dir/base/." "$target/"
   (cd "$target" && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture)

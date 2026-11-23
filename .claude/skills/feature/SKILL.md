@@ -21,6 +21,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 | `NEED_DOCS(IMPL_DOCS_MISSING)`·`(SCOPE_MISSING)` · implementation.md/approach.md/feature-scope.json/implementation-units.json 작성·수정 전 | `references/impl-docs.md` + `references/phase0-design.md`(3번 conventions 대조·4번 material decision 확인·지목된 선례 확인 — 구현 문서도 이 절차를 쓴다) + worktree `conventions.md`(파일이 있는 경우) |
 | exit 2 `NEED_USER`(모든 reason) · exit 1 · 사용자 답을 기록하거나 문서를 고쳐 재실행하기 전 | `references/exit-states-resume.md` — 제목에 그 reason 이 든 절(`### … <reason> …`) 전체. 두 reason 이 한 절을 같이 쓰는 경우가 있다(`DEADLOCK`/`MAX_ROUNDS`, `TEST_RETRIES_EXHAUSTED`/`APPROVAL_STALE_REPEATED`). `WORKER_SESSION_*` 는 그 절에 더해 `references/pipeline-contracts.md` 의 worker stage 절도 읽는다 |
 | exit 0 `DONE` · `--finalize` 실행 전과 결과 처리 · 커밋 요청 | `references/done-finalize.md` |
+| exit 42 `NATIVE_AGENT_REQUIRED` · `NATIVE_RESULT_REJECTED` · `NATIVE_*`/`SESSION_CLI_MISMATCH` 중단 | `references/native-agent.md` |
 | worker 단계(unit·워커 세션), 역할 경계, `decisions.md` 태그·scope, 범위·변경 소유권, 계약 버전, 비용 보고, `WORKER_SESSION_*` | `references/pipeline-contracts.md` |
 
 - 러너는 멈출 때 `[SKILL REFERENCE]` 줄로 지금 읽을 파일의 절대 경로를 알려 준다(문서를 쓰는 반환에는 같은 줄의 `[CONVENTIONS]` 뒤에 worktree `conventions.md` 경로가 붙는다 — 그 파일이 없으면 붙지 않는다). 러너를 백그라운드 로그로 돌렸거나 출력을 `head`/`grep` 으로 줄여 읽었으면 이 줄을 반드시 찾아 그 파일들을 읽는다.
@@ -39,11 +40,12 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 - **자동 원복 금지(변경 소유권).** 범위 밖 변경·불확실한 워커 결과·기준선/manifest 변조는 보존하고 사용자에게 보고한다. `git restore`/`checkout --`/`reset --hard` 로 되돌리지 않는다. 워커·리뷰어·수정자는 파일 삭제 금지.
 - **자동 승인·임의 복구 금지.** 판정은 스키마 검증된 JSON(PASS/BLOCK, APPROVE/REQUEST_CHANGES, DONE/UNDECIDED)만 신뢰한다. "대충 통과 간주"·같은 프롬프트 재전송·세션 초기화·fresh 세션 강제를 하지 않는다. 마지막 APPROVE 뒤 코드가 바뀌면 재리뷰 없이 끝내지 않는다.
 - **커밋·푸시·finalize 는 각각 사용자의 명시적 지시가 있을 때만.** `DONE` 은 커밋도 원본 반영도 아니다. finalize 는 물어서 승인받은 뒤에만, 커밋은 finalize 와 별개로 요청받았을 때만. 워커·리뷰어·수정자는 커밋·푸시 금지.
+- **native Agent 의 보고는 판정이 아니다.** 러너가 준 dispatch 한 줄을 그대로 넘길 뿐이다 — 프롬프트·결과를 옮겨 적거나 요약하지 않고, 모델·Agent 를 바꾸지 않으며, 실패한 요청을 대신 수행하지 않는다(`references/native-agent.md`).
 - **유료 실모델 회귀는 사용자 승인 없이 실행하지 않는다.** `.claude/ALLOW_*` 플래그를 지시 없이 만들지 않는다.
 
 ## 실행
 
-사전 조건: `config.sh` 의 역할별 모델·effort·`TEST_CMD`·`LINT_CMD` 설정(선택: 리뷰 전 프로젝트 빠른 검사 `FAST_CHECK_CMD`, unit 별 정적 검사 `UNIT_CHECK_CMD`, 리뷰 승인 뒤 위험도별 추가 검증 `RISK_VERIFY_CMD` — `references/pipeline-contracts.md`), `claude`·`codex`·`jq`·`uuidgen`·`envsubst` 설치·로그인, 저장소 루트에서 실행.
+사전 조건: `config.sh` 의 역할별 모델·effort·`TEST_CMD`·`LINT_CMD` 설정(선택: 리뷰 전 프로젝트 빠른 검사 `FAST_CHECK_CMD`, unit 별 정적 검사 `UNIT_CHECK_CMD`, 리뷰 승인 뒤 위험도별 추가 검증 `RISK_VERIFY_CMD` — `references/pipeline-contracts.md`), `claude`·`codex`·`jq`·`uuidgen`·`envsubst` 설치·로그인(native Agent 로 도는 역할은 CLI 대신 `feature_native_agent.sh` 훅 등록이 필요), 저장소 루트에서 실행.
 
 ```bash
 bash <skill_dir>/scripts/feature-run.sh --feature <id>                        # 처음이든 재실행이든 항상 이 형태
@@ -69,6 +71,7 @@ bash <skill_dir>/scripts/feature-run.sh --feature <id> --contract-impact      # 
 | 2 | `NEED_USER` `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS` | 마지막 리뷰의 모든 blocker 를 그대로 전달 → `[escalation=<id>]` 답 기록 → 재실행 |
 | 2 | `NEED_USER` `UNDECIDED`/`REVIEW_DOC_GAP` | 미결정 항목을 그대로 전달 → 태그 답 기록 + approach.md 최소 동기화 → 재실행 |
 | 2 | `NEED_USER` 그 밖(`DOC_GAP_*`·`SCOPE_*`·`UNIT*`·`WORKER_*`·`REVIEW_OUTPUT_INVALID`·`FAST_CHECK_*`·`UNIT_CHECK_*`·`RISK_VERIFY_*` 등) | detail 을 보고하고 멈춘다. 되돌릴지·보존할지·재시작할지는 사용자가 정한다 |
+| 42 | `NATIVE_AGENT_REQUIRED` | 실패도 질문도 아니다. `references/native-agent.md` 절차대로 dispatch 한 줄을 `Agent`/`SendMessage` 에 **한 번** 넘기고, 완료 알림 뒤 같은 명령 재실행 |
 | 1 | `ENV_ERROR` | 원인 확인 후 재실행. 진행 금지 |
 | `--finalize` 0/2/1 | `FINALIZED` / `FINALIZE_CONFLICT`·`APPLIED_CLEANUP_INCOMPLETE` / 거부 | 결과 보고. 충돌은 자동 해결하지 않고 사용자에게 |
 

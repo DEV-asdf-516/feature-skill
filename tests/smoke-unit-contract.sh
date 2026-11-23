@@ -45,7 +45,7 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-must-not-run\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
+sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-must-not-run\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
 # 역할별 CLI 고정: 이 스모크는 CLI 규약이 아니라 상태 전이를 보므로 모든 역할을 mock claude 로 고정한다(쓰지 않는 codex 는 호출되면 실패하는 스텁)
 sed -i.bak 's/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/; s/^VALIDATOR_CLI=.*/VALIDATOR_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 printf '#!/usr/bin/env bash\necho "CODEX-CALLED $*" >> "%s/calls.log"; exit 9\n' "$TMP" > "$TMP/bin/codex-must-not-run"; chmod +x "$TMP/bin/codex-must-not-run"

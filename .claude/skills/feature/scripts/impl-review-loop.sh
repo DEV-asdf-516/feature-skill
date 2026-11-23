@@ -406,6 +406,10 @@ if [ "$invalid_resume" = 0 ] && [ -f "$RESUME_STATE" ]; then
             # 이 변경이 fix-diff 에 섞이면 귀속이 틀어진다 — 같은 attempt 를 잇지 않고 새 attempt Round 1 로.
             echo "[WARN] 수정자 완료 이후 추가 변경 감지 — 새 attempt 로 Round 1 부터 리뷰"
             attempt=""; round=1; next_step="REVIEWER_PENDING"; prev_review=""; prev_tree=""
+          elif [ "$next_step" = FIXER_PENDING ] && native_resume_active FIXER "impl-fix-a$(printf '%02d' "$attempt")-round-$(printf '%02d' "$round")"; then
+            # native Agent 수정자의 인계 요청이 진행 중이다(재실행 pass) — 작업 트리 변경은 그 Agent 의 결과일 수 있다. 건너뛰지 않고 호출 지점에서
+            # 캡처된 결과를 검증·수용한다(호출 전 index·manifest·기준선·지문은 요청에 저장된 값으로 기존 게이트를 그대로 적용).
+            echo "[$(date '+%F %T')] 수정자 native 요청 진행 중 — 호출 지점에서 결과를 확인한다"
           elif [ "$next_step" = FIXER_PENDING ] && [ "$ck_wt_fp" != "$cur_fix_fp" ]; then
             # 수정자가 코드나 decisions.md 를 일부 고친 뒤 죽었거나 사람이 손댔다(FIXER_PENDING 지문 = 작업 트리 + decisions.md).
             # 같은 수정을 다시 시키면 이중 수정·REJECT 중복 기록 위험.
@@ -429,6 +433,22 @@ fi
 # 무효 출력 재개(invalid_resume)는 그 판정(저장된 출력을 쓸 수 있는가)이 먼저다 — 아래 재개 판정을 지난 뒤 루프 진입 직전에 검사한다.
 if [ "$invalid_resume" = 0 ] && [ "$next_step" = REVIEWER_PENDING ]; then
   fast_check_gate "before-review round $round"
+fi
+
+# native Agent 리뷰어의 Round 1 재실행 pass: Round 1 은 결과를 받기 전까지 체크포인트가 없다(save_review_checkpoint 는 판정 뒤에만). 1차 실행이 attempt 디렉터리를
+# 만들고 요청을 발행한 뒤 exit 42 로 나갔으므로, 아래의 "비어 있는 다음 번호" 규칙을 그대로 타면 재실행이 attempt 를 하나 올려 다른 호출 지점이 되고
+# 진행 중인 요청과 어긋난다(NATIVE_PENDING_MISMATCH). 진행 중인 요청이 리뷰어의 Round 1 이면 그 요청의 attempt 를 그대로 잇는다 — 새 리뷰 시도를
+# 명시한 실행(--new-review-attempt)은 잇지 않는다(그때는 낡은 요청 위에서 새 호출을 하지 않도록 브리지가 멈춘다).
+if [ -z "$attempt" ] && [ "$NEW_ATTEMPT" != 1 ] && native_pending_present && [ "$(native_pending_field '.role')" = REVIEWER ]; then
+  native_review_label="$(native_pending_field '.slot' | cut -d'|' -f3)"
+  case "$native_review_label" in
+    impl-review-a[0-9][0-9]-round-01)
+      native_review_attempt="$((10#$(printf '%s' "$native_review_label" | sed -E 's/^impl-review-a([0-9]{2})-round-01$/\1/')))"
+      if [ -d "$WORK_DIR/reviews/impl-attempt-$(printf '%02d' "$native_review_attempt")" ]; then
+        attempt="$native_review_attempt"; round=1; next_step="REVIEWER_PENDING"
+        echo "[$(date '+%F %T')] 리뷰어 native 요청 진행 중(attempt $attempt round 1) — 같은 attempt 로 호출 지점에 돌아가 결과를 확인한다"
+      fi;;
+  esac
 fi
 
 # Phase 4 재진입마다 attempt 디렉터리를 새로 잡아 이전 승인·리뷰 증거를 보존한다 (체크포인트 재개 시엔 기존 attempt 유지)
@@ -536,6 +556,40 @@ if [ "$invalid_resume" = 1 ]; then
   [ -z "$prev_review" ] || prev_fingerprint_issues=$(jq -Sc '[.issues[] | {id, category, code_refs, required_outcome}] | sort_by(.id)' "$prev_review")
 fi
 
+# ---------- native 수정자 요청의 불변 입력 (NATIVE_INPUT_FP) ----------
+# 수정자 프롬프트는 계약 문서와 리뷰 JSON 을 '경로'로만 가리킨다 — 재실행 pass 의 프롬프트 해시 대조는 그 파일들의 내용 변경을 보지 못한다.
+# 그래서 요청 발행 때와 수용 직전에 같은 함수로 지문을 계산해 브리지가 대조한다(다르면 NATIVE_STALE_REQUEST).
+#   · 수정자가 읽기만 하는 계약 입력: request·design·implementation·approach 와 이번에 고칠 리뷰 JSON.
+#   · decisions.md: 수정자가 쓰는 유일한 문서다. 요청 발행 시점의 내용은 그대로 앞부분(prefix)으로 남아야 하고(append-only),
+#     뒤에 붙은 줄 중 수정자 권한 밖 기록 — 사용자 결정([USER-QUESTION]) 줄, 다른 라운드의 [fix round M] 줄 — 이 있으면 안 된다.
+#     이번 라운드의 [fix round N] ACCEPT/REJECT/DEFER 줄과 그 밖의 보고 메모는 지문을 바꾸지 않는다.
+# feature-scope.json·worker-baseline.tree·작업 트리는 넣지 않는다 — 호출 뒤의 기존 게이트(SCOPE_MANIFEST_CHANGED·SCOPE_BASELINE_CHANGED·SCOPE_VIOLATION)가 그대로 판정한다.
+# 위반 사유(없으면 빈 출력). bytes-before / sha-before = 요청 발행 시점 decisions.md 의 크기·내용 해시.
+fixer_decisions_violation() { # bytes-before sha-before round
+  local f="$WORK_DIR/decisions.md" before="$1" sha_before="$2" round="$3" size bad
+  [ -f "$f" ] || { printf 'decisions.md 가 없어졌다'; return 0; }
+  size="$(wc -c < "$f" | tr -d ' ')"
+  # BSD head 는 -c 0 을 오류로 거부한다 — 빈 prefix 는 따로 다룬다
+  if [ "$size" -lt "$before" ] || [ "$(if [ "$before" -gt 0 ]; then head -c "$before" "$f"; fi | sha256_stdin)" != "$sha_before" ]; then
+    printf 'decisions.md 의 기존 내용(요청 발행 시점의 앞 %s 바이트)이 바뀌었다 — 추가 기록만 허용된다' "$before"; return 0
+  fi
+  [ "$size" -gt "$before" ] || return 0
+  # 요청 발행 시점의 마지막 줄이 개행 없이 끝났는데 뒤에 내용이 붙었으면 그 줄이 바뀐 것이다
+  if [ "$before" -gt 0 ] && [ -n "$(head -c "$before" "$f" | tail -c 1)" ]; then
+    printf 'decisions.md 의 기존 마지막 줄(개행 없이 끝남)에 내용이 이어 붙었다 — 기존 줄 변경이다'; return 0
+  fi
+  bad="$(tail -c +"$((before + 1))" "$f" | { grep -E '^[[:space:]]*- \[USER-QUESTION\]' || true; } | head -1)"
+  [ -z "$bad" ] || { printf 'decisions.md 에 사용자 결정 줄이 추가됐다(수정자 권한 밖, 계약 변경): %s' "$bad"; return 0; }
+  bad="$(tail -c +"$((before + 1))" "$f" | { grep -E '^[[:space:]]*- \[fix round [0-9]+\]' || true; } | { grep -vE "^[[:space:]]*- \[fix round 0*$round\]" || true; } | head -1)"
+  [ -z "$bad" ] || { printf 'decisions.md 에 이번 라운드(%s)가 아닌 수정 기록이 추가됐다: %s' "$round" "$bad"; return 0; }
+}
+fixer_native_input_fingerprint() { # review-file bytes-before sha-before decisions-violation
+  {
+    printf 'fixer-native-input-v1\0%s\0%s\0%s\0' "$2" "$3" "$4"
+    _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$1"
+  } | sha256_stdin
+}
+
 # 저장된 리뷰 출력을 재사용하는 재개(리뷰어 0회)도 검사를 지난 코드에만 적용한다 — 위에서 이미 검사한 실행은 다시 하지 않는다
 if [ "$next_step" = REVIEWER_PENDING ] && [ "$fast_check_gated" = 0 ]; then
   fast_check_gate "before-review round $round (stored output)"
@@ -585,8 +639,11 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   if [ "$reuse_review" = 1 ]; then
     echo "--- 리뷰어 호출 생략: 저장된 출력 재사용 ($review, invocation $(invalid_review_field '.invocation_id')) ---"
   else
+    # native Agent: 1차는 요청 발행 후 exit 42, 재실행 pass 는 캡처된 결과를 물질화해 돌아온다. 요청 발행 뒤 리뷰 입력(승인 지문·계약 문서)이 바뀌었으면 브리지가 불수용한다.
+    NATIVE_INPUT_FP="$review_fingerprint|$(printf '%s' "$review_docs" | sha256_stdin)"
     run_readonly_json_role REVIEWER "reviewer-a$attempt_tag" "impl-review-a$attempt_tag-round-$tag" "$SCHEMA_FILE" "$review" "$reviewer_prompt" "$PROJECT_CONVENTIONS" \
       || exit 1
+    NATIVE_INPUT_FP=""
   fi
   # 출력 계약 검사: 스키마 → 버전 → origin/ref → verdict 일관성. 위반은 '재리뷰 예약'이 아니라 REVIEW_OUTPUT_INVALID 다 —
   # 원본 결과·이벤트·invocation id 를 그대로 두고 구조화 진단을 기록한 뒤 exit 4. 세션을 수용하지 않고 수정자도 부르지 않는다.
@@ -685,21 +742,44 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   # 리뷰와 다른 세션을 이어간다 — 실행 비용은 캐시로 줄이되 승인 독립성은 유지
   echo "--- 수정자가 FIX_CODE 이슈($(basename "$prev_review"))를 수정합니다 ---"
   touch "$WORK_DIR/decisions.md"
-  decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
   fix_result="$ATTEMPT_DIR/fixer-round-$tag.raw"
-  index_before=$(compute_index_fingerprint) || { echo "[FAIL] 수정자 호출 전 git index 지문 계산 실패" >&2; exit 1; }
-  scope_hash_before=$(feature_scope_hash)
   # 소유권 기준선은 시작 시 읽은 BASELINE_TREE 를 쓴다(호출 후 파일을 다시 읽지 않는다). 파일 자체가 바뀌었는지도 본다.
-  baseline_file_before=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_before="$(cat "$WORK_DIR/worker-baseline.tree")"
   fixer_prompt="$(REVIEW_FILE="$prev_review" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" ROUND="$round" BASELINE_TREE="$BASELINE_TREE" CONVENTIONS_FILE="$CONVENTIONS_REF" \
       render_prompt "$SKILL_DIR/prompts/fixer.md" '${REVIEW_FILE} ${WORK_DIR} ${TEST_CMD} ${ROUND} ${BASELINE_TREE} ${CONVENTIONS_FILE}')"
   # 호출 전 지문(작업 트리 범위 + decisions.md). rc≠0 이어도 허용 범위 안 변경이 있으면 같은 수정자를 다시 부르지 않는다.
-  fix_fp_before="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 전 지문 계산 실패" >&2; exit 1; }
+  # 호출 전 상태. native Agent 재실행 pass 에서는 Agent 가 이미 코드를 고친 뒤이므로 다시 재지 않고 요청 발행 때 저장한 값을 쓴다 — 아래 index·manifest·기준선·지문 게이트의 기준이 그대로다.
+  if native_resume_active FIXER "impl-fix-a$attempt_tag-round-$tag"; then
+    decisions_lines_before="$(native_pre_get decisions_lines_before)" && index_before="$(native_pre_get index_before)" && scope_hash_before="$(native_pre_get scope_hash_before)" \
+      && baseline_file_before="$(native_pre_get baseline_file_before)" && fix_fp_before="$(native_pre_get fix_fp_before)" \
+      && decisions_bytes_before="$(native_pre_get decisions_bytes_before)" && decisions_sha_before="$(native_pre_get decisions_sha_before)" \
+      || { echo "[FAIL] 수정자 native 요청에 호출 전 상태가 없음: $(native_request_file)" >&2; exit 1; }
+  else
+    decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
+    index_before=$(compute_index_fingerprint) || { echo "[FAIL] 수정자 호출 전 git index 지문 계산 실패" >&2; exit 1; }
+    scope_hash_before=$(feature_scope_hash)
+    baseline_file_before=""; [ -f "$WORK_DIR/worker-baseline.tree" ] && baseline_file_before="$(cat "$WORK_DIR/worker-baseline.tree")"
+    fix_fp_before="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 전 지문 계산 실패" >&2; exit 1; }
+    decisions_bytes_before="$(wc -c < "$WORK_DIR/decisions.md" | tr -d ' ')"
+    decisions_sha_before="$(sha256_stdin < "$WORK_DIR/decisions.md")" || { echo "[FAIL] 수정자 호출 전 decisions.md 해시 계산 실패" >&2; exit 1; }
+    native_pre_begin FIXER && native_pre_put decisions_lines_before "$decisions_lines_before" && native_pre_put index_before "$index_before" \
+      && native_pre_put scope_hash_before "$scope_hash_before" && native_pre_put baseline_file_before "$baseline_file_before" \
+      && native_pre_put fix_fp_before "$fix_fp_before" && native_pre_put decisions_bytes_before "$decisions_bytes_before" \
+      && native_pre_put decisions_sha_before "$decisions_sha_before" || { echo "[FAIL] 수정자 호출 전 상태 기록 실패" >&2; exit 1; }
+  fi
+  # native: 요청 발행 때와 수용 직전(재실행 pass)에 불변 입력 지문을 같은 함수로 계산한다 — Agent 가 도는 동안 계약 문서·리뷰 JSON 이 바뀌었거나
+  # decisions.md 의 기존 내용이 바뀌었거나 수정자 권한 밖 기록이 붙었으면 브리지가 NATIVE_STALE_REQUEST 로 불수용한다. 다른 backend 는 이 값을 쓰지 않는다.
+  NATIVE_INPUT_FP=""; NATIVE_INPUT_FP_DETAIL=""
+  if [ "$(role_backend FIXER)" = claude_native ]; then
+    NATIVE_INPUT_FP_DETAIL="$(fixer_decisions_violation "$decisions_bytes_before" "$decisions_sha_before" "$round")" || { echo "[FAIL] 수정자 decisions.md 기록 검사 실패" >&2; exit 1; }
+    NATIVE_INPUT_FP="$(fixer_native_input_fingerprint "$prev_review" "$decisions_bytes_before" "$decisions_sha_before" "$NATIVE_INPUT_FP_DETAIL")" \
+      || { echo "[FAIL] 수정자 native 요청의 입력 지문 계산 실패" >&2; exit 1; }
+  fi
   set +e
   # 수정자 CLI 는 FIXER_MODEL 로 라우팅(codex 는 --sandbox workspace-write, claude 는 acceptEdits + Bash 허용).
   run_edit_role FIXER "fixer-a$attempt_tag" "impl-fix-a$attempt_tag-round-$tag" "$fix_result" "$fixer_prompt" "$PROJECT_CONVENTIONS" "" "" --allowedTools "Bash"
   fixer_rc=$?
   set -e
+  NATIVE_INPUT_FP=""; NATIVE_INPUT_FP_DETAIL=""
   # codex resume marker 는 "호출이 스레드에 도달했는지 모른다"를 막는 장치다 — CLI 가 반환된 지금은 해소됐다(워커와 같은 편집 역할 의미).
   # 결과 판정은 아래 index·manifest·기준선·write-set·지문 게이트가 하고, 게이트 중단 뒤의 재실행은 같은 스레드의 '의도된 새 턴'이다.
   # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다. 리뷰어(읽기 전용) marker 는 건드리지 않는다.)

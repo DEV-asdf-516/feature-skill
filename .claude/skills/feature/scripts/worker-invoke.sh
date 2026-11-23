@@ -60,6 +60,21 @@ worker_contract_fingerprint() {
   } | sha256_stdin
 }
 
+# native 워커 요청의 불변 입력 지문(NATIVE_INPUT_FP): 워커가 읽기만 하는 계약 입력 — 합의 문서·사용자 결정·범위·unit 선언·앞 unit 확정 사실·워커 규칙(core_rules +
+# conventions 계약 내용 + WORKER_SKILLS)·워커 프롬프트·결과 스키마. 요청 발행 때와 재실행 pass 의 수용 직전에 같은 함수로 계산해 브리지가 대조한다
+# (재실행 pass 는 프롬프트를 다시 조립하지 않으므로 prompt 해시 대조가 없다 — 이 지문이 '요청 뒤 계약이 바뀌었는가'의 유일한 판정이다).
+# 워커가 정상적으로 바꾸는 소스 파일은 넣지 않는다. 범위 안 conventions.md 는 계약 내용(워커 기준선)으로 들어가므로 워커가 그 파일을 고쳐도 지문은 그대로다.
+worker_native_input_fingerprint() { # [unit-dir]
+  local contract
+  contract="$(worker_contract_fingerprint)" || return 1
+  {
+    printf 'worker-native-input-v1\0%s\0' "$contract"
+    _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/decisions.md" \
+      "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json"
+    [ -z "${1:-}" ] || _fingerprint_files "$1/unit.json" "$1/scope.json" "$IMPL_CONTEXT_FILE"
+  } | sha256_stdin
+}
+
 worker_session_set_id() { # session-id — 확정(수용)된 세션 ID 반영이므로 결속 상태도 함께 true 가 된다
   local journal="$WORK_DIR/worker-session.json"
   jq --arg id "$1" '.session_id=$id | .session_bound=true' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal"
@@ -109,10 +124,13 @@ maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree
   local threshold="${WORKER_SESSION_ROTATE_INPUT_TOKENS:-0}" observed next="" u old_gen new_gen fp
   case "$threshold" in ''|*[!0-9]*) env_error "WORKER_SESSION_ROTATE_INPUT_TOKENS 가 정수가 아님: '$threshold'";; esac
   [ "$threshold" -gt 0 ] || return 0
-  local cli ledger; cli="$(role_cli WORKER)" || return 0
+  local cli ledger nledger; cli="$(role_cli WORKER)" || return 0
   ledger="$(codex_session_ledger "$FEATURE_WORKER_SESSION")"
+  # native Agent 워커: 세션 기록은 typed 원장(.session-<key>.native.json)이고 usage 행의 cli 값도 claude_native 다 — 아래 판정·은퇴가 세 번째 종류로 다룬다.
+  nledger="$(native_session_ledger "$FEATURE_WORKER_SESSION")"
+  [ "$(role_backend WORKER)" != claude_native ] || cli=claude_native
   [ -f "$journal" ] || return 0
-  case "$cli" in claude) [ -f "$sid_file" ] || return 0;; codex) [ -f "$ledger" ] || return 0;; *) return 0;; esac
+  case "$cli" in claude) [ -f "$sid_file" ] || return 0;; codex) [ -f "$ledger" ] || return 0;; claude_native) [ -f "$nledger" ] || return 0;; *) return 0;; esac
   # 이 unit 에서 이 프로세스가 실제로 부른 마지막 워커 호출의 행만 본다 — 재개(워커 미호출)나 label 부재면 이전 unit 값을 재사용하지 않고 유지
   local label_file="$WORK_DIR/units/$1/last-usage-label" label=""
   [ -f "$label_file" ] && label="$(cat "$label_file")"
@@ -160,6 +178,7 @@ maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree
   case "$cli" in
     claude) mv "$sid_file" "$sid_file.gen$old_gen" || env_error "세션 파일 보존 실패";;
     codex)  mv "$ledger" "$ledger.gen$old_gen" || env_error "codex 세션 원장 보존 실패";;
+    claude_native) mv "$nledger" "$nledger.gen$old_gen" || env_error "native Agent 세션 원장 보존 실패";;   # 다음 호출은 원장이 없어 NEW Agent 요청을 낸다(handoff 검증 뒤)
   esac
   jq --argjson gen "$new_gen" '.generation=$gen | .session_id=null | .session_bound=false' "$journal" > "$journal.tmp" && mv "$journal.tmp" "$journal" \
     || env_error "worker-session.json 세대 갱신 실패"
@@ -196,8 +215,9 @@ worker_handoff_gate_for_fresh() { # journal contract_fingerprint
 }
 ensure_feature_worker_session() {
   local journal="$WORK_DIR/worker-session.json" sid_file="$WORK_DIR/.session-$FEATURE_WORKER_SESSION"
-  local cli model effort fp legacy jsid
+  local cli model effort fp legacy jsid backend
   cli="$(role_cli WORKER)" || env_error "WORKER CLI 라우팅 실패"
+  backend="$(role_backend WORKER)" || env_error "WORKER backend 라우팅 실패"
   model="$(role_model WORKER)"; effort="$(role_effort WORKER)"
   fp="$(worker_contract_fingerprint)" || env_error "워커 세션 계약 지문 계산 실패 — 워커 규칙 또는 필수 워커 스킬(WORKER_SKILLS) 로드 실패"
   if [ ! -f "$journal" ]; then
@@ -211,24 +231,44 @@ ensure_feature_worker_session() {
         stop_need_user WORKER_SESSION_MISSING "완료된 unit 체크포인트가 있는데 worker-session.json 이 없다(이 변경 이전의 fresh-워커 실행이거나 저널 삭제) — 자동으로 fresh 세션을 만들어 잇지 않는다. --new 로 새로 시작하거나, 이어 돌리려면 사용자가 $WORK_DIR/worker-session.migrate 파일을 만들고 재실행"
       fi
     fi
-    jq -n --arg session "$FEATURE_WORKER_SESSION" --arg cli "$cli" --arg model "$model" --arg effort "$effort" \
+    jq -n --arg session "$FEATURE_WORKER_SESSION" --arg cli "$cli" --arg backend "$backend" --arg model "$model" --arg effort "$effort" \
       --arg fp "$fp" --arg now "$(date '+%FT%T%z')" --argjson v "$WORKER_SESSION_VERSION" \
-      '{version:$v, session:$session, cli:$cli, model:$model, effort:$effort, contract_fingerprint:$fp,
+      '{version:$v, session:$session, cli:$cli, backend:$backend, model:$model, effort:$effort, contract_fingerprint:$fp,
         generation:1, session_bound:false, session_id:null, last_completed_unit_id:null, last_completed_tree:null, created_at:$now}' \
       > "$journal.tmp" && mv "$journal.tmp" "$journal" || env_error "worker-session.json 기록 실패"
-    log "Feature Worker 세션 저널 생성: $journal (cli $cli, $model/$effort)"
+    log "Feature Worker 세션 저널 생성: $journal (cli $cli, backend $backend, $model/$effort)"
     return 0
   fi
   jq -e --argjson v "$WORKER_SESSION_VERSION" '.version==$v' "$journal" >/dev/null 2>&1 \
     || stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 버전이 다르다(기대 $WORKER_SESSION_VERSION) — 다른 형식의 세션 저널을 해석하지 않는다. --new 또는 사용자 정리 후 재실행"
   local mism
-  mism="$(jq -r --arg cli "$cli" --arg model "$model" --arg effort "$effort" --arg fp "$fp" \
+  # backend 필드는 저널 포맷의 호환 확장이다(버전 불변): 없는 저널은 cli 에서 유도한다(claude → claude_cli, codex → codex_cli). 그래서 `claude -p` 로
+  # 진행 중이던 피처를 native 로 바꿔 실행하면 여기서 멈춘다 — 묵시적 마이그레이션 없음.
+  mism="$(jq -r --arg cli "$cli" --arg backend "$backend" --arg model "$model" --arg effort "$effort" --arg fp "$fp" \
     '[ (select(.cli!=$cli)       | "cli \(.cli)→\($cli)"),
+       ((.backend // (if .cli=="codex" then "codex_cli" else "claude_cli" end)) as $jb | select($jb!=$backend) | "backend \($jb)→\($backend)"),
        (select(.model!=$model)   | "model \(.model)→\($model)"),
        (select(.effort!=$effort) | "effort \(.effort)→\($effort)"),
        (select(.contract_fingerprint!=$fp) | "워커 규칙·프롬프트 계약 지문") ] | join(", ")' "$journal")"
   [ -z "$mism" ] || stop_need_user WORKER_SESSION_MISMATCH "Feature Worker 세션 전제가 저널(worker-session.json)과 다르다($mism) — 다른 전제의 세션을 자동 resume 하지 않고 자동으로 새 세션을 만들지도 않는다. 설정·규칙을 피처 시작 시점으로 되돌려 재실행하거나, 의도한 변경이면 --new(또는 사용자가 재시작 방식을 명시)"
-  if [ "$cli" = claude ]; then
+  if [ "$backend" = claude_native ]; then
+    # native Agent: agent id 는 원장(.session-<key>.native.json) 한 곳에서만 관리한다 — codex 와 같은 불변식(저널의 결속 여부 ↔ 원장 존재).
+    local nledger nbound
+    nledger="$(native_session_ledger "$FEATURE_WORKER_SESSION")"
+    nbound="$(jq -r '.session_bound // false' "$journal")"
+    if [ "$nbound" = true ] && [ ! -f "$nledger" ]; then
+      stop_need_user WORKER_SESSION_MISMATCH "worker-session.json 은 session_bound=true 인데 native Agent 세션 원장($nledger)이 없다 — 수용된 세션이 소실됐다. 자동으로 fresh Agent 를 만들지 않는다. 원장을 복구하거나 --new(또는 사용자가 재시작 방식을 명시)"
+    elif [ "$nbound" != true ] && [ -f "$nledger" ]; then
+      stop_need_user WORKER_SESSION_MISMATCH "native Agent 세션 원장($nledger)은 확정돼 있는데 worker-session.json 은 미결속(session_bound=false)이다 — 불일치 위에서 자동 재개도 자동 fresh 도 하지 않는다. 원장과 저널을 확인한 뒤 사용자가 정리하고 재실행(--new 포함)"
+    elif [ "$nbound" = true ]; then
+      # 그 Agent 는 그것을 만든 메인 Claude Code 세션에서만 재개할 수 있다. 세션이 바뀌었으면(/clear·새 대화) 조용히 새 Agent 로 잇지 않는다.
+      if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && [ "$(jq -r '.parent_session_id // ""' "$nledger")" != "$CLAUDE_CODE_SESSION_ID" ]; then
+        stop_need_user WORKER_SESSION_MISMATCH "Feature Worker Agent($(jq -r '.agent_id' "$nledger"))는 메인 세션 $(jq -r '.parent_session_id' "$nledger") 에 결속돼 있는데 지금 메인 세션은 $CLAUDE_CODE_SESSION_ID 다 — 다른 세션에서는 그 Agent 를 재개할 수 없다. 묵시적 fresh Agent 를 만들지 않는다. 원래 세션을 재개해 재실행하거나, 사용자가 재시작 방식(--new 등)을 명시하라"
+      fi
+    else
+      worker_handoff_gate_for_fresh "$journal" "$fp"
+    fi
+  elif [ "$cli" = claude ]; then
     jsid="$(jq -r '.session_id // ""' "$journal")"
     if [ -n "$jsid" ]; then
       [ -f "$sid_file" ] && [ "$(cat "$sid_file")" = "$jsid" ] \
@@ -344,6 +384,17 @@ run_worker() { # prompt-file [unit-dir]
     # 전체 호출이지만 다른 RUN_TAG(review-gap): 결과·tree 를 태그 이름으로 남겨 unit 결과를 합친 worker-result.json 을 덮어쓰지 않는다
     out_dir="$WORK_DIR/reviews"; result="$WORK_DIR/$tag-result.json"; tree_prefix="$WORK_DIR/$tag"
   fi
+  # ---------- native Agent 인계: 호출 지점 식별과 재실행 pass 판정 ----------
+  # native 로 라우팅된 워커 호출은 두 번의 러너 실행에 걸친다(scripts/native-agent-bridge.sh): 1차는 요청을 발행하고 exit 42, 재실행 pass 는 캡처된 결과를 받는다.
+  # 재실행 pass 에서는 Agent 가 이미 작업 트리를 바꾼 뒤다 — 아래 '호출 전' 구간(가드·세션 전제·프롬프트 조립·호출 전 지문/tree)을 다시 돌리면
+  # 호출 전 기준이 Agent 의 변경으로 덮여 index·manifest·기준선·write-set 게이트가 무력화되고, 재개 판정들이 '호출 중 중단'으로 오판한다.
+  # 그래서 1차 실행이 요청에 저장한 호출 전 상태(native_pre_put)를 그대로 복원해 호출 뒤 게이트를 원래 기준으로 돌린다. 다른 backend 는 종전 경로 그대로다.
+  NATIVE_SLOT_SCOPE="${unit_id:-${NATIVE_WORKER_SITE:-feature}}"
+  local native_resume=0
+  local stamp="" raw="" index_before="" index_after worker_rc before_tree="" after_tree violations scope_hash_before="" scope_hash_after baseline_before="" baseline_after units_hash_before=""
+  local gap_context="${GAP_CONTEXT:-}" resolved_gaps=""
+  if native_resume_active WORKER "$tag"; then native_resume=1; fi
+  if [ "$native_resume" -eq 0 ]; then
   # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
   require_baseline_guard_resolved \
     || stop_need_user SCOPE_BASELINE_CHANGED "worker-baseline.tree 가 직전 중단 시점의 기대값($(jq -r .expected "$BASELINE_GUARD"))으로 복구되지 않음 — 되돌린 뒤 재실행. 자동 복구 없음"
@@ -417,7 +468,7 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   if [ -n "$unit_dir" ]; then impl_context="$(cat "$IMPL_CONTEXT_FILE")" || env_error "implementation-context.json 읽기 실패"; fi
   # REVIEW_FILE / GAP_CONTEXT 는 review-gap 호출(worker-review-gap.md)에서 호출자가 채운다. [Modified] unit 워커 턴(worker-unit.md)에서는
   # 이 unit 의 해결된 미결정(doc-gap-resume.json ↔ decisions.md, ID 연결)만 GAP_CONTEXT 로 들어가고 그 외(정상 최초 호출)는 빈 문자열이다.
-  local gap_context="${GAP_CONTEXT:-}" resolved_gaps="" unit_turn="" changed_contract="" uc_rc=0
+  local unit_turn="" changed_contract="" uc_rc=0
   if [ -n "$unit_dir" ]; then
     rm -f "$unit_dir/resolved-gaps.json"
     if [ "$tag" = worker ]; then
@@ -450,10 +501,9 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
     UNIT_TURN="$unit_turn" CHANGED_CONTRACT="$changed_contract" \
     render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT} ${UNIT_TURN} ${CHANGED_CONTRACT}')" \
     || env_error "워커 프롬프트 렌더링 실패"
-  local stamp raw; stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
+  stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
   mkdir -p "$out_dir"
   rm -f "$result"
-  local index_before index_after worker_rc before_tree after_tree violations scope_hash_before scope_hash_after baseline_before baseline_after units_hash_before=""
   index_before="$(compute_index_fingerprint)" || env_error "워커 호출 전 git index 지문 계산 실패"
   scope_hash_before="$(feature_scope_hash)"
   [ -z "$unit_dir" ] || units_hash_before="$(units_manifest_hash)"
@@ -462,11 +512,35 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   [ -n "$baseline_before" ] || log "[WARN] worker-baseline.tree 없음 — new_file_roots 아래는 신규 생성(A)만 허용하는 규칙으로 검사"
   before_tree="$(snapshot_worktree_tree)" || env_error "워커 호출 전 tree 스냅샷 실패"
   printf '%s\n' "$before_tree" > "$tree_prefix-before.tree"
+  # native 로 라우팅되면 아래 run_edit_role 이 요청을 발행하고 exit 42 로 나간다 — 호출 전 상태를 요청에 실어 재실행 pass 가 복원하게 한다(다른 backend 에서는 no-op).
+  native_pre_begin WORKER && native_pre_put stamp "$stamp" && native_pre_put raw "$raw" && native_pre_put index_before "$index_before" \
+    && native_pre_put scope_hash_before "$scope_hash_before" && native_pre_put units_hash_before "$units_hash_before" \
+    && native_pre_put baseline_before "$baseline_before" && native_pre_put before_tree "$before_tree" && native_pre_put resolved_gaps "$resolved_gaps" \
+    && native_pre_put doc_gap_review "${DOC_GAP_REVIEW:-}" || env_error "워커 호출 전 상태 기록 실패(native 요청)"
+  else
+    # 재실행 pass: 호출 전 구간을 건너뛰고 요청에 저장된 값으로 복원한다. 프롬프트는 다시 조립하지 않는다(요청의 payload 가 Agent 가 받은 원문이다).
+    stamp="$(native_pre_get stamp)" && raw="$(native_pre_get raw)" && index_before="$(native_pre_get index_before)" \
+      && scope_hash_before="$(native_pre_get scope_hash_before)" && units_hash_before="$(native_pre_get units_hash_before)" \
+      && baseline_before="$(native_pre_get baseline_before)" && before_tree="$(native_pre_get before_tree)" && resolved_gaps="$(native_pre_get resolved_gaps)" \
+      && DOC_GAP_REVIEW="$(native_pre_get doc_gap_review)" \
+      || env_error "워커 native 요청에 호출 전 상태가 없음: $(native_request_file) — 요청을 손으로 고치지 않는다"
+    [ -n "$before_tree" ] && [ "$(cat "$tree_prefix-before.tree" 2>/dev/null)" = "$before_tree" ] \
+      || env_error "워커 native 요청의 호출 전 tree($before_tree)와 $tree_prefix-before.tree 가 다르다 — 재실행 pass 의 기준을 확정할 수 없다(자동 복구 없음)"
+    prompt=""
+    log "워커${unit_id:+ (unit $unit_id)} [$tag]: native 요청 재실행 pass — 호출 전 상태를 요청($(native_request_field '.request_id'), state $(native_request_field '.state'))에서 복원(호출 전 tree $before_tree)"
+  fi
+  # native: 요청 발행 때와 수용 직전(재실행 pass)에 불변 입력 지문을 같은 함수로 계산한다 — 워커가 도는 동안 approach.md·decisions.md·conventions 등이 바뀌었으면
+  # 브리지가 NATIVE_STALE_REQUEST 로 불수용한다(옛 계약에 대한 결과). 다른 backend 는 이 값을 쓰지 않는다.
+  NATIVE_INPUT_FP=""
+  if [ "$(role_backend WORKER)" = claude_native ]; then
+    NATIVE_INPUT_FP="$(worker_native_input_fingerprint "$unit_dir")" || env_error "워커 native 요청의 입력 지문 계산 실패"
+  fi
   set +e
   # 워커 CLI 는 WORKER_MODEL 로 라우팅. 프롬프트에 conventions·core_rules 가 이미 있으므로 conventions 는 "".
   run_edit_role WORKER "$session" "$tag-$stamp" "$raw" "$prompt" "" "$WORKER_SCHEMA" "$result" --allowedTools "Bash"
   worker_rc=$?
   set -e
+  NATIVE_INPUT_FP=""
   # [Added] CLI 의 실제 종료 코드와 claude result 판정 진단은 따로 보존한다 — result 가 유일하지 않으면 worker_rc 는 실패지만 cli_rc 는 CLI 값 그대로다
   local cli_rc="${RUN_EDIT_ROLE_CLI_RC:-$worker_rc}" result_diag="${RUN_EDIT_ROLE_RESULT_DIAG:-}"
   # 세션 교체 판단이 '이 unit 의 이 호출' usage 행만 보도록 label 을 남긴다(usage.jsonl 의 마지막 WORKER 행 = 이전 unit 일 수 있다)

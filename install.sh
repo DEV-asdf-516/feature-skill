@@ -81,7 +81,8 @@ trap 'rm -rf "$TARGET_SKILL_DIR"/.install-stage-* 2>/dev/null' EXIT
 # 1단계: 다섯 항목 전부 스테이징 성공 후에만 2단계 교체 시작 (혼합 버전 방지)
 # references/ 는 SKILL.md 가 분기 직전에 읽으라고 가리키는 상세 지침이다 — SKILL.md 만 새 버전이고 references/ 가 없거나 일부만 있으면
 # 오케스트레이터가 요약만으로 진행하게 되므로 같은 스테이징 단위로 묶는다(구버전 설치의 업데이트에서는 references/ 가 새로 생긴다).
-SKILL_ENTRIES="SKILL.md prompts schemas scripts references"
+# agents/ 는 native Agent 정의 템플릿이다(scripts/native-agent-bridge.sh 가 config.sh 의 모델·effort 로 렌더링해 .claude/agents/ 에 쓴다) — 브리지와 같은 스테이징 단위다.
+SKILL_ENTRIES="SKILL.md prompts schemas scripts references agents"
 for skill_entry in $SKILL_ENTRIES; do
   stage_path="$TARGET_SKILL_DIR/.install-stage-$skill_entry"
   rm -rf "$stage_path"
@@ -107,7 +108,7 @@ for skill_entry in $SKILL_ENTRIES; do
   mv "$TARGET_SKILL_DIR/.install-stage-$skill_entry" "$TARGET_SKILL_DIR/$skill_entry"
 done
 chmod +x "$TARGET_SKILL_DIR/scripts/"*.sh
-echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/, references/)"
+echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/, references/, agents/)"
 install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_SKILL_DIR/config.sh"
 # 선택 설정 안내: 보존된 기존 config.sh 에 프로젝트 빠른 검사 설정 줄이 없으면(이 기능 이전의 설치) 미설정으로 그대로 동작한다.
 # 헬퍼는 scripts/fast-check.sh 에 있어 config.sh 본문 병합이 필요 없다(런타임 계약 표식 불변) — 필수 작업이 아니므로 manual_steps 로 세지 않는다.
@@ -127,7 +128,8 @@ fi
 TARGET_CLAUDE_HOOKS="$TARGET_ROOT/.claude/hooks"
 mkdir -p "$TARGET_CLAUDE_HOOKS"
 # compact_recovery.sh: SessionStart(compact) — 컨텍스트 압축 직후 스킬 참조 문서·conventions 재확인 지침(inject_conventions.sh 의 세션당 1회 정책 보완)
-for hook_script in inject_conventions.sh pre_bash_guard.sh compact_recovery.sh; do
+# feature_native_agent.sh: native Agent 인계의 dispatch 검증·프롬프트 주입(PreToolUse)·원문 결과 캡처(SubagentStop). CLAUDE_BACKEND=native 일 때 필수다.
+for hook_script in inject_conventions.sh pre_bash_guard.sh compact_recovery.sh feature_native_agent.sh; do
   install_user_editable "$SOURCE_ROOT/.claude/hooks/$hook_script" "$TARGET_CLAUDE_HOOKS/$hook_script"
 done
 # 마이그레이션: 옛 inject_conventions.sh 는 매 UserPromptSubmit 마다 conventions.md 전체를 주입하고 파이프라인 child Claude 에도
@@ -138,7 +140,7 @@ if ! grep -q 'FEATURE_ROLE_CHILD' "$TARGET_CLAUDE_HOOKS/inject_conventions.sh"; 
   echo "       (커스터마이즈가 없다면 그대로 덮어써도 됩니다: 세션당 1회 주입 + FEATURE_ROLE_CHILD=1 이면 미주입)."
   manual_steps=1
 fi
-chmod +x "$TARGET_CLAUDE_HOOKS/compact_recovery.sh"
+chmod +x "$TARGET_CLAUDE_HOOKS/compact_recovery.sh" "$TARGET_CLAUDE_HOOKS/feature_native_agent.sh"
 install_user_editable "$SOURCE_ROOT/.claude/hooks/core_rules.md" "$TARGET_CLAUDE_HOOKS/core_rules.md"
 
 # ---------- 3. .claude/settings.json — 없으면 복사, 있으면 검사만 ----------
@@ -156,7 +158,9 @@ else
   # 이벤트 + 실제 command 문자열이 소스와 정확히 일치해야 등록으로 인정
   # (contains 검사는 "echo disabled ...guard.sh" 같은 비활성 문자열도 통과시킨다)
   # SessionStart:compact_recovery.sh — 미등록이면 압축 뒤 복구 지침이 주입되지 않는다. 조용히 정상으로 보고하지 않고 추가할 항목을 출력한다.
-  for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh" "SessionStart:compact_recovery.sh"; do
+  # feature_native_agent.sh 세 이벤트 — 하나라도 빠지면 native 요청이 dispatch 되지 않거나(PreToolUse) 실행이 확인되지 않거나(PostToolUse — DISPATCHING 에 머문다) 결과가 캡처되지 않는다(SubagentStop). 러너는 그 경우 CLI 로 대체하지 않고 대기·중단한다.
+  for hook_entry in "UserPromptSubmit:inject_conventions.sh" "PreToolUse:pre_bash_guard.sh" "SessionStart:compact_recovery.sh" \
+      "PreToolUse:feature_native_agent.sh" "PostToolUse:feature_native_agent.sh" "SubagentStop:feature_native_agent.sh"; do
     hook_event="${hook_entry%%:*}"; hook_script="${hook_entry#*:}"
     # 같은 이벤트에 훅이 여러 개일 수 있으므로 스크립트 이름으로 해당 항목 하나만 고른다(여러 줄 비교로 항상 실패하던 버그 수정).
     expected_command="$(jq -r --arg event "$hook_event" --arg script "/$hook_script" \
@@ -179,6 +183,20 @@ else
       manual_steps=1
     fi
   done
+fi
+
+# ---------- 3.5 native Agent 정의 (.claude/agents/feature-<역할>.md) ----------
+# 정의 파일은 설치 때 만들지 않는다 — model·effort 가 config.sh 값이어야 하므로 러너가 매 요청 직전에 렌더링·대조해 쓴다(관리 표식이 있는 파일만 갱신).
+# 같은 이름의 사용자 파일(관리 표식 없음)이 이미 있으면 러너가 덮어쓰지 않고 멈추므로 여기서 미리 알린다.
+for agent_template in "$TARGET_SKILL_DIR"/agents/feature-*.md; do
+  agent_target="$TARGET_ROOT/.claude/agents/$(basename "$agent_template")"
+  if [ -f "$agent_target" ] && ! grep -q 'managed-by: feature-skill native-agent' "$agent_target"; then
+    echo "[WARN] $agent_target 는 이 스킬이 관리하는 파일이 아닙니다(관리 표식 없음). CLAUDE_BACKEND=native 로 쓰려면 다른 이름으로 옮기세요 — 러너는 덮어쓰지 않고 중단합니다."
+    manual_steps=1
+  fi
+done
+if ! grep -q '^CLAUDE_BACKEND=' "$TARGET_SKILL_DIR/config.sh"; then
+  echo "[INFO] $TARGET_SKILL_DIR/config.sh 에 CLAUDE_BACKEND 줄이 없습니다 — 종전대로 claude 모델을 'claude -p' 로 실행합니다(legacy_cli). native Agent 로 바꾸려면 config.sh.new 의 'Claude 모델의 실행 backend' 블록을 옮겨 적으세요(진행 중인 피처가 없을 때)."
 fi
 
 # ---------- 4. Codex 훅 ----------

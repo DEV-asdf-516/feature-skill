@@ -224,6 +224,10 @@ if [ -f "$RESUME_STATE" ]; then
           # 상위 입력(request/design/사용자 결정)이 바뀌었다 — 저장된 리뷰는 옛 입력에 대한 것이라 무효
           echo "[$(date '+%F %T')] 상위 입력 문서 변경 감지 — 저장된 리뷰 무효, Round 1 부터 다시 검증"
           restart_from_round_1
+        elif [ "$next_step" = DESIGNER_PENDING ] && native_resume_active DESIGNER "$TARGET-designer-round-$(printf '%02d' "$round")"; then
+          # native Agent 디자이너의 인계 요청이 진행 중이다(재실행 pass) — 문서가 바뀐 것은 그 Agent 의 결과일 수 있다. '호출 중 죽음'으로 보고 건너뛰지 않고
+          # 호출 지점으로 가서 캡처된 결과를 검증·수용한다(호출 전 문서 지문·source tree 는 요청에 저장된 값으로 scope 가드를 그대로 적용).
+          echo "[$(date '+%F %T')] 디자이너 native 요청 진행 중 — 호출 지점에서 결과를 확인한다"
         elif [ "$next_step" = DESIGNER_PENDING ] && [ "$saved_editable" != "$cur_editable" ]; then
           # 디자이너가 문서를 일부 고친 뒤 죽었거나 사람이 손댔다. 같은 수정을 다시 시키면 decisions.md 중복 기록·이중 수정 위험.
           echo "[WARN] 디자이너 호출 중 문서 변경 흔적 감지 — 같은 수정을 재실행하지 않고 다음 검증 라운드로 진행"
@@ -277,8 +281,18 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # 검증자 세션은 호출마다 fresh 다(이름에 invocation id) — 종결 검토가 직전 검증자 대화에 anchoring 되지 않게 하고, 같은 라운드 재시도·Round 1 재시작도 옛 대화를 --resume 하지 않는다.
   # 이 정책은 CLI 독립이다: codex 로 라우팅돼도 key 가 호출마다 다르고 accept 를 부르지 않으므로 codex exec resume 은 쓰이지 않는다(도구가 지원해도 의도적 미사용).
   # 라운드 간 상태는 위 prev_context 의 파일로만 넘긴다. 디자이너는 판정자가 아니라 문서 수정자이므로 stage 세션을 그대로 이어간다(아래).
+  # native Agent 로 라우팅되면 이 호출은 요청을 발행하고 exit 42 로 나가거나(1차), 캡처된 결과를 물질화하고 돌아온다(재실행 pass).
+  # NATIVE_INPUT_FP: 요청 발행 뒤 합의 문서·상위 입력이 바뀌었으면 낡은 판정이다(브리지가 불수용). 다른 backend 는 이 값을 쓰지 않는다.
+  NATIVE_INPUT_FP="$(consensus_editable_fingerprint "$TARGET")|$(consensus_upstream_fingerprint "$TARGET")"
   run_readonly_json_role VALIDATOR "validator-$TARGET-round-$tag-$(new_invocation_id)" "$TARGET-validator-round-$tag" "$SCHEMA_FILE" "$review" "$validator_prompt" "" \
     || exit 1
+  NATIVE_INPUT_FP=""
+  # CLI 는 스키마를 호출 인자로 강제했다. native Agent 는 그런 강제가 없으므로 같은 스키마를 Shell 이 직접 검사한다(다른 backend 에서도 무해한 재확인).
+  if [ "$(role_backend VALIDATOR)" = claude_native ]; then
+    schema_errors="$(json_schema_violations "$SCHEMA_FILE" "$review")" || { echo "[FAIL] 검증자 출력 스키마 검사 실행 실패: $review" >&2; exit 1; }
+    [ "$(jq 'length' <<< "$schema_errors")" -eq 0 ] \
+      || { echo "[FAIL] 검증자 응답이 스키마($SCHEMA_FILE)와 다름 — 응답 오류로 중단: $review / 위반: $(jq -c '.[0:5]' <<< "$schema_errors")" >&2; exit 1; }
+  fi
 
   verdict=$(jq -er '.verdict' "$review") || { echo "[FAIL] 리뷰 JSON이 스키마와 다름: $review" >&2; exit 1; }
   jq -e --argjson v "$VALIDATOR_CONTRACT_VERSION" '.schema_version==$v' "$review" >/dev/null 2>&1 \
@@ -364,7 +378,6 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # ---------- 디자이너 응답: 각 이슈 ACCEPT/REJECT + 문서 갱신 ----------
   # 같은 stage(design|impl) 의 라운드 사이에서만 세션을 이어간다 — 다른 stage 의 검증·설계 문맥은 문서/체크포인트로만 전달
   echo "--- 디자이너가 리뷰($(basename "$prev_review"))를 반영/반박합니다 ---"
-  decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
   designer_result="$WORK_DIR/reviews/designer-$TARGET-round-$tag.raw"
   # 디자이너 입력은 blocker 의 구조화된 주장·증거뿐이다 — 검증자의 자유 서술(why_blocks_now)은 넘기지 않는다. prev_review 에서 매번 결정적으로 다시 만든다(재개 포함).
   designer_input="$WORK_DIR/reviews/designer-input-$TARGET-round-$tag.json"
@@ -373,8 +386,18 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   designer_prompt=$(REVIEW_FILE="$designer_input" WORK_DIR="$WORK_DIR" ROUND="$round" \
     render_prompt "$DESIGNER_PROMPT_FILE" '${REVIEW_FILE} ${WORK_DIR} ${ROUND}')
   # 호출 전 문서 상태(합의 대상 문서 + decisions.md = editable 지문)와 source 작업 트리(WORK_DIR 제외 tree). 디자이너는 편집 역할이라 문서 밖 파일도 쓸 수 있다.
-  designer_docs_before="$(consensus_editable_fingerprint "$TARGET")"
-  designer_tree_before="$(snapshot_worktree_tree)" || { echo "[FAIL] 디자이너 호출 전 tree 스냅샷 실패" >&2; exit 1; }
+  # native Agent 재실행 pass 에서는 Agent 가 이미 문서를 고친 뒤다 — 호출 전 상태를 다시 재지 않고 요청 발행 때 저장한 값을 쓴다(가드 기준이 흐려지지 않게).
+  if native_resume_active DESIGNER "$TARGET-designer-round-$tag"; then
+    decisions_lines_before="$(native_pre_get decisions_lines_before)" && designer_docs_before="$(native_pre_get designer_docs_before)" \
+      && designer_tree_before="$(native_pre_get designer_tree_before)" \
+      || { echo "[FAIL] 디자이너 native 요청에 호출 전 상태가 없음: $(native_request_file)" >&2; exit 1; }
+  else
+    decisions_lines_before=$(wc -l < "$WORK_DIR/decisions.md")
+    designer_docs_before="$(consensus_editable_fingerprint "$TARGET")"
+    designer_tree_before="$(snapshot_worktree_tree)" || { echo "[FAIL] 디자이너 호출 전 tree 스냅샷 실패" >&2; exit 1; }
+    native_pre_begin DESIGNER && native_pre_put decisions_lines_before "$decisions_lines_before" && native_pre_put designer_docs_before "$designer_docs_before" \
+      && native_pre_put designer_tree_before "$designer_tree_before" || { echo "[FAIL] 디자이너 호출 전 상태 기록 실패" >&2; exit 1; }
+  fi
   designer_rc=0
   run_edit_role DESIGNER "designer-$TARGET" "$TARGET-designer-round-$tag" "$designer_result" "$designer_prompt" "$PROJECT_CONVENTIONS" "" "" || designer_rc=$?
   designer_tree_after="$(snapshot_worktree_tree)" || { echo "[FAIL] 디자이너 호출 후 tree 스냅샷 실패" >&2; exit 1; }

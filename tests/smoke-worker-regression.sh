@@ -49,7 +49,7 @@ chmod +x "$TMP/bin/fake-codex-worker" "$TMP/bin/stub-claude"
 export FAKE_WORKER_LOG="$TMP/state/worker.log"
 
 CFG="$COPY/.claude/skills/feature/config.sh"
-sed -i.bak "s|^WORKER_MODEL=.*|WORKER_MODEL=\"gpt-6-luna\"|; s|^WORKER_CLI=.*|WORKER_CLI=\"codex\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/fake-codex-worker\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/stub-claude\"|" "$CFG"
+sed -i.bak "s|^WORKER_MODEL=.*|WORKER_MODEL=\"gpt-6-luna\"|; s|^WORKER_CLI=.*|WORKER_CLI=\"codex\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/fake-codex-worker\"|; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/stub-claude\"|" "$CFG"
 grep -q "fake-codex-worker" "$CFG" || fail "사본 config.sh 에 가짜 워커 CLI 를 고정하지 못함"
 
 run_harness() { # mode case → stdout 을 $TMP/state/<mode>.out 에, rc 반환

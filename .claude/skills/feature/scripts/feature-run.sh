@@ -103,7 +103,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 # SKILL.md 는 압축 뒤에도 남는 짧은 진입 문서이고 상세 절차·계약 원문은 references/ 에 있다. 하나라도 없으면 오케스트레이터가 이전 세션 기억이나
 # 요약만으로 진행하게 되므로, 어떤 단계(부트스트랩·finalize 포함)도 시작하기 전에 거부한다. 목록은 install.sh 가 SKILL.md 에서 뽑아 검사하는 것과 같아야 한다
 # (tests/install-smoke.sh 가 SKILL.md 언급 = references/ 실제 파일 = 이 목록을 대조한다).
-SKILL_REFERENCE_FILES="phase0-design.md impl-docs.md exit-states-resume.md done-finalize.md pipeline-contracts.md"
+SKILL_REFERENCE_FILES="phase0-design.md impl-docs.md exit-states-resume.md done-finalize.md pipeline-contracts.md native-agent.md"
 missing_refs=""
 for ref_name in $SKILL_REFERENCE_FILES; do
   [ -s "$SKILL_DIR/references/$ref_name" ] || missing_refs="$missing_refs references/$ref_name"
@@ -120,6 +120,7 @@ skill_reference_for() { # status reason
     # 그 원문은 phase0-design.md 에만 있으므로 함께 안내한다(impl-docs.md 만 읽으면 컨벤션 대조 절차 없이 문서를 쓰게 된다).
     NEED_DOCS:*) echo "impl-docs.md phase0-design.md";;
     NEED_USER:WORKER_SESSION_*) echo "pipeline-contracts.md exit-states-resume.md";;
+    NEED_USER:NATIVE_*|NATIVE_AGENT_REQUIRED:*) echo "native-agent.md";;
     NEED_USER:*) echo exit-states-resume.md;;
     DONE:*|FINALIZE:*) echo done-finalize.md;;
     ENV_ERROR:*) echo exit-states-resume.md;;
@@ -353,6 +354,29 @@ stop_need_docs() {
   print_conventions_for_docs "$1"
   exit 3
 }
+# ---------- native Agent 인계 (scripts/native-agent-bridge.sh) ----------
+# exit 42 NATIVE_AGENT_REQUIRED: 실패도 사용자 질문도 아니다 — 메인 Claude Code 가 pending 요청을 dispatch(또는 완료 대기)한 뒤 같은 명령을 재실행한다.
+# 하위 루프(consensus/impl-review)가 42 로 끝났을 때와 이 프로세스 안의 호출(run_worker)이 요청을 발행했을 때 모두 여기로 온다 — ENV_ERROR·성공으로 바꾸지 않는다.
+stop_native_required() {
+  local req state
+  req="$(native_request_file)"; state="$(native_request_field '.state')"
+  log "NATIVE_AGENT_REQUIRED (request $(native_request_field '.request_id'), $(native_request_field '.role'), state ${state:-?}): $req"
+  write_state "$STAGE" NATIVE_AGENT_REQUIRED "${state:-PREPARED}" "native Agent 요청 $req — 메인 Claude Code 가 pending.json 의 dispatch 한 줄로 Agent/SendMessage 를 한 번 호출하고(DISPATCHING·DISPATCHED 면 다시 보내지 않고 완료 대기) 같은 명령을 재실행"
+  [ -n "${NATIVE_DISPATCH_PRINTED:-}" ] || native_print_dispatch
+  report_usage_on_exit
+  skill_reference_hint NATIVE_AGENT_REQUIRED ""
+  exit 42
+}
+# 브리지가 이 프로세스 안에서 요청을 발행·거부했을 때 부르는 콜백(하위 루프에는 정의되지 않는다 — 그쪽은 종료 코드로 올라온다).
+native_on_required() { NATIVE_DISPATCH_PRINTED=1; stop_native_required; }
+native_on_rejected() { stop_need_user NATIVE_RESULT_REJECTED "native Agent 결과 불수용 — $1: $2. 자동 재호출·자동 원복·자동 fresh 없음. 요청·캡처: $WORK_DIR/native-agent/ (pending.json, requests/, results/). 그대로 재실행하면 모델 호출 0회로 같은 사유로 멈춘다"; }
+# 하위 루프의 종료 코드 42/43 을 그대로 올린다(모든 stage 의 case 가 먼저 부른다).
+native_propagate_rc() { # rc
+  case "$1" in
+    42) stop_native_required;;
+    43) native_on_rejected "$(cut -d: -f1 "$WORK_DIR/native-agent/last-rejection.txt" 2>/dev/null || echo NATIVE_RESULT_REJECTED)" "$(cut -d: -f2- "$WORK_DIR/native-agent/last-rejection.txt" 2>/dev/null | sed 's/^ //')";;
+  esac
+}
 env_error() {
   log "ENV_ERROR: $*"
   write_state "${STAGE:-preflight}" ENV_ERROR ENV_ERROR "$*"
@@ -370,7 +394,7 @@ on_unexpected_exit() { # rc
 # 미리 보기는 어느 종료 경로(preflight 의 env_error·예기치 않은 종료 포함)에서도 run-state·usage-summary 를 쓰지 않는다 —
 # 조회가 DONE 을 ENV_ERROR 로 덮으면 다음 일반 재실행이 DONE 조기 종료를 지나쳐 다시 돈다. 사유는 로그·종료 코드로만 남는다.
 if [ "$CONTRACT_IMPACT" = 1 ]; then write_state() { :; }; report_usage_on_exit() { :; }; fi
-trap 'rc=$?; case $rc in 0|2|3) ;; *) on_unexpected_exit "$rc";; esac; release_runner_lock' EXIT
+trap 'rc=$?; case $rc in 0|2|3|42) ;; *) on_unexpected_exit "$rc";; esac; release_runner_lock' EXIT
 [ -z "$FEATURE_ID" ] || log "피처 worktree: $ROOT (feature $FEATURE_ID, branch $BRANCH, $FEATURE_WORKTREE_MODE${FEATURE_SNAPSHOT_TREE:+, snapshot tree $FEATURE_SNAPSHOT_TREE}) — 문서·산출물은 $ROOT/$WORK_DIR"
 
 # ---------- unit 유효 계약: 영향 확정 게이트 (모델 호출 0회) ----------
@@ -481,7 +505,7 @@ require_units_contract_current() { # 다음-단계
 STAGE=preflight
 # 런타임 계약 표식: 이 스크립트가 전제하는 config.sh 본문(헬퍼) 세대. config.sh 는 사용자 편집 파일이라 설치가 덮어쓰지 않으므로, 옛 본문이 남은 혼합 설치를
 # 헬퍼 이름이 아니라 이 값으로 가려 모델 호출 전에 멈춘다(install.sh 도 설치 전에 같은 값을 대조한다). config.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION 과 함께 올린다.
-REQUIRED_RUNTIME_CONTRACT_VERSION=1
+REQUIRED_RUNTIME_CONTRACT_VERSION=2
 [ "${FEATURE_RUNTIME_CONTRACT_VERSION:-}" = "$REQUIRED_RUNTIME_CONTRACT_VERSION" ] \
   || env_error "config.sh 의 런타임 계약 표식(FEATURE_RUNTIME_CONTRACT_VERSION=${FEATURE_RUNTIME_CONTRACT_VERSION:-없음})이 이 스크립트가 요구하는 값($REQUIRED_RUNTIME_CONTRACT_VERSION)과 다르다 — scripts/·schemas/ 와 config.sh 본문이 서로 다른 버전이다(혼합 설치). 새 config.sh(설치 시 만들어진 config.sh.new)의 '헬퍼' 이하 본문을 병합하고 모델·명령 설정은 유지한 뒤 재실행"
 require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
@@ -493,6 +517,7 @@ done
 # 프로젝트 빠른 검사 연결(선택 기능): 실행은 리뷰 루프가 하고, 러너는 설정 여부(fast_check_configured)와 결과 처리만 쓴다. 파일이 없으면 혼합 설치다.
 [ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 source "$SKILL_DIR/scripts/fast-check.sh"
+[ -f "$SKILL_DIR/scripts/native-agent-bridge.sh" ] || env_error "스크립트 없음: native-agent-bridge.sh (native Agent 인계) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 # Unit 정적 검사·위험도별 검증은 같은 파일의 엔진을 쓴다. scripts/ 만 옛 버전이면(헬퍼 없음) 설정된 검사를 조용히 건너뛰게 되므로 혼합 설치로 멈춘다.
 declare -F unit_check_run risk_verify_run unit_check_policy_missing_paths >/dev/null \
   || env_error "scripts/fast-check.sh 에 unit_check_run/risk_verify_run/unit_check_policy_missing_paths 가 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
@@ -906,6 +931,33 @@ check_fix_pending_resolve() {
   fi
   stop_need_user WORKER_OUTCOME_UNCERTAIN "직전 빠른 검사 수정 턴($tag)이 작업 트리를 바꿨지만(호출 전 $before → 현재 $cur) 유효한 결과 JSON($result)이 없다 — 완료 여부를 알 수 없으므로 그 변경을 검사·리뷰로 넘기지 않고, 같은 수정 턴을 자동 재호출하지도 원복하지도 않는다(모델 호출 0회). 변경을 확인한 뒤 작업 트리를 호출 전 tree 로 명시적으로 되돌리고 재실행하면 검사부터 다시 돈다(근거: $CHECK_FIX_PENDING — 이 파일을 지우거나 고쳐서 넘기지 않는다)"
 }
+# ---------- native Agent 워커 요청의 재실행 pass (unit 밖 호출 지점: verify worker-fix · check-fix · review-gap) ----------
+# 이 세 호출 지점은 1차 실행이 호출 직전까지의 기록(한도 증가·check-fix.pending·review-gap 실행 식별자·호출 전 tree)을 이미 남기고 exit 42 로 나갔다.
+# 재실행에서 stage 선택과 각 단계의 재개 판정을 다시 태우면 Agent 가 바꾼 작업 트리를 '호출 중 중단'·'승인 지문 불일치'·'source 변경'으로 읽어
+# 요청에 도달하지 못한다(검사·테스트를 다시 돌려 진단 로그와 한도가 달라지기도 한다). 그래서 진행 중인 요청이 이 지점들의 것이면
+# 다른 판정보다 먼저 같은 호출 지점으로 돌아가 결과를 받고, 호출 뒤의 원래 처리(확정·단계 전환)를 그대로 한다. 한도는 run-state 에서 읽은 값 그대로다(다시 올리지 않는다).
+# unit 안의 호출(worker / test-fix-NN)은 run_unit 이 같은 방식으로 처리한다. 결과가 아직 없으면 run_worker 가 같은 요청을 다시 제시하고 exit 42 로 나간다.
+if native_worker_pending; then
+  nw_scope="$(native_worker_pending_scope)"; nw_tag="$(native_worker_pending_tag)"
+  case "$nw_scope" in
+    verify-fix)
+      STAGE=verify; log "native 워커 요청 재실행 pass — verify worker-fix ($nw_tag)"
+      RUN_TAG="$nw_tag" NATIVE_WORKER_SITE=verify-fix run_worker worker-fix.md
+      STAGE=review;;   # 워커 수정 후 기존 승인은 무효 → 재리뷰 필수
+    check-fix)
+      STAGE=review; log "native 워커 요청 재실행 pass — 빠른 검사 수정 턴 ($nw_tag)"
+      RUN_TAG="$nw_tag" NATIVE_WORKER_SITE=check-fix run_worker worker-check-fix.md
+      check_fix_turn_accept "$nw_tag"
+      STAGE=review;;
+    review-gap)
+      STAGE=doc-gap; log "native 워커 요청 재실행 pass — review-gap 워커"
+      RUN_TAG=review-gap NATIVE_WORKER_SITE=review-gap run_worker worker-review-gap.md
+      doc_gap_worker_run_done "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패(review-gap 워커 완료 기록)"
+      doc_gap_set_step REVIEW_PENDING "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패"
+      STAGE=review;;
+    *) STAGE=worker;;   # unit 의 워커 턴 — worker 단계의 run_unit 이 받는다
+  esac
+fi
 # 재개 지점이 어디든(review 든 doc-gap 이든) 모델·검사 호출 전에 판정한다
 check_fix_pending_resolve
 # 위험도별 검증이 git index 를 바꾸고 멈춘 뒤(INDEX_MODIFIED) index 가 그대로면, stage 와 무관하게 모델·검증 명령 0회로 다시 멈춘다. verify 진입까지 기다리면
@@ -1034,7 +1086,8 @@ run_unit() { # unit-id
   local pending=()   # 이번 시도의 결과 파일(워커 → test-fix 순). targeted test 최종 PASS 전까지 context_updates 는 pending 이다
   unit_check_require_readonly_restored "$id" "$unit_dir"
   if unit_done_valid "$id"; then
-    unit_check_evidence_current "$id" || unit_check_reverify_done "$id" "$unit_dir"
+    # native 워커 요청이 진행 중이면(재실행 pass) 작업 트리는 Agent 가 고치는 중간 상태일 수 있다 — 그 요청을 받기 전에는 앞 unit 의 검사 증거를 다시 재지 않는다.
+    native_worker_pending || unit_check_evidence_current "$id" || unit_check_reverify_done "$id" "$unit_dir"
     log "unit $id: 완료 체크포인트 유효(spec + 현재 계약 지문) — 건너뜀"; return 0
   fi
   [ ! -f "$unit_dir/done.json" ] || log "unit $id: 완료 체크포인트가 현재 spec·계약에 대해 유효하지 않음($(unit_contract_status "$id")) — 과거 DONE 을 재사용하지 않고 다시 실행"
@@ -1062,8 +1115,12 @@ run_unit() { # unit-id
   fi
   # 앞 unit 들이 확정한 rolling context 를 재구성(완료 체크포인트가 유효한 것만) — 워커·test-fix 프롬프트에 들어간다
   impl_context_write "$id" || env_error "unit $id: implementation-context.json 재구성 실패 — 앞선 unit 의 완료 체크포인트가 유효하지 않음"
+  # 이 unit 의 native 워커 요청이 진행 중인가(재실행 pass) — 그 요청의 태그(worker / test-fix-NN). 세션 전제·재개 판정은 1차 실행이 이미 지났고,
+  # 지금 작업 트리는 Agent 의 결과를 담고 있으므로 다시 재지 않는다(handoff 의 source tree 대조·'호출 중 중단' 판정이 Agent 의 변경을 오판한다).
+  local np_tag=""
+  ! native_worker_pending "$id" || np_tag="$(native_worker_pending_tag)"
   # 세션 전제는 워커 호출 여부와 무관하게 unit 진입 시 확정한다(이전 체계 산출물의 묵시적 마이그레이션도 여기서 막힌다)
-  ensure_feature_worker_session
+  [ -n "$np_tag" ] || ensure_feature_worker_session
   # ---------- 재개 판정: 대화 진도가 아니라 결과 JSON + 실제 tree ----------
   # 직전 시도의 마지막 결과(worker → test-fix-NN 순)가 유효한 DONE 이고 그 after-tree 가 현재 tree 와 같으면
   # CLI 호출은 끝났고 targeted test 전(또는 중)에 죽은 것이다 — 같은 워커를 재호출하지 않고 테스트부터 재개한다.
@@ -1078,7 +1135,9 @@ run_unit() { # unit-id
     [ -f "$unit_dir/$fix_tag-result.json" ] || break
     latest="$fix_tag"; fixes=$fix_i
   done
-  if [ -n "$latest" ] && worker_result_valid "$unit_dir/$latest-result.json" \
+  if [ -n "$np_tag" ]; then
+    :   # native 요청 재실행 pass — 아래에서 같은 호출 지점으로 바로 간다
+  elif [ -n "$latest" ] && worker_result_valid "$unit_dir/$latest-result.json" \
      && [ -f "$unit_dir/$latest-after.tree" ] && [ "$(cat "$unit_dir/$latest-after.tree")" = "$cur_tree" ] \
      && jq -e '.status=="DONE"' "$unit_dir/$latest-result.json" >/dev/null 2>&1; then
     # 유효한 UNDECIDED 결과 + tree 일치는 DOC_GAP 해결 후 재개 — resume 이 아니라 워커 턴을 다시 돈다(아래 일반 경로)
@@ -1096,7 +1155,24 @@ run_unit() { # unit-id
     # (게이트 중단·실행 실패는 after-tree 가 남으므로 여기 걸리지 않고 기존 가드·재호출 규칙을 따른다.)
     stop_need_user WORKER_OUTCOME_UNCERTAIN "unit $id: 직전 시도($last_attempt)가 CLI 호출 중에 중단됐고(after-tree 없음) 작업 트리가 호출 전 tree($(cat "$unit_dir/$last_attempt-before.tree"))와 다르다 — 대화 세션이 얼마나 진행됐는지 알 수 없으므로 새 세션을 만들거나 같은 세션을 자동 재호출하지 않고 원복도 하지 않는다. 변경을 확인한 뒤 호출 전 tree 로 명시적으로 되돌리고 재실행하거나, 변경을 유지하려면 사용자가 정리 방식을 명시하라"
   fi
-  if [ -n "$resume_tag" ]; then
+  if [ -n "$np_tag" ]; then
+    # 같은 호출 지점(같은 태그)으로 돌아가 캡처된 결과를 받는다. run_worker 가 호출 전 상태를 요청에서 복원해 범위·결과 게이트를 원래 기준으로 돌린다.
+    # 결과가 아직 없으면 run_worker 가 같은 요청을 다시 제시하고 exit 42 로 나간다(새 요청·새 Agent 없음).
+    log "unit $id: native 워커 요청($np_tag) 재실행 pass — 같은 호출 지점에서 결과를 확인한다"
+    case "$np_tag" in
+      worker)
+        RUN_TAG=worker run_worker worker-unit.md "$unit_dir"
+        pending+=("$unit_dir/worker-result.json");;
+      test-fix-[0-9][0-9])
+        fixes=$((10#${np_tag#test-fix-}))
+        pending+=("$unit_dir/worker-result.json")
+        for ((fix_i=1; fix_i<fixes; fix_i++)); do pending+=("$unit_dir/test-fix-$(printf '%02d' "$fix_i")-result.json"); done
+        test_retries=$fixes
+        RUN_TAG="$np_tag" run_worker worker-unit-fix.md "$unit_dir"
+        pending+=("$unit_dir/$np_tag-result.json");;
+      *) env_error "unit $id: 알 수 없는 native 워커 요청 태그 '$np_tag'";;
+    esac
+  elif [ -n "$resume_tag" ]; then
     local baseline_resume violations
     baseline_resume="$(read_worker_baseline_tree)" || env_error "unit $id: worker-baseline.tree 가 유효한 tree 를 가리키지 않음"
     violations="$(feature_scope_violations "$(cat "$unit_dir/before.tree")" "$cur_tree" "$baseline_resume")"
@@ -1203,6 +1279,7 @@ while :; do
 
     design)
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" design; rc=$?; set -e
+      native_propagate_rc "$rc"
       case $rc in
         0) consensus_exit0_note design; STAGE=impl;;
         2) stop_need_user "$(jq -r '.status' "$WORK_DIR/state.json" | sed 's/MAX_ROUNDS_EXCEEDED/MAX_ROUNDS/')" "설계 합의 중단 — ASK_USER 면 해당 이슈의 user_question·options 를, 그 외엔 state.json.review 의 쟁점을 사용자에게 보고. $(escalation_detail design 'design.md')";;
@@ -1224,6 +1301,7 @@ while :; do
         stop_need_docs IMPL_DOCS_MISSING "implementation-units.json 의 references 가 문서의 절을 정확히 가리키지 않는다: $bad_refs. references 는 'implementation.md#<heading>' / 'approach.md#<heading>' / 'design.md#<heading>'(heading 텍스트 또는 slug, 문서 안에서 유일) 형식이어야 한다 — 러너가 그 절의 본문으로 unit 별 계약 변경을 판정한다. 고친 뒤 재실행"
       fi
       set +e; bash "$SKILL_DIR/scripts/consensus-loop.sh" impl; rc=$?; set -e
+      native_propagate_rc "$rc"
       case $rc in
         0) consensus_exit0_note impl
            # 상위 계약이 정상 재합의로 다시 확정됐다 — 그 전 문서 위에서 기록된 pending gap 은 밑바탕이 달라졌으므로 재개 대상이 아니다(SUPERSEDED 로 보존).
@@ -1394,7 +1472,7 @@ while :; do
           log "=== review-gap 워커: DOC_GAP 사용자 결정 + 같은 리뷰의 FIX_CODE 를 함께 구현 ($(basename "$gap_review")) ==="
           RUN_TAG=review-gap REVIEW_FILE="$gap_review" DOC_GAP_REVIEW="$gap_review" \
             GAP_CONTEXT="$(printf '리뷰 JSON: %s\n리뷰 당시 diff: %s\n\n미결정 항목과 사용자 결정:\n%s' "$gap_review" "$(dirname "$gap_review")/diff-round-$(printf '%02d' "$(doc_gap_field '.round')").patch" "$(doc_gap_prompt_block)")" \
-            run_worker worker-review-gap.md
+            NATIVE_WORKER_SITE=review-gap run_worker worker-review-gap.md
           # run_worker 가 돌아왔다 = 모든 게이트·세션 수용을 지난 유효한 DONE 이다(UNDECIDED 는 새 체크포인트를 쓰고 거기서 멈춘다).
           # 결과 파일 해시·after tree 를 식별자와 함께 고정한 뒤에 단계를 넘긴다 — 두 기록 사이에서 죽어도 다음 실행이 위 판정으로 재사용한다.
           doc_gap_worker_run_done "$(cat "$WORK_DIR/review-gap-after.tree")" || env_error "doc-gap-resume.json 갱신 실패(review-gap 워커 완료 기록)"
@@ -1422,6 +1500,7 @@ while :; do
       # --new-review-attempt 는 이 실행의 첫 리뷰 루프 호출에만 전달한다(verify 실패 뒤의 재리뷰까지 새 시도로 만들지 않는다)
       set +e; FEATURE_REVIEW_NEW_ATTEMPT="$NEW_REVIEW_ATTEMPT" bash "$SKILL_DIR/scripts/impl-review-loop.sh"; rc=$?; set -e
       NEW_REVIEW_ATTEMPT=0
+      native_propagate_rc "$rc"
       case $rc in
         0)
           [ "$(doc_gap_next_step)" != REVIEW_PENDING ] || doc_gap_set_step RESOLVED || env_error "doc-gap-resume.json 갱신 실패"
@@ -1462,7 +1541,7 @@ while :; do
           jq -n --arg tag "$fc_tag" --arg log "$fc_log" --arg now "$(date '+%FT%T%z')" --argjson retries_before "$FAST_CHECK_RETRIES" \
             '{version:1, active:true, tag:$tag, check_log:$log, retries_before:$retries_before, started_at:$now}' > "$CHECK_FIX_PENDING.tmp" \
             && mv "$CHECK_FIX_PENDING.tmp" "$CHECK_FIX_PENDING" || env_error "check-fix.pending.json 기록 실패"
-          TEST_LOG="$fc_log" RUN_TAG="$fc_tag" run_worker worker-check-fix.md
+          TEST_LOG="$fc_log" RUN_TAG="$fc_tag" NATIVE_WORKER_SITE=check-fix run_worker worker-check-fix.md
           check_fix_turn_accept "$fc_tag"
           STAGE=review; continue;;   # 수정된 코드는 검사부터 다시 — 수정 전 승인·리뷰는 지문이 달라져 재사용되지 않는다
         6)
@@ -1514,7 +1593,7 @@ while :; do
             echo "실행한 검증: $(jq -c '.checks // []' "$CHECK_RECORD")"
             echo; echo "----- 검증 출력 원본 ($CHECK_LOG) -----"; cat "$CHECK_LOG"
           } > "$rv_diag.tmp" && mv "$rv_diag.tmp" "$rv_diag" || env_error "위험도별 검증 진단 묶음 기록 실패: $rv_diag"
-          TEST_LOG="$rv_diag" run_worker worker-fix.md
+          TEST_LOG="$rv_diag" NATIVE_WORKER_SITE=verify-fix run_worker worker-fix.md
           STAGE=review; continue;;   # 워커 수정 후 기존 승인은 무효 → 재리뷰 필수 → 승인되면 verify 가 검증부터 다시 한다
         30) stop_need_user RISK_VERIFY_ERROR "위험도별 추가 검증(${RISK_VERIFY_CMD:-})을 끝까지 실행하지 못했다 — $CHECK_KIND: $CHECK_DETAIL. 통과·생략·위반 어느 것으로도 처리하지 않았고 워커·리뷰어를 부르지 않았으며 TEST_CMD 도 실행하지 않았다(DONE 아님, 자동 코드 수정 없음). 로그: $CHECK_LOG, 기록: $CHECK_RECORD. 복구(kind 별): RESULT_INVALID = 명령이 exit 0 일 때 \$RISK_VERIFY_RESULT 에 {\"risk_level\":\"LOW|MEDIUM|HIGH|CRITICAL|UNKNOWN\", \"checks\":[{\"name\":…,\"status\":\"PASS|FAIL|SKIPPED\"}]} 를 쓰도록 프로젝트 어댑터를 고친다(결과가 없으면 위험도를 LOW 로 가정하지 않는다) / RESULT_INCONSISTENT = exit 0 인데 checks 에 FAIL 이 있다: 실패한 검증이 있으면 명령이 exit 1 + 진단을 내도록 어댑터를 고친다(코드 위반으로 처리하지 않았다 — 워커 수정 없음) / COMMAND_NOT_RUNNABLE = 도구 설치·경로·실행 권한 / TIMEOUT = RISK_VERIFY_TIMEOUT_SEC 조정 또는 검증 범위 축소 / UNEXPECTED_EXIT·NO_DIAGNOSTICS = 0(정상)·1(위반 + 진단 출력)·그 외(오류) 계약 / INVALID_CONFIG = RISK_VERIFY_TIMEOUT_SEC 를 양의 정수로 / WORKTREE_MODIFIED = 검증이 소스를 바꿨다: 기록의 modified_paths 를 확인해 되돌릴지 사용자가 정하고(자동 원복 없음 — 범위 안 변경이 남으면 승인 지문이 달라져 재리뷰를 지난다) 명령이 작업 트리 밖(임시 디렉터리)에서 산출물을 만들게 고친다 / INDEX_MODIFIED = 검증이 git index 를 바꿨다: index 를 검증 전 상태로 직접 되돌린다(자동 복구 없음) — 되돌리기 전의 재실행은 검증 명령·모델 호출 0회로 다시 멈춘다. 고친 뒤 같은 명령으로 재실행하면 검증부터 다시 돈다. RISK_VERIFY_CMD 를 비워 검증을 끄는 것은 사용자가 명시적으로 정할 때만";;
         40) stop_need_user RISK_VERIFY_NEEDS_USER "위험도별 추가 검증(${RISK_VERIFY_CMD:-})이 자동으로 통과시킬 수 없는 결과를 냈다 — $CHECK_KIND: $CHECK_DETAIL. 위험도를 LOW 로 가정하지 않았고 모델에게 판정·수정을 맡기지 않았으며 TEST_CMD 도 실행하지 않았다(DONE 아님). 판정 근거: $(jq -c '.reasons // []' "$CHECK_RECORD"), 실행한 검증: $(jq -c '.checks // []' "$CHECK_RECORD"), 로그: $CHECK_LOG, 기록: $CHECK_RECORD. 사용자에게 보고하고 결정을 받는다: RISK_UNKNOWN = 이 변경을 분류할 규칙을 프로젝트의 검증 명령에 추가한다 / HUMAN_REVIEW_REQUIRED = 프로젝트가 정한 확인 절차(검증 명령이 요구하는 승인 조건)를 사용자가 수행한다. 그 뒤 같은 명령으로 재실행하면 검증부터 다시 돈다. 사용자 지시 없이 RISK_VERIFY_CMD 를 비우거나 결과를 고쳐서 넘기지 않는다";;
@@ -1537,7 +1616,7 @@ while :; do
         [ "$TEST_RETRIES" -ge "$MAX_TEST_RETRIES" ] && stop_need_user TEST_RETRIES_EXHAUSTED "테스트 실패 $((TEST_RETRIES + 1))회 — $test_log"
         TEST_RETRIES=$((TEST_RETRIES + 1))
         write_state verify RUNNING "" "worker-fix $TEST_RETRIES/$MAX_TEST_RETRIES"
-        TEST_LOG="$test_log" run_worker worker-fix.md
+        TEST_LOG="$test_log" NATIVE_WORKER_SITE=verify-fix run_worker worker-fix.md
         STAGE=review; continue   # 워커 수정 후 기존 승인은 무효 → 재리뷰 필수
       fi
       log "테스트·린트 통과"
