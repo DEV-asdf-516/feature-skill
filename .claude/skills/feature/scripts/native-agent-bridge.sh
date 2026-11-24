@@ -493,26 +493,39 @@ native_message_json() { # message-file out
     | fromjson | select(type=="object")' "$1" > "$2.tmp" 2>/dev/null && mv "$2.tmp" "$2"
 }
 native_log_usage() { # role model label inv rc status
-  local cap rates est='{"estimated_cost_usd":null,"assumptions":null}' basis=null
+  local cap rates usage chk est='{"estimated_cost_usd":null,"assumptions":null}' basis=null
   cap="$(native_capture_file)"
+  usage="$(jq -c '.usage // {}' "$cap")" || usage='{}'
+  # 관측 판정(config.sh 의 claude_native_usage_check): 일부 요청의 usage 누락·필수 필드 누락·음수는 partial — 토큰·비용을 0 이나 부분 합으로 적지 않는다.
+  #   context_last_turn 은 이 판정과 따로 간다: 훅이 마지막 본 모델 호출의 usage 만으로 검증해 잰 값(capture.context_last_turn_source 가 있다)은
+  #   비용 관측이 partial 이어도 그대로 남긴다 — 워커 세션 교체 판단의 실측값이라, 비용을 모른다고 같이 버리면 교체가 멈춘다. 출처는 context_source 에 적는다.
+  #   출처 표식이 없는 캡처(옛 훅 — 누락 필드를 0 으로 읽어 계산했다)의 값은 판정이 transcript 일 때만 쓴다.
+  chk="$(claude_native_usage_check "$usage")" || chk='{"status":"unavailable","error":"USAGE_CHECK_FAILED","detail":"usage 판정 실패"}'
   # native subagent 는 비용을 보고하지 않는다 — 전사에서 읽은 토큰을 가격표(config.sh 의 claude_model_pricing)로 환산한다. 가격표에 없는 모델·환산할 수 없는 usage 는 unknown(0 달러 아님).
-  if declare -F claude_model_pricing >/dev/null && rates="$(claude_model_pricing "$2")"; then
-    est="$(claude_native_estimate_cost "$(jq -c '.usage // {}' "$cap")" "$rates")" || est='{"estimated_cost_usd":null,"assumptions":null}'
+  if rates="$(claude_model_pricing "$2")"; then
+    est="$(claude_native_estimate_cost "$usage" "$rates")" || est='{"estimated_cost_usd":null,"assumptions":null}'
     basis="\"$CLAUDE_PRICING_BASIS\""
+  elif [ "$(printf '%s' "$chk" | jq -r '.status')" != transcript ]; then
+    est="$(printf '%s' "$chk" | jq -c '{estimated_cost_usd:null, assumptions:.detail}')"
   fi
-  jq -nc --slurpfile c "$cap" --argjson est "$est" --argjson basis "$basis" --arg label "$3" --arg role "$1" --arg model "$2" --arg inv "$4" --argjson rc "$5" --arg st "$6" \
+  jq -nc --slurpfile c "$cap" --argjson est "$est" --argjson chk "$chk" --argjson basis "$basis" --arg label "$3" --arg role "$1" --arg model "$2" --arg inv "$4" --argjson rc "$5" --arg st "$6" \
     --argjson v "${USAGE_SCHEMA_VERSION:-1}" --arg now "$(date '+%FT%T%z')" --arg req "$(native_request_field '.request_id')" '
-    $c[0] as $c | ($c.usage // {}) as $u
+    $c[0] as $c | (if $chk.status == "transcript" then ($c.usage // {}) else {} end) as $u
+    | (if ($c.context_last_turn | type) != "number" then {tokens:null, source:null}
+       elif ($c.context_last_turn_source | type) == "string" then {tokens:$c.context_last_turn, source:$c.context_last_turn_source}
+       elif $chk.status == "transcript" then {tokens:$c.context_last_turn, source:"last_request_usage"}
+       else {tokens:null, source:null} end) as $ctx
     | { schema_version: $v, invocation_id: $inv, label: $label, role: $role, cli: "claude_native", backend: "claude_native", model: $model,
         effort: ($c.efforts_observed[0] // null), session: $c.agent_id, request_id: $req, agent_id: $c.agent_id, parent_session_id: $c.session_id,
         cost_usd: null, cost_kind: (if $est.estimated_cost_usd == null then "unknown" else "estimated" end), estimated_cost_usd: $est.estimated_cost_usd,
         pricing_basis: (if $est.estimated_cost_usd == null then null else $basis end), pricing_assumptions: $est.assumptions, long_context_turns: null,
         input_uncached: ($u.input_tokens // null), cache_read: ($u.cache_read_input_tokens // null), cache_write: ($u.cache_creation_input_tokens // null),
         output: ($u.output_tokens // null), reasoning_output: null,
-        input_effective: (if $u.input_tokens == null then null else (($u.input_tokens // 0) + ($u.cache_read_input_tokens // 0) + ($u.cache_creation_input_tokens // 0)) end),
-        input_per_turn: null, context_last_turn: ($c.context_last_turn // null), context_window: null, tokens_total: null,
+        input_effective: (if $u.input_tokens == null then null else ($u.input_tokens + $u.cache_read_input_tokens + $u.cache_creation_input_tokens) end),
+        input_per_turn: null, context_last_turn: $ctx.tokens, context_source: $ctx.source, context_window: null, tokens_total: null,
         num_turns: ($u.api_requests // null), duration_ms: null, duration_api_ms: null,
-        exit_code: $rc, success: ($rc == 0), usage_observation_status: (if $u.input_tokens == null then "unavailable" else "transcript" end), usage_error: (if $st == "" then null else $st end),
+        exit_code: $rc, success: ($rc == 0), usage_observation_status: $chk.status,
+        usage_error: ([(if $st == "" then empty else $st end), ($chk.error // empty)] | if length == 0 then null else join("+") end),
         raw_log: $c.agent_transcript_path, source: "claude-native-transcript", recorded_at: $now }' >> "$WORK_DIR/usage.jsonl"
 }
 native_consume() {

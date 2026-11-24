@@ -210,6 +210,8 @@ case "$event" in
     # 인계 프롬프트 = 문자열 content 의 user 레코드 중 'FEATURE-NATIVE-REQUEST <경로>' 줄을 가진 마지막 것. 신규 호출은 비-meta 레코드의 첫 줄,
     # 재개(SendMessage)는 isMeta 레코드의 포장 안쪽이다 — isMeta 여부로 거르지 않는다(시스템 리마인더 같은 다른 meta 레코드는 그 줄이 없다).
     read_summary() { jq -sc '
+      def num0: if type=="number" then . else 0 end;
+      def objf($k): if type=="object" then .[$k] else null end;
       (to_entries | map(select(.value.type=="user" and (.value.message.content|type)=="string" and (.value.message.content|test("(^|\\n)FEATURE-NATIVE-REQUEST /")))) | last) as $p
       | if $p == null then {prompt:null} else
           ([.[$p.key+1:][] | select(.type=="assistant")]) as $a
@@ -225,13 +227,39 @@ case "$event" in
                        elif $last != null and $last.message.stop_reason=="end_turn" then {source:"final_message", text:([$last.message.content[]? | select(.type=="text") | .text] | join(""))}
                        else null end),
               last_stop_reason: ($last.message.stop_reason // null),
-              usage: ([$a[] | {id:.message.id, u:.message.usage}] | group_by(.id) | map(last.u) | map(select(. != null))
-                      | if length==0 then null else {api_requests:length, input_tokens:(map(.input_tokens // 0)|add), cache_read_input_tokens:(map(.cache_read_input_tokens // 0)|add),
-                          cache_creation_input_tokens:(map(.cache_creation_input_tokens // 0)|add), output_tokens:(map(.output_tokens // 0)|add),
-                          cache_write_5m_input_tokens:(map(.cache_creation.ephemeral_5m_input_tokens // 0)|add),
-                          cache_write_1h_input_tokens:(map(.cache_creation.ephemeral_1h_input_tokens // 0)|add),
-                          speeds:(map(.speed // "unreported")|unique), inference_geos:(map(.inference_geo // "unreported")|unique)} end),
-              context_last_turn: ($last.message.usage | if . == null then null else ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)) end),
+              # usage: API 요청(message id)별 마지막 usage 를 합산한다. 누락을 0 으로 숨기지 않는다 —
+              #   usage 가 없는 요청 수(usage_missing_requests)와 네 토큰 필드 중 하나라도 없거나 숫자가 아니거나 음수인 요청 수(usage_incomplete_requests)를 같이 남긴다.
+              #   usage.iterations 에 본 요청(type message)이 아닌 항목(advisor_message 등 보조 모델 호출)이 있는 요청 수(usage_side_iteration_requests)도 센다 —
+              #   그 항목의 토큰은 요청의 usage 합계에 들어 있지 않다(Claude Code 2.1.330 실제 전사에서 확인: 합계 = type message 항목의 합).
+              #   message.id 가 비어 있지 않은 문자열이 아닌 assistant 레코드 수(usage_unidentified_records)도 센다 — id 없이는 어느 레코드가 같은 요청인지 알 수 없어
+              #   요청 단위로 묶지 않는다(id 없는 레코드를 한 요청으로 묶으면 마지막 것만 남아 과소 집계된다). 합계에는 id 가 있는 요청만 들어간다.
+              #   넷 중 하나라도 0 이 아니면 러너가 이 호출의 비용을 추정하지 않는다(unknown). 완료 판정·보고 수용과는 무관한 telemetry 다.
+              usage: (([$a[] | {id:.message.id, u:.message.usage}] | map(select((.id|type)=="string" and (.id|length) > 0)) | group_by(.id) | map(last.u)) as $reqs
+                     | ([$a[] | select(((.message.id|type)=="string" and (.message.id|length) > 0) | not)]) as $unid
+                     | ($reqs | map(select(type=="object"))) as $obs
+                     | if ($obs|length)==0 and ([$unid[] | select((.message.usage|type)=="object")] | length)==0 then null else {api_requests:($reqs|length), usage_missing_requests:(($reqs|length) - ($obs|length)),
+                          usage_unidentified_records:($unid|length),
+                          usage_incomplete_requests:($obs | map(select([.input_tokens, .output_tokens, .cache_read_input_tokens, .cache_creation_input_tokens] | all(type=="number" and . >= 0) | not)) | length),
+                          usage_side_iteration_requests:($obs | map(select((.iterations|type)=="array" and any(.iterations[]; (type=="object" and .type=="message") | not))) | length),
+                          input_tokens:($obs|map(.input_tokens|num0)|add // 0), cache_read_input_tokens:($obs|map(.cache_read_input_tokens|num0)|add // 0),
+                          cache_creation_input_tokens:($obs|map(.cache_creation_input_tokens|num0)|add // 0), output_tokens:($obs|map(.output_tokens|num0)|add // 0),
+                          cache_write_5m_input_tokens:($obs|map(.cache_creation|objf("ephemeral_5m_input_tokens")|num0)|add),
+                          cache_write_1h_input_tokens:($obs|map(.cache_creation|objf("ephemeral_1h_input_tokens")|num0)|add),
+                          speeds:($obs|map(.speed // "unreported")|unique), inference_geos:($obs|map(.inference_geo // "unreported")|unique)} end),
+              # context: 마지막 본 모델 호출이 실제로 넣은 입력(컨텍스트 창 점유량) — 워커 세션 교체 판단의 실측값이다. 위 usage(비용 관측)와 따로 잰다:
+              #   앞선 요청의 usage 가 불완전하거나 보조 모델 호출이 있어 비용을 추정할 수 없어도, 마지막 호출의 입력은 그 호출의 usage 만으로 정해진다.
+              #   마지막 assistant 레코드의 usage 만 본다(앞선 요청으로 거슬러 올라가지 않는다 — 옛 값을 현재 컨텍스트처럼 쓰지 않는다).
+              #   usage.iterations 에 항목이 있으면 그중 마지막 type message 항목을 쓴다 — 보조 모델 호출이 낀 요청의 usage 합계는 본 모델 호출 여러 번의 합이라
+              #   컨텍스트 크기가 아니다(실제 전사: 합계의 캐시 읽기 186251 = 88641 + 97610, 마지막 호출의 입력은 2 + 97610). 그 항목이 없거나 불완전하면 합계로 대신하지 않고 null 이다.
+              #   iterations 가 없으면(또는 빈 배열) 요청 = 본 모델 호출 1회이므로 usage 자체를 쓴다. 세 입력 필드(input·cache_read·cache_creation)가 전부 0 이상의 숫자일 때만 값이 있다 — 누락을 0 으로 읽지 않는다.
+              context: ($last.message.usage
+                        | if type != "object" then null
+                          elif .iterations == null or .iterations == [] then {src:"last_request_usage", u:.}
+                          elif (.iterations|type) != "array" then null
+                          else {src:"last_message_iteration", u:([.iterations[] | select(type=="object" and .type=="message")] | last)} end
+                        | if . == null or (.u|type) != "object" then null
+                          elif ([.u.input_tokens, .u.cache_read_input_tokens, .u.cache_creation_input_tokens] | all(type=="number" and . >= 0)) | not then null
+                          else {tokens:(.u.input_tokens + .u.cache_read_input_tokens + .u.cache_creation_input_tokens), source:.src} end),
               compacted: (any(.[$p.key+1:][]; .type=="system" and .subtype=="compact_boundary")) }
         end' "$transcript" 2>/dev/null; }
     # SubagentStop 은 전사의 마지막 레코드(보고를 담은 SubagentHandback 호출·최종 메시지)가 디스크에 쓰이기 전에 발화할 수 있다
@@ -289,7 +317,7 @@ case "$event" in
         transcript_session_ids:.session_ids, transcript_agent_ids:.agent_ids,
         dispatch_sha256_observed:$obs, prompt_wrapper:$wrap, prompt_record_is_meta:.prompt_is_meta, models_observed:.models, requested_models_observed:.requested_models, efforts_observed:.efforts,
         report_status:$st, report_source:(.report.source // null), message_path:(if $msg=="" then null else $msg end),
-        last_stop_reason:.last_stop_reason, closing_text_ignored:($closing|length), usage:.usage, context_last_turn:.context_last_turn,
+        last_stop_reason:.last_stop_reason, closing_text_ignored:($closing|length), usage:.usage, context_last_turn:(.context.tokens // null), context_last_turn_source:(.context.source // null),
         compaction_observed:.compacted, report_wait_tries:$tries, captured_from_state:$from, captured_at:$now}' > "$cap.$$.tmp" && mv "$cap.$$.tmp" "$cap" || exit 0
     req_update "$req" '.state="RESULT_READY" | .result_ready_at=$now | .captured_from_state=$from' --arg now "$(now)" --arg from "$from_state" || true
     req_unlock

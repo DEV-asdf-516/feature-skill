@@ -122,7 +122,7 @@ worker_handoff_valid_file() { # handoff-path
 }
 
 # unit 완료 직후에만 호출된다(run_unit). 판단값은 이 unit 에서 이 실행이 부른 마지막 워커 호출의 usage 행에서
-# context_last_turn(마지막 model 호출의 실제 입력 = 컨텍스트 창 점유량; claude stream-json / codex rollout) 을 먼저 쓴다 — 창 크기(context_window)를
+# context_last_turn(마지막 model 호출의 실제 입력 = 컨텍스트 창 점유량; claude stream-json / codex rollout / native Agent 전사의 마지막 본 모델 호출 — 비용 관측이 partial 이어도 따로 검증된 값) 을 먼저 쓴다 — 창 크기(context_window)를
 # 알면 비율(WORKER_SESSION_ROTATE_CONTEXT_RATIO), 모르면 고정 임계치. 실측이 없으면 input_per_turn(턴당 평균, 근사)과 고정 임계치를 비교하고 근사 사용을 로그에 남긴다. input_effective 는 invocation 안 모든 turn 의 누적 입력이라 컨텍스트 창 크기가 아니다
 # (그걸 쓰면 매 unit 교체된다 — 2026-10-27). 둘 다 없으면 임의 추정 없이 세션을 유지한다. claude 세션 파일·codex 원장 모두 세대 접미사로 은퇴. 마지막 unit 뒤에는 교체하지 않는다(이관할 다음 unit 이 없다).
 maybe_rotate_feature_worker_session() { # completed-unit-id completed-tree

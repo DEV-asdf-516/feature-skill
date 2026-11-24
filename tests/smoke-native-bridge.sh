@@ -262,9 +262,36 @@ case "$r26_line" in *"추정 비용(codex·claude native) \$0.001 (API 표준 �
 # 환산할 수 없는 경우는 0 달러가 아니라 unknown: 캐시 쓰기의 TTL 구분 없음 · fast mode · US 전용 추론 · 가격표에 없는 모델(프롬프트 길이별 요금인 haiku 포함)
 r26_est() { ( source "$CFG"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.estimated_cost_usd' ); }
 [ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":500,"cache_creation_input_tokens":20,"output_tokens":40}')" = null ] || fail "R26: 캐시 쓰기 TTL 구분이 없는데 단가를 추측해 추정함"
-[ "$(r26_est '{"input_tokens":3,"cache_creation_input_tokens":0,"output_tokens":40,"speeds":["fast"]}')" = null ] || fail "R26: fast mode 요청을 표준 요금으로 추정함"
-[ "$(r26_est '{"input_tokens":3,"cache_creation_input_tokens":0,"output_tokens":40,"inference_geos":["us"]}')" = null ] || fail "R26: US 전용 추론 요청을 표준 요금으로 추정함"
-[ "$(r26_est '{"input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":0,"speeds":["standard"],"inference_geos":["global"]}')" = 4 ] || fail "R26: 입력 1M 토큰의 추정이 $4 가 아님"
+[ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":40,"speeds":["fast"]}')" = null ] || fail "R26: fast mode 요청을 표준 요금으로 추정함"
+[ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":40,"inference_geos":["us"]}')" = null ] || fail "R26: US 전용 추론 요청을 표준 요금으로 추정함"
+[ "$(r26_est '{"input_tokens":1000000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"speeds":["standard"],"inference_geos":["global"]}')" = 4 ] || fail "R26: 입력 1M 토큰의 추정이 $4 가 아님"
+# 불완전한 usage 는 정상 추정치로 기록하지 않는다: 필수 토큰 필드 누락·숫자 아님·음수, 일부 API 요청의 usage 누락 → unknown + partial(누락을 0 으로 읽지 않는다)
+r26_full='"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0'
+r26_chk() { ( source "$CFG"; claude_native_usage_check "$1" | jq -r '[.status, (.error // "")] | join(" ")' ); }
+for r26_bad in '{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":0}' \
+               '{"input_tokens":1000,"cache_creation_input_tokens":0,"output_tokens":40}' \
+               '{"input_tokens":1000,"cache_read_input_tokens":500,"output_tokens":40}' \
+               '{"input_tokens":-500,"cache_read_input_tokens":500,"cache_creation_input_tokens":0,"output_tokens":40}' \
+               '{"input_tokens":"1000","cache_read_input_tokens":500,"cache_creation_input_tokens":0,"output_tokens":40}' \
+               '{"cache_read_input_tokens":500,"cache_creation_input_tokens":0,"output_tokens":40}' \
+               "{$r26_full,\"cache_write_5m_input_tokens\":-1,\"cache_write_1h_input_tokens\":1}" \
+               "{$r26_full,\"usage_incomplete_requests\":1}"; do
+  [ "$(r26_est "$r26_bad")" = null ] && [ "$(r26_chk "$r26_bad")" = "partial USAGE_FIELDS_INCOMPLETE" ] || fail "R26: 불완전한 usage 를 추정했거나 partial 로 판정하지 않음: $r26_bad → $(r26_est "$r26_bad") / $(r26_chk "$r26_bad")"
+done
+r26_bad="{$r26_full,\"api_requests\":2,\"usage_missing_requests\":1}"
+[ "$(r26_est "$r26_bad")" = null ] && [ "$(r26_chk "$r26_bad")" = "partial USAGE_REQUESTS_MISSING" ] || fail "R26: usage 가 없는 API 요청이 있는데 추정함: $(r26_est "$r26_bad") / $(r26_chk "$r26_bad")"
+r26_bad="{$r26_full,\"api_requests\":2,\"usage_side_iteration_requests\":1}"
+[ "$(r26_est "$r26_bad")" = null ] && [ "$(r26_chk "$r26_bad")" = "partial USAGE_ITERATIONS_EXCLUDED" ] || fail "R26: 합계에 없는 보조 모델 호출(usage.iterations)이 있는데 추정함: $(r26_est "$r26_bad") / $(r26_chk "$r26_bad")"
+r26_bad="{$r26_full,\"api_requests\":1,\"usage_unidentified_records\":2}"
+[ "$(r26_est "$r26_bad")" = null ] && [ "$(r26_chk "$r26_bad")" = "partial USAGE_REQUEST_ID_MISSING" ] || fail "R26: message.id 없는 레코드가 있는데 추정함: $(r26_est "$r26_bad") / $(r26_chk "$r26_bad")"
+[ "$(r26_chk '{}')" = "unavailable " ] && [ "$(r26_chk 'null')" = "unavailable " ] && [ "$(r26_est '{}')" = null ] || fail "R26: usage 가 없는 캡처가 unavailable 이 아님"
+[ "$(r26_chk "{$r26_full}")" = "transcript " ] || fail "R26: 완전한 usage 가 transcript 로 판정되지 않음"
+# speed·inference_geo 미보고는 표준 요금으로 가정해 추정하되 그 가정을 적는다. 둘 다 보고된 요청만이면 가정 문구가 없다
+r26_asm() { ( source "$CFG"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.assumptions' ); }
+[ "$(r26_est "{$r26_full}")" = 0.004 ] || fail "R26: speed·geo 미보고 요청의 추정이 표준 요금 환산이 아님"
+case "$(r26_asm "{$r26_full}")" in *"speed 미보고 요청은 standard 로 가정"*"inference_geo 미보고 요청은 표준 요금"*) ;; *) fail "R26: speed·geo 미보고 가정이 assumptions 에 없음: $(r26_asm "{$r26_full}")";; esac
+case "$(r26_asm "{$r26_full,\"speeds\":[\"standard\",\"unreported\"],\"inference_geos\":[\"global\"]}")" in *"speed 미보고"*) ;; *) fail "R26: 일부 요청의 speed 미보고 가정이 빠짐";; esac
+case "$(r26_asm "{$r26_full,\"speeds\":[\"standard\"],\"inference_geos\":[\"global\"]}")" in *"미보고"*) fail "R26: 보고된 speed·geo 에 가정 문구가 붙음";; esac
 ( source "$CFG"; claude_model_pricing claude-haiku-5-5 >/dev/null || claude_model_pricing claude-opus-5-5-20260101 >/dev/null ) && fail "R26: 가격표에 없는 모델(길이별 요금·날짜 접미사 ID)에 가격을 돌려줌"
 ( source "$CFG"; printf '{"cli":"claude_native","cost_usd":null,"estimated_cost_usd":null,"usage_observation_status":"unavailable"}\n' > "$TMP/r26.usage"; [ "$(usage_summary "$TMP/r26.usage" | jq -r '.usage_unobserved_invocations')" = 1 ] ) \
   || fail "R26: 전사에 usage 가 없는 native 호출이 미관측으로 세어지지 않음"
@@ -300,6 +327,72 @@ FEATURE_NATIVE_REPORT_WAIT_TRIES=2 sim_stop agentnone feature-validator
 role_ro VALIDATOR "validator-design-06-b" "design-validator-round-06" "$TMP/v6r.json"
 [ "$RC" = 1 ] && grep -q 'report_status NO_REPORT' "$TMP/last.log" && [ ! -e "$TMP/v6r.json" ] || { cat "$TMP/last.log"; fail "무보고: 보고 없는 실행이 성공으로 처리됨 (rc $RC)"; }
 pass "보고 레코드 지연 → 기다려 캡처 / 끝까지 없으면 NO_REPORT(성공 아님)"
+
+# ================= U1 불완전한 usage 의 종단 경로: 훅이 누락을 세고, usage 행은 unknown + partial(완료 판정은 그대로) =================
+u1_row() { jq -c --arg l "$1" 'select(.label==$l)' .agent-work/usage.jsonl; }
+# 위 지연 보고 사례의 전사는 usage 에 cache_read·cache_creation 필드가 없다 → 필수 필드 누락. 결과는 수용됐고(위 rc 0) 비용만 unknown 이다
+[ "$(u1_row design-validator-round-05 | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .input_uncached, .output, .num_turns, .context_last_turn, .success] | @csv')" = '"unknown",,"partial","USAGE_FIELDS_INCOMPLETE",,,,,true' ] \
+  || fail "U1: 필수 필드가 없는 usage 가 추정 비용·토큰으로 기록됨: $(u1_row design-validator-round-05)"
+# 실패한 호출의 사유(report 상태)는 usage 진단 코드에 덮이지 않는다
+[ "$(u1_row design-validator-round-06 | jq -r '[.cost_kind, .usage_observation_status, .usage_error, .success] | @csv')" = '"unknown","partial","NATIVE_REPORT_NO_REPORT+USAGE_FIELDS_INCOMPLETE",false' ] \
+  || fail "U1: 보고 실패 사유와 usage 진단 코드가 함께 남지 않음: $(u1_row design-validator-round-06)"
+# assistant 메시지 2개 중 하나에 usage 가 없다 → API 요청 2건·usage 누락 1건으로 센다(요청 1건만 관측한 것으로 집계하지 않는다)
+role_ro VALIDATOR "validator-design-41-a" "design-validator-round-41" "$TMP/v41.json"; [ "$RC" = 42 ] || fail "U1: 요청 발행 실패"
+sim_pre; sim_post agentmiss claude-opus-5-5; u1_prompt="$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.updatedInput.prompt')"
+{ jq -nc --arg p "$u1_prompt" '{type:"user", agentId:"agentmiss", sessionId:"sess-main", message:{role:"user", content:$p}}'
+  jq -nc '{type:"assistant", agentId:"agentmiss", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"u1", model:"claude-opus-5-5", stop_reason:"tool_use", usage:{input_tokens:3, cache_read_input_tokens:500, cache_creation_input_tokens:20, output_tokens:40, cache_creation:{ephemeral_5m_input_tokens:12, ephemeral_1h_input_tokens:8}, speed:"standard", inference_geo:"global"}, content:[{type:"tool_use", name:"Read", input:{}}]}}'
+  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentmiss", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"u2", model:"claude-opus-5-5", stop_reason:"end_turn", content:[{type:"text", text:$r}]}}'
+} > "$TMP/transcripts/agent-agentmiss.jsonl"
+sim_stop agentmiss feature-validator
+jq -e '.report_status=="OK" and .usage.api_requests==2 and .usage.usage_missing_requests==1 and .usage.usage_incomplete_requests==0 and .usage.input_tokens==3' "$ND/results/$(req_get '.request_id').capture.json" >/dev/null \
+  || fail "U1: 훅이 usage 없는 요청을 세지 않음: $(jq -c '.usage' "$ND/results/$(req_get '.request_id').capture.json")"
+role_ro VALIDATOR "validator-design-41-b" "design-validator-round-41" "$TMP/v41.json"
+[ "$RC" = 0 ] && [ "$(jq -r '.verdict' "$TMP/v41.json")" = PASS ] || { cat "$TMP/last.log"; fail "U1: usage 가 불완전하다는 이유로 결과 수용이 바뀜 (rc $RC)"; }
+[ "$(u1_row design-validator-round-41 | jq -r '[.cost_kind, .estimated_cost_usd, .pricing_basis, .usage_observation_status, .usage_error, .input_uncached, .cache_read, .output, .success] | @csv')" = '"unknown",,,"partial","USAGE_REQUESTS_MISSING",,,,true' ] \
+  && u1_row design-validator-round-41 | jq -e '.pricing_assumptions | test("2건 중 1건의 usage 가 전사에 없다")' >/dev/null \
+  || fail "U1: usage 가 없는 요청이 있는데 추정 비용·토큰이 기록됨: $(u1_row design-validator-round-41)"
+# 토큰 필드가 숫자가 아니거나 음수인 전사: 훅의 요약(jq 한 벌)이 죽지 않고 보고를 캡처하며, 그 요청을 불완전으로 센다
+role_ro VALIDATOR "validator-design-42-a" "design-validator-round-42" "$TMP/v42.json"; [ "$RC" = 42 ] || fail "U1: 요청 발행 실패(42)"
+sim_pre; sim_post agentneg claude-opus-5-5; u1_prompt="$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.updatedInput.prompt')"
+{ jq -nc --arg p "$u1_prompt" '{type:"user", agentId:"agentneg", sessionId:"sess-main", message:{role:"user", content:$p}}'
+  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentneg", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"g1", model:"claude-opus-5-5", stop_reason:"end_turn", usage:{input_tokens:-500, cache_read_input_tokens:"n/a", cache_creation_input_tokens:0, output_tokens:40, cache_creation:"n/a"}, content:[{type:"text", text:$r}]}}'
+} > "$TMP/transcripts/agent-agentneg.jsonl"
+sim_stop agentneg feature-validator
+jq -e '.report_status=="OK" and .usage.api_requests==1 and .usage.usage_incomplete_requests==1' "$ND/results/$(req_get '.request_id').capture.json" >/dev/null \
+  || fail "U1: 비정상 토큰 필드가 있는 전사를 캡처하지 못했거나 불완전으로 세지 않음: $(cat "$ND/results/$(req_get '.request_id').capture.json" 2>/dev/null)"
+role_ro VALIDATOR "validator-design-42-b" "design-validator-round-42" "$TMP/v42.json"; [ "$RC" = 0 ] || { cat "$TMP/last.log"; fail "U1: 수용 실패(42) (rc $RC)"; }
+[ "$(u1_row design-validator-round-42 | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .input_uncached] | @csv')" = '"unknown",,"partial","USAGE_FIELDS_INCOMPLETE",' ] \
+  || fail "U1: 음수·비숫자 토큰이 추정 비용으로 기록됨: $(u1_row design-validator-round-42)"
+# 요청 안에 보조 모델 호출(advisor_message)이 있다: 그 토큰(입력 96060·출력 10356)은 요청 합계(입력 4·출력 411)에 없다 → 합계만으로 추정하지 않는다. type message 뿐인 iterations 는 정상이다
+# 컨텍스트는 비용과 따로 잰다: 마지막 본 모델 호출(iterations 의 마지막 type message)의 입력 2 + 97610 이 그대로 남는다
+role_ro VALIDATOR "validator-design-43-a" "design-validator-round-43" "$TMP/v43.json"; [ "$RC" = 42 ] || fail "U1: 요청 발행 실패(43)"
+sim_pre; sim_post agentadv claude-opus-5-5; u1_prompt="$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.updatedInput.prompt')"
+{ jq -nc --arg p "$u1_prompt" '{type:"user", agentId:"agentadv", sessionId:"sess-main", message:{role:"user", content:$p}}'
+  jq -nc '{type:"assistant", agentId:"agentadv", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"a1", model:"claude-opus-5-5", stop_reason:"tool_use", usage:{input_tokens:2, cache_read_input_tokens:100, cache_creation_input_tokens:0, output_tokens:10, cache_creation:{ephemeral_5m_input_tokens:0, ephemeral_1h_input_tokens:0}, speed:"standard", inference_geo:"global", iterations:[{type:"message", input_tokens:2, output_tokens:10, cache_read_input_tokens:100, cache_creation_input_tokens:0}]}, content:[{type:"tool_use", name:"Read", input:{}}]}}'
+  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentadv", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"a2", model:"claude-opus-5-5", stop_reason:"end_turn", usage:{input_tokens:4, cache_read_input_tokens:186251, cache_creation_input_tokens:0, output_tokens:411, cache_creation:{ephemeral_5m_input_tokens:0, ephemeral_1h_input_tokens:0}, speed:"standard", inference_geo:"global", iterations:[{type:"message", input_tokens:2, output_tokens:121, cache_read_input_tokens:88641, cache_creation_input_tokens:0}, {type:"advisor_message", model:"claude-fable-5-2", input_tokens:96060, output_tokens:10356, cache_read_input_tokens:0, cache_creation_input_tokens:0}, {type:"message", input_tokens:2, output_tokens:290, cache_read_input_tokens:97610, cache_creation_input_tokens:0}]}, content:[{type:"text", text:$r}]}}'
+} > "$TMP/transcripts/agent-agentadv.jsonl"
+sim_stop agentadv feature-validator
+jq -e '.report_status=="OK" and .usage.api_requests==2 and .usage.usage_side_iteration_requests==1 and .usage.usage_missing_requests==0 and .usage.usage_incomplete_requests==0' "$ND/results/$(req_get '.request_id').capture.json" >/dev/null \
+  || fail "U1: 훅이 보조 모델 호출이 있는 요청을 세지 않음: $(jq -c '.usage' "$ND/results/$(req_get '.request_id').capture.json")"
+role_ro VALIDATOR "validator-design-43-b" "design-validator-round-43" "$TMP/v43.json"; [ "$RC" = 0 ] || { cat "$TMP/last.log"; fail "U1: 수용 실패(43) (rc $RC)"; }
+[ "$(u1_row design-validator-round-43 | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .output, .context_last_turn, .success] | @csv')" = '"unknown",,"partial","USAGE_ITERATIONS_EXCLUDED",,97612,true' ] \
+  && [ "$(u1_row design-validator-round-43 | jq -r '.context_source')" = last_message_iteration ] \
+  || fail "U1: 합계에 없는 보조 모델 호출이 있는데 추정 비용이 기록됐거나, 마지막 본 모델 호출의 컨텍스트(2 + 97610 — 요청 합계 186255 아님)가 남지 않음: $(u1_row design-validator-round-43)"
+# message.id 가 없거나 문자열이 아닌 assistant 레코드: 서로 다른 요청 2건이 한 요청으로 묶여 마지막 토큰만 남으면 안 된다 → 묶지 않고 세기만 한다(요약 jq 가 죽지 않고 보고는 캡처)
+role_ro VALIDATOR "validator-design-44-a" "design-validator-round-44" "$TMP/v44.json"; [ "$RC" = 42 ] || fail "U1: 요청 발행 실패(44)"
+sim_pre; sim_post agentnoid claude-opus-5-5; u1_prompt="$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.updatedInput.prompt')"
+{ jq -nc --arg p "$u1_prompt" '{type:"user", agentId:"agentnoid", sessionId:"sess-main", message:{role:"user", content:$p}}'
+  jq -nc '{type:"assistant", agentId:"agentnoid", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{model:"claude-opus-5-5", stop_reason:"tool_use", usage:{input_tokens:3, cache_read_input_tokens:500, cache_creation_input_tokens:0, output_tokens:40, cache_creation:{ephemeral_5m_input_tokens:0, ephemeral_1h_input_tokens:0}, speed:"standard", inference_geo:"global"}, content:[{type:"tool_use", name:"Read", input:{}}]}}'
+  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentnoid", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:7, model:"claude-opus-5-5", stop_reason:"end_turn", usage:{input_tokens:5, cache_read_input_tokens:600, cache_creation_input_tokens:0, output_tokens:50, cache_creation:{ephemeral_5m_input_tokens:0, ephemeral_1h_input_tokens:0}, speed:"standard", inference_geo:"global"}, content:[{type:"text", text:$r}]}}'
+} > "$TMP/transcripts/agent-agentnoid.jsonl"
+sim_stop agentnoid feature-validator
+jq -e '.report_status=="OK" and .usage.api_requests==0 and .usage.usage_unidentified_records==2 and .usage.input_tokens==0' "$ND/results/$(req_get '.request_id').capture.json" >/dev/null \
+  || fail "U1: 훅이 message.id 없는 레코드를 세지 않았거나 한 요청으로 묶음: $(cat "$ND/results/$(req_get '.request_id').capture.json" 2>/dev/null)"
+role_ro VALIDATOR "validator-design-44-b" "design-validator-round-44" "$TMP/v44.json"; [ "$RC" = 0 ] || { cat "$TMP/last.log"; fail "U1: 수용 실패(44) (rc $RC)"; }
+[ "$(u1_row design-validator-round-44 | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .input_uncached, .output, .num_turns, .context_last_turn, .success] | @csv')" = '"unknown",,"partial","USAGE_REQUEST_ID_MISSING",,,,605,true' ] \
+  || fail "U1: message.id 없는 요청이 정상 관측으로 기록됐거나, 마지막 레코드 자체의 usage 로 정해지는 컨텍스트(5 + 600)가 남지 않음: $(u1_row design-validator-round-44)"
+[ "$( ( source "$CFG"; usage_summary | jq -r '[.usage_unobserved_invocations >= 5, .estimated_cost_usd < 0.01] | @csv' ) )" = 'true,true' ] || fail "U1: 불완전 관측 행이 미관측 집계에 들어가지 않음"
+pass "U1. 불완전한 usage(필수 필드 누락·음수·비숫자·일부 요청의 usage 누락·합계에 없는 보조 모델 호출·message.id 없는 레코드) → 비용 unknown·관측 partial·토큰 null, 결과 수용은 불변. context_last_turn 은 마지막 본 모델 호출의 usage 가 검증될 때만 따로 남는다"
 
 # ================= R11 다른 모델로 fallback =================
 role_ro VALIDATOR "validator-design-03-a" "design-validator-round-03" "$TMP/v3.json"; [ "$RC" = 42 ] || fail "R11: 요청 발행 실패"

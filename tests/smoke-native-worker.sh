@@ -120,7 +120,10 @@ reset_tree() { # 테스트 환경 정리 — 파이프라인 동작 아님
 # SIM_DENY(거부 사유): 이 스킬의 훅은 통과시켰지만 다른 PreToolUse 훅이 같은 호출을 거부했다 — 메인 전사에 거부 결과만 남고 Agent 는 실행되지 않는다.
 SIM_OUT=""; SIM_LAST_AGENT=""; SIM_LAST_TOOL=""; SIM_SEQ=0; SIM_TU=""
 MAIN_TR="$TMP/transcripts/main-sess-main.jsonl"; mkdir -p "$TMP/transcripts"; : > "$MAIN_TR"
-sim_agent() { # report-text   환경: SIM_SIDE(Agent 부작용 명령) SIM_DENY
+# SIM_USAGE_1 / SIM_USAGE_2: 전사의 두 API 요청(작업 요청 · 보고 요청)이 싣는 usage(JSON). 지정하지 않으면 아래 기본값이다.
+SIM_USAGE_1_DEFAULT='{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100,"output_tokens":50}'
+SIM_USAGE_2_DEFAULT='{"input_tokens":5,"cache_read_input_tokens":2000,"cache_creation_input_tokens":0,"output_tokens":70}'
+sim_agent() { # report-text   환경: SIM_SIDE(Agent 부작용 명령) SIM_DENY SIM_USAGE_1 SIM_USAGE_2
   local req report="$1" prompt aid tr model effort intent tool
   req="$(req_file)"; intent="$(jq -r '.session_intent' "$req")"
   SIM_SEQ=$((SIM_SEQ + 1)); SIM_TU="toolu_sim_$SIM_SEQ"
@@ -160,10 +163,10 @@ sim_agent() { # report-text   환경: SIM_SIDE(Agent 부작용 명령) SIM_DENY
     else
       jq -nc --arg p "$prompt" --arg a "$aid" '{type:"user", agentId:$a, sessionId:"sess-main", message:{role:"user", content:$p}}'
     fi
-    jq -nc --arg a "$aid" --arg m "$model" --arg e "$effort" \
-      '{type:"assistant", agentId:$a, sessionId:"sess-main", requestedModel:$m, effort:$e, message:{id:("m1-" + ($a)), model:$m, stop_reason:"tool_use", usage:{input_tokens:10, cache_read_input_tokens:1000, cache_creation_input_tokens:100, output_tokens:50}, content:[{type:"tool_use", name:"Edit", input:{}}]}}'
-    jq -nc --arg a "$aid" --arg m "$model" --arg e "$effort" --arg r "$report" \
-      '{type:"assistant", agentId:$a, sessionId:"sess-main", requestedModel:$m, effort:$e, message:{id:("m2-" + ($a)), model:$m, stop_reason:"tool_use", usage:{input_tokens:5, cache_read_input_tokens:2000, cache_creation_input_tokens:0, output_tokens:70}, content:[{type:"tool_use", name:"SubagentHandback", input:{message:$r}}]}}'
+    jq -nc --arg a "$aid" --arg m "$model" --arg e "$effort" --argjson u "${SIM_USAGE_1:-$SIM_USAGE_1_DEFAULT}" \
+      '{type:"assistant", agentId:$a, sessionId:"sess-main", requestedModel:$m, effort:$e, message:{id:("m1-" + ($a)), model:$m, stop_reason:"tool_use", usage:$u, content:[{type:"tool_use", name:"Edit", input:{}}]}}'
+    jq -nc --arg a "$aid" --arg m "$model" --arg e "$effort" --arg r "$report" --argjson u "${SIM_USAGE_2:-$SIM_USAGE_2_DEFAULT}" \
+      '{type:"assistant", agentId:$a, sessionId:"sess-main", requestedModel:$m, effort:$e, message:{id:("m2-" + ($a)), model:$m, stop_reason:"tool_use", usage:$u, content:[{type:"tool_use", name:"SubagentHandback", input:{message:$r}}]}}'
   } >> "$tr"
   jq -n --arg a "$aid" --arg t "$(jq -r '.agent_definition' "$req")" --arg tp "$tr" \
     '{hook_event_name:"SubagentStop", session_id:"sess-main", agent_id:$a, agent_type:$t, agent_transcript_path:$tp, stop_hook_active:false}' | "$HOOK"
@@ -268,6 +271,60 @@ run; [ "$RC" = 2 ] && [ "$(reason)" = WORKER_SESSION_MISMATCH ] && [ "$(req_coun
   || fail "E: 변조된 handoff 로 fresh Agent 요청이 나감 (rc $RC, $(reason), 요청 $(req_count)개)"
 unset WORKER_SESSION_ROTATE_INPUT_TOKENS
 pass "E. R18 — 유효한 handoff 뒤에만 새 Agent(재실행 pass 는 source tree 대조에 안 걸림), 변조된 handoff → WORKER_SESSION_MISMATCH"
+
+# ================= E2. 세션 교체 판단의 컨텍스트 측정은 비용 관측 판정과 분리된다 =================
+# 비용을 추정할 수 없는 호출(usage 관측 partial)이어도, 마지막 본 모델 호출의 입력이 검증되면 그 값으로 교체를 판단한다.
+# 보조 모델 호출이 낀 요청의 usage 합계는 본 모델 호출 여러 번의 합이다(아래 fixture: 합계 186255, 마지막 본 모델 호출 97612) — 합계로 판단하면 안 된다.
+e2_row() { jq -cs --arg l "$(cat ".agent-work/units/$1/last-usage-label")" '[ .[] | select(.role=="WORKER" and .label==$l) ] | last' .agent-work/usage.jsonl; }   # 그 unit 의 마지막 워커 호출 행
+e2_unit01() { # 임계치  unit01-보고-요청-usage  [unit01-작업-요청-usage]
+  reset_tree; export WORKER_SESSION_ROTATE_INPUT_TOKENS="$1"
+  run; expect_req 01-intake worker NEW "E2"
+  SIM_USAGE_2="$2" SIM_USAGE_1="${3:-$SIM_USAGE_1_DEFAULT}" SIM_SIDE='echo "worker 01" >> src/u01.txt' sim_agent "$DONE_JSON" || fail "E2: dispatch 실패"
+  run
+}
+E2_STD='"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"speed":"standard","inference_geo":"global"'
+E2_ADVISOR="{\"input_tokens\":4,\"cache_read_input_tokens\":186251,\"cache_creation_input_tokens\":0,\"output_tokens\":411,$E2_STD,\"iterations\":[
+  {\"type\":\"message\",\"input_tokens\":2,\"output_tokens\":121,\"cache_read_input_tokens\":88641,\"cache_creation_input_tokens\":0},
+  {\"type\":\"advisor_message\",\"model\":\"claude-fable-5-2\",\"input_tokens\":96060,\"output_tokens\":10356,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0},
+  {\"type\":\"message\",\"input_tokens\":2,\"output_tokens\":290,\"cache_read_input_tokens\":97610,\"cache_creation_input_tokens\":0}]}"
+# (1) 보조 모델 호출 포함, 마지막 본 모델 컨텍스트 97612 < 임계치 100000 → 유지. 요청 합계(186255)로 판단했다면 교체됐을 값이다
+e2_unit01 100000 "$E2_ADVISOR"; expect_req 02-drop worker RESUME "E2-1(유지)"
+[ "$(e2_row 01-intake | jq -r '[.cost_kind, .usage_observation_status, .usage_error, .context_last_turn, .context_source, .input_uncached] | @csv')" = '"unknown","partial","USAGE_ITERATIONS_EXCLUDED",97612,"last_message_iteration",' ] \
+  || fail "E2-1: 비용 unknown·partial 인 행에 마지막 본 모델 호출의 컨텍스트(97612)가 남지 않음: $(e2_row 01-intake)"
+[ ! -e .agent-work/worker-handoff.json ] && ! grep -q '세션 교체 판단 보류' "$TMP/run.log" || fail "E2-1: 임계치 미만인데 교체됐거나, 측정값 없이 '판단 보류' 로 유지됨"
+# (2) 같은 전사, 임계치 97612 → 다음 unit 에서 교체
+e2_unit01 97612 "$E2_ADVISOR"; expect_req 02-drop worker NEW "E2-2(교체)"
+jq -e '.generation==2 and .last_completed_unit=="01-intake" and .next_unit=="02-drop"' .agent-work/worker-handoff.json >/dev/null && [ -f .agent-work/.session-feature-worker.native.json.gen1 ] \
+  || fail "E2-2: 임계치 이상인데 handoff·세대 교체가 없음"
+grep -q '세션 교체 예약: context_last_turn(실측, 창 크기 관측 불가 → 고정 임계치) 97612tok' "$TMP/run.log" || fail "E2-2: 교체 근거가 마지막 본 모델 호출의 실측(97612)이 아님"
+# (3) 앞선 요청의 usage 가 불완전(필수 필드 누락), 마지막 요청은 정상 → 비용 unknown, 컨텍스트는 판단 가능(2005 ≥ 2005 → 교체 / 2005 < 2006 → 유지)
+E2_BROKEN_FIRST='{"input_tokens":10,"output_tokens":50}'
+e2_unit01 2005 "$SIM_USAGE_2_DEFAULT" "$E2_BROKEN_FIRST"; expect_req 02-drop worker NEW "E2-3(교체)"
+[ "$(e2_row 01-intake | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .context_last_turn, .context_source] | @csv')" = '"unknown",,"partial","USAGE_FIELDS_INCOMPLETE",2005,"last_request_usage"' ] \
+  || fail "E2-3: 앞선 요청이 불완전할 때 마지막 요청의 컨텍스트가 남지 않음: $(e2_row 01-intake)"
+e2_unit01 2006 "$SIM_USAGE_2_DEFAULT" "$E2_BROKEN_FIRST"; expect_req 02-drop worker RESUME "E2-3(유지)"
+[ ! -e .agent-work/worker-handoff.json ] && ! grep -q '세션 교체 판단 보류' "$TMP/run.log" || fail "E2-3: 임계치 미만 유지가 측정값에 근거하지 않음"
+# (4) 마지막 본 모델 호출이 불완전 → 비용 unknown, 교체 판단 보류(세션 유지 — 불명확하다고 새 세션을 만들지 않는다). 임계치 1 이라 값이 하나라도 잡혔으면 교체됐다
+for e2_bad in '{"input_tokens":5,"output_tokens":70}' \
+              "{\"input_tokens\":4,\"cache_read_input_tokens\":186251,\"cache_creation_input_tokens\":0,\"output_tokens\":411,$E2_STD,\"iterations\":[{\"type\":\"message\",\"input_tokens\":2,\"output_tokens\":121,\"cache_read_input_tokens\":88641,\"cache_creation_input_tokens\":0},{\"type\":\"message\",\"input_tokens\":2,\"output_tokens\":290,\"cache_creation_input_tokens\":0}]}" \
+              "{\"input_tokens\":4,\"cache_read_input_tokens\":186251,\"cache_creation_input_tokens\":0,\"output_tokens\":411,$E2_STD,\"iterations\":[{\"type\":\"advisor_message\",\"input_tokens\":96060,\"output_tokens\":10356,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}]}" \
+              "{\"input_tokens\":5,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":0,\"output_tokens\":70,$E2_STD,\"iterations\":\"n/a\"}" \
+              "{\"input_tokens\":5,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":0,\"output_tokens\":70,$E2_STD,\"iterations\":[null,{\"type\":\"message\",\"input_tokens\":\"x\",\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":0}]}"; do
+  e2_unit01 1 "$e2_bad"; expect_req 02-drop worker RESUME "E2-4(보류)"
+  [ "$(e2_row 01-intake | jq -r '[.cost_kind, .context_last_turn, .context_source, .success] | @csv')" = '"unknown",,,true' ] || fail "E2-4: 불완전한 마지막 호출에서 컨텍스트 값이 기록됨: $(e2_row 01-intake) ← $e2_bad"
+  [ ! -e .agent-work/worker-handoff.json ] && grep -q '세션 교체 판단 보류' "$TMP/run.log" && [ -f .agent-work/units/01-intake/done.json ] || fail "E2-4: 측정값이 없는데 교체됐거나 보류 로그·unit 완료가 없음 ← $e2_bad"
+done
+# (5) 보조 모델 호출이 없는 정상 호출: 비용 추정·교체 동작 그대로(2005 ≥ 2005 → 교체, 2005 < 2006 → 유지). iterations 가 type message 하나뿐인 요청도 정상 관측이다
+e2_unit01 2005 "$SIM_USAGE_2_DEFAULT"; expect_req 02-drop worker NEW "E2-5(교체)"
+[ "$(e2_row 01-intake | jq -r '[.usage_observation_status, .usage_error, .context_last_turn, .context_source] | @csv')" = '"transcript",,2005,"last_request_usage"' ] || fail "E2-5: 정상 호출의 행이 달라짐: $(e2_row 01-intake)"
+e2_unit01 2006 "$SIM_USAGE_2_DEFAULT"; expect_req 02-drop worker RESUME "E2-5(유지)"
+[ ! -e .agent-work/worker-handoff.json ] || fail "E2-5: 임계치 미만인데 교체됨"
+e2_unit01 2005 "{\"input_tokens\":5,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":0,\"output_tokens\":70,$E2_STD,\"iterations\":[{\"type\":\"message\",\"input_tokens\":5,\"output_tokens\":70,\"cache_read_input_tokens\":2000,\"cache_creation_input_tokens\":0}]}" \
+  "{\"input_tokens\":10,\"cache_read_input_tokens\":1000,\"cache_creation_input_tokens\":100,\"output_tokens\":50,\"cache_creation\":{\"ephemeral_5m_input_tokens\":100,\"ephemeral_1h_input_tokens\":0},\"speed\":\"standard\",\"inference_geo\":\"global\"}"
+expect_req 02-drop worker NEW "E2-5(iterations 가 본 모델 호출뿐 — 교체)"
+[ "$(e2_row 01-intake | jq -r '[.cost_kind, .usage_observation_status, .context_last_turn, .context_source] | @csv')" = '"estimated","transcript",2005,"last_message_iteration"' ] || fail "E2-5: 본 모델 호출뿐인 iterations 가 정상 관측·추정이 아님: $(e2_row 01-intake)"
+unset WORKER_SESSION_ROTATE_INPUT_TOKENS
+pass "E2. 컨텍스트 측정 분리 — 보조 모델 호출 포함(97612: 미만 유지·이상 교체, 합계 186255 미사용), 앞선 요청 불완전(판단 가능), 마지막 호출 불완전(판단 보류·세션 유지), 정상 호출(기존 동작)"
 
 # ================= F. R17 부모 세션 소실 =================
 reset_tree

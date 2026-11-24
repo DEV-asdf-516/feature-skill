@@ -2552,7 +2552,8 @@ verify_approved_fingerprint() {
 #   input_effective = input_uncached + cache_read + cache_write — 진단용 파생값이지 provider billing 공식 필드가 아니다.
 #   cache_read 는 invocation 안의 model turn 들에서 읽힌 cache 누계일 수 있으므로 num_turns 와 함께 해석한다.
 #   input_per_turn = floor(input_effective / num_turns) — 턴당 평균 입력, 컨텍스트 점유량의 근사치(context_last_turn 이 null 일 때의 대체값). num_turns 없으면 null.
-#   context_last_turn = 그 invocation 의 마지막 model 호출이 실제로 넣은 입력(claude: stream-json 마지막 assistant usage 합, codex: rollout 마지막 token_count.last_token_usage.input_tokens).
+#   context_last_turn = 그 invocation 의 마지막 model 호출이 실제로 넣은 입력(claude: stream-json 마지막 assistant usage 합, codex: rollout 마지막 token_count.last_token_usage.input_tokens,
+#     native Agent: 전사의 마지막 본 모델 호출 입력 — 출처는 context_source(last_message_iteration | last_request_usage), 비용 관측 판정(usage_observation_status)과 따로 검증한다).
 #     = 그 시점의 컨텍스트 창 점유량. 세션 교체 판단은 이 값을 먼저 쓴다. context_window = 모델 창 크기(claude: result.modelUsage[<워커 모델>].contextWindow — 보조 모델 항목이 섞여 오므로 워커 모델 키 우선, codex: model_context_window).
 #   CLI 종료 성공/실패와 무관하게 파싱 가능한 telemetry 가 있으면 기록한다(exit_code/success). 파싱 불가면 WARN 후 생략 —
 #   telemetry 는 best effort 이며 파싱 실패로 작업을 실패시키거나 같은 유료 invocation 을 재실행하지 않는다.
@@ -2601,18 +2602,61 @@ claude_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
     *) return 1 ;;
   esac
 }
+# native Agent 전사에서 읽은 usage(capture.usage)의 관측 판정 — 추정과 usage 행이 같은 판정을 쓴다(jq 정의 한 벌).
+#   transcript  : 모든 API 요청의 usage 를 읽었고 네 토큰 필드(input·output·cache_read·cache_creation)가 전부 0 이상의 숫자다.
+#   partial     : 일부만 읽었다 — usage 가 없는 요청(USAGE_REQUESTS_MISSING), 필수 필드가 없거나 숫자가 아니거나 음수(USAGE_FIELDS_INCOMPLETE),
+#                 요청 안의 보조 모델 호출(usage.iterations 의 advisor_message 등 — 그 토큰은 요청의 usage 합계에 들어 있지 않다, USAGE_ITERATIONS_EXCLUDED).
+#                 message.id 가 없는 assistant 레코드(요청 단위로 묶을 수 없다 — 몇 건의 요청인지 모른다, USAGE_REQUEST_ID_MISSING).
+#                 누락을 0 으로 읽지 않는다: 비용은 추정하지 않고(unknown) 토큰 합계도 행에 싣지 않는다(codex 의 USAGE_FIELDS_INCOMPLETE 와 같은 규칙).
+#   unavailable : usage 를 하나도 읽지 못했다.
+#   usage_missing_requests·usage_incomplete_requests·usage_side_iteration_requests·usage_unidentified_records 는 훅이 요청별로 센 값이다(이 값이 없는 옛 캡처는 0 으로 본다 — 합계 필드 검사는 그대로 적용된다).
+CLAUDE_NATIVE_USAGE_JQ='
+  def native_tok: type == "number" and . >= 0;
+  def native_usage_check:
+    . as $u
+    | ["input_tokens","output_tokens","cache_read_input_tokens","cache_creation_input_tokens"] as $req
+    | if ($u | type) != "object" or ([$req[] as $k | $u[$k]] | all(. == null)) then {status:"unavailable", error:null, detail:"usage 미관측"}
+      else ([$req[] as $k | select($u[$k] | native_tok | not) | $k]
+            + [("cache_write_5m_input_tokens","cache_write_1h_input_tokens") as $k | select($u[$k] != null and ($u[$k] | native_tok | not)) | $k]) as $bad
+        | (($u.usage_missing_requests // 0) | if type == "number" then . else 1 end) as $miss
+        | (($u.usage_incomplete_requests // 0) | if type == "number" then . else 1 end) as $inc
+        | (($u.usage_side_iteration_requests // 0) | if type == "number" then . else 1 end) as $side
+        | (($u.usage_unidentified_records // 0) | if type == "number" then . else 1 end) as $unid
+        | if ($bad | length) > 0 or $inc > 0 then
+            {status:"partial", error:"USAGE_FIELDS_INCOMPLETE",
+             detail:("usage 필수 토큰 필드가 없거나 숫자가 아니거나 음수다(" + (if ($bad | length) > 0 then ($bad | join(", ")) else "요청 \($inc)건" end) + ") — 0 으로 읽지 않는다")}
+          elif $unid > 0 then
+            {status:"partial", error:"USAGE_REQUEST_ID_MISSING", detail:"assistant 레코드 \($unid)건에 message.id 가 없다 — API 요청 단위로 묶을 수 없어 합산·환산하지 않는다"}
+          elif $miss > 0 then
+            {status:"partial", error:"USAGE_REQUESTS_MISSING", detail:"API 요청 \($u.api_requests // "?")건 중 \($miss)건의 usage 가 전사에 없다 — 관측한 요청만으로 합산하지 않는다"}
+          elif $side > 0 then
+            {status:"partial", error:"USAGE_ITERATIONS_EXCLUDED", detail:"요청 \($side)건에 보조 모델 호출(usage.iterations 의 advisor_message 등)이 있다 — 그 토큰은 요청의 usage 합계에 들어 있지 않아 합산·환산하지 않는다"}
+          else {status:"transcript", error:null, detail:null} end
+      end;'
+claude_native_usage_check() { # <capture.usage JSON> → {status, error, detail}
+  jq -nc --argjson u "$1" "$CLAUDE_NATIVE_USAGE_JQ"' $u | native_usage_check'
+}
 # claude_native_estimate_cost <capture.usage JSON> <가격 JSON> → {estimated_cost_usd, assumptions}. 추정할 수 없으면 estimated_cost_usd=null 과 그 사유.
+#   usage 가 불완전하면(위 판정이 transcript 가 아니면) 추정하지 않는다 — 누락 필드를 0 으로 계산한 금액은 정상 추정치처럼 보이는 틀린 값이다.
 #   캐시 쓰기는 TTL 별 단가가 다르다 — 전사의 TTL 구분(5분/1시간) 합이 캐시 쓰기 총량과 맞을 때만 계산한다(구분이 없으면 추측하지 않는다).
+#   speed·inference_geo 를 전사가 보고하지 않은 요청(unreported)은 표준 요금·global 로 가정해 추정하고, 그 가정을 assumptions 에 적는다
+#   (codex 추정의 service tier/리전 가정과 같은 규칙. fast·us 로 보고된 요청이 하나라도 있으면 추정하지 않는다).
 claude_native_estimate_cost() {
-  jq -nc --argjson u "$1" --argjson r "$2" '
-    ($u.cache_creation_input_tokens // 0) as $cw | ($u.cache_write_5m_input_tokens // 0) as $w5 | ($u.cache_write_1h_input_tokens // 0) as $w1
-    | if $u.input_tokens == null then {estimated_cost_usd:null, assumptions:"usage 미관측"}
-      elif ($w5 + $w1) != $cw then {estimated_cost_usd:null, assumptions:"캐시 쓰기 토큰의 TTL 구분(5분/1시간)이 전사에 없어 단가를 정할 수 없다"}
-      elif (($u.speeds // ["standard"]) - ["standard","unreported"] | length) > 0 then {estimated_cost_usd:null, assumptions:"fast mode 요청이 섞여 있다(표준 요금표로 환산하지 않는다)"}
-      elif (($u.inference_geos // []) | index("us")) != null then {estimated_cost_usd:null, assumptions:"US 전용 추론(inference_geo us) 요청이 섞여 있다(1.1x — 표준 요금표로 환산하지 않는다)"}
-      else {estimated_cost_usd: ((($u.input_tokens // 0) * $r.input + ($u.cache_read_input_tokens // 0) * $r.cache_read + $w5 * $r.cache_write_5m + $w1 * $r.cache_write_1h
-                                  + ($u.output_tokens // 0) * $r.output) / 1000000),
-            assumptions: "전사의 요청별 usage 합산 × API 표준 요금(캐시 쓰기는 TTL 별 단가). 구독 사용량·실제 청구액 아님"} end'
+  jq -nc --argjson u "$1" --argjson r "$2" "$CLAUDE_NATIVE_USAGE_JQ"'
+    ($u | native_usage_check) as $chk
+    | if $chk.status != "transcript" then {estimated_cost_usd:null, assumptions:$chk.detail}
+      else
+        $u.cache_creation_input_tokens as $cw | ($u.cache_write_5m_input_tokens // 0) as $w5 | ($u.cache_write_1h_input_tokens // 0) as $w1
+        | ($u.speeds // ["unreported"]) as $sp | ($u.inference_geos // ["unreported"]) as $geo
+        | if ($w5 + $w1) != $cw then {estimated_cost_usd:null, assumptions:"캐시 쓰기 토큰의 TTL 구분(5분/1시간)이 전사에 없어 단가를 정할 수 없다"}
+          elif ($sp - ["standard","unreported"] | length) > 0 then {estimated_cost_usd:null, assumptions:"fast mode 요청이 섞여 있다(표준 요금표로 환산하지 않는다)"}
+          elif ($geo | index("us")) != null then {estimated_cost_usd:null, assumptions:"US 전용 추론(inference_geo us) 요청이 섞여 있다(1.1x — 표준 요금표로 환산하지 않는다)"}
+          else {estimated_cost_usd: (($u.input_tokens * $r.input + $u.cache_read_input_tokens * $r.cache_read + $w5 * $r.cache_write_5m + $w1 * $r.cache_write_1h
+                                      + $u.output_tokens * $r.output) / 1000000),
+                assumptions: ("전사의 요청별 usage 합산 × API 표준 요금(캐시 쓰기는 TTL 별 단가). 구독 사용량·실제 청구액 아님"
+                              + (if ($sp | index("unreported")) != null then " / speed 미보고 요청은 standard 로 가정" else "" end)
+                              + (if ($geo | index("unreported")) != null then " / inference_geo 미보고 요청은 표준 요금(US 전용 아님)으로 가정" else "" end))} end
+      end'
 }
 codex_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
   case "$1" in
