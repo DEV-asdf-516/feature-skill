@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================
 # Native Agent bridge — Shell ↔ 대화형 메인 Claude Code 세션의 네이티브 Agent 인계
-# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — config.sh 가 끝에서 읽는다. 단독 실행은 아래 'discard' 하나뿐)
+# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — config.sh 가 끝에서 읽는다. 단독 실행은 맨 아래 'redispatch'/'discard' 뿐이고, 그 진입은 프로세스당 한 번만 돈다)
 #
 # Shell 은 현재 대화형 세션의 Agent 도구를 직접 부를 수 없다. 그래서 claude_native 로 라우팅된 역할 호출은 두 번에 나뉜다:
 #   1차 실행  PREPARE  : 요청(requests/<id>.json) + 완전히 렌더링한 payload(requests/<id>.prompt.txt) + pending.json 을 원자적으로 쓰고
@@ -16,6 +16,7 @@
 #                 같은 호출을 거부했을 수 있다. DISPATCHED 는 PostToolUse 가 같은 tool_use_id 의 실행 성공을 확인했을 때만 된다.
 #   DISPATCHING 에서 재실행하면 러너가 메인 전사에서 그 tool_use_id 의 도구 결과를 읽어 판정한다(native_dispatch_evidence):
 #     거부 확인(DENIED)  → exit 43 NATIVE_DISPATCH_DENIED(요청 state 불변). 사용자 결정 뒤 'redispatch'(같은 요청을 PREPARED 로) 또는 'discard'.
+#     Agent 정의 미발견("Agent type … not found")은 거부 종류가 함께 있어도 DENIED 가 아니다 — 실행 전 거부가 증명되지 않으므로 UNKNOWN(대기·재전송 금지).
 #     그 밖(UNKNOWN/EXECUTED) → exit 42 로 대기. 실행 여부 불명인 요청은 다시 보내지 않는다(훅이 두 번째 dispatch 를 거부한다).
 #   SubagentStop 은 PostToolUse 보다 먼저 올 수 있다 — DISPATCHING 에서도 전사 결속을 거쳐 RESULT_READY 가 된다.
 # 메인이 요약·재작성한 텍스트는 어디에서도 결과 원본으로 읽지 않는다 — 읽는 것은 Claude Code 가 쓴 전사와 훅 페이로드뿐이다.
@@ -231,11 +232,18 @@ native_request_set() { # jq-filter [jq args...]  — 현재 pending 요청 갱�
 #            (Claude Code 2.1.330 실측: 다른 PreToolUse 훅의 거부 = toolDenialKind "permission-rule", 내용 "PreToolUse:Agent hook error: …")
 #   EXECUTED 실행된 흔적이 있다(캡처, PostToolUse 기록, 이 요청의 프롬프트를 받은 subagent 전사, 오류가 아닌 도구 결과).
 #   UNKNOWN  그 밖 전부 — 전사 없음·결과 레코드 없음·모르는 형태의 오류. 불명은 거부가 아니다.
+# 판정 순서: 실행 증거(EXECUTED) → Agent 정의 미발견 오류(UNKNOWN, NATIVE_EVID_REASON=AGENT_TYPE_NOT_FOUND) → 알려진 실행 전 거부(DENIED) → 그 밖(UNKNOWN).
+#   "Agent type '<이름>' not found" 는 Agent 정의 로딩 실패다. 그 호출이 DISPATCHING 으로 기록된 뒤라면(PreToolUse 는 지났다) 다른 훅·도구 검증의 순서가 얽혀
+#   메시지만으로 '실행 전 거부가 확정됐다'고 말할 수 없다 — 알려진 toolDenialKind 가 같은 레코드에 있어도 재전송 가능(DENIED)으로 올리지 않는다.
+#   문구는 그 tool_use_id 의 tool_result 내용(잘라 내기 전 전체)에서만 찾는다. 레코드 단위 오류 필드(toolUseResult)는 그 레코드의 tool_result 가 하나뿐일 때만
+#   같은 호출의 것으로 본다. 전사의 다른 도구 결과·다른 턴에 같은 문구가 있어도 영향이 없다. agent 이름·따옴표 모양은 가리지 않는다.
+#   거부 정보(toolDenialKind · permissionDecision)도 레코드 단위 필드다 — 같은 규칙으로, 그 레코드의 tool_result 가 하나뿐일 때만 이 호출의 거부 증거로 쓴다.
+#   tool_result 가 여럿인 레코드에서는 그 거부가 다른 도구 호출의 것일 수 있으므로 쓰지 않는다(DENIED 로 올리지 않는다 → UNKNOWN, 재전송 불가).
 NATIVE_DENIAL_KINDS='["permission-rule","user-rejected","automode-blocked","automode-unavailable"]'
-NATIVE_EVID=""; NATIVE_EVID_DETAIL=""
+NATIVE_EVID=""; NATIVE_EVID_DETAIL=""; NATIVE_EVID_REASON=""
 native_dispatch_evidence() {
   local req tu tp rec sub
-  req="$(native_request_file)"; NATIVE_EVID=UNKNOWN; NATIVE_EVID_DETAIL=""
+  req="$(native_request_file)"; NATIVE_EVID=UNKNOWN; NATIVE_EVID_DETAIL=""; NATIVE_EVID_REASON=""
   tu="$(jq -r '.dispatch_attempt.tool_use_id // ""' "$req")"; tp="$(jq -r '.dispatch_attempt.transcript_path // ""' "$req")"
   if [ -f "$(native_capture_file)" ]; then NATIVE_EVID=EXECUTED; NATIVE_EVID_DETAIL="결과 캡처 파일이 있다"; return 0; fi
   if jq -e '.post_tool.launch_confirmed == true' "$req" >/dev/null 2>&1; then
@@ -249,18 +257,30 @@ native_dispatch_evidence() {
   [ -n "$tp" ] && [ -f "$tp" ] || { NATIVE_EVID_DETAIL="메인 세션 전사(${tp:-미기록})를 읽을 수 없다"; return 0; }
   # 그 tool_use_id 의 도구 결과 레코드(마지막 것). 큰 전사를 통째로 파싱하지 않도록 먼저 줄을 거른다.
   rec="$(grep -F "\"$tu\"" "$tp" 2>/dev/null | jq -c --arg tu "$tu" 'select(.type=="user" and (.message.content|type)=="array")
+      | ([.message.content[] | select(.type=="tool_result")] | length) as $n
       | (.message.content[] | select(.type=="tool_result" and .tool_use_id==$tu)) as $r
-      | {is_error:($r.is_error == true), kind:(.toolDenialKind // null), decision:(.permissionDecision // null),
-         text:($r.content | if type=="string" then . else tostring end | .[0:600])}' 2>/dev/null | tail -1 || true)"   # 단독 실행은 set -e·pipefail 이다 — 줄이 없어도 여기서 죽지 않는다
+      | ($r.content | if type=="string" then . else tostring end) as $full
+      | (if $n == 1 and .toolUseResult != null then (.toolUseResult | if type=="string" then . else tostring end) else "" end) as $rec_err
+      | {is_error:($r.is_error == true), results:$n,
+         kind:(if $n == 1 then (.toolDenialKind // null) else null end), decision:(if $n == 1 then (.permissionDecision // null) else null end),
+         agent_type_not_found:([$full, $rec_err] | any(test("agent type.{0,200}not found"; "i"))),
+         text:($full | .[0:600])}' 2>/dev/null | tail -1 || true)"   # 단독 실행은 set -e·pipefail 이다 — 줄이 없어도 여기서 죽지 않는다
   [ -n "$rec" ] || { NATIVE_EVID_DETAIL="메인 세션 전사에 tool_use_id $tu 의 도구 결과가 아직 없다$(jq -r 'if .post_tool != null then " (PostToolUse 는 실행 확인으로 볼 수 없는 응답을 기록했다 — 형태 \(.post_tool.response_shape), 키 \(.post_tool.response_keys|tostring))" else "" end' "$req")"; return 0; }
-  if printf '%s' "$rec" | jq -e --argjson kinds "$NATIVE_DENIAL_KINDS" '.is_error and (.kind as $k | $kinds | index($k) != null)' >/dev/null 2>&1; then
+  if printf '%s' "$rec" | jq -e '.is_error and .agent_type_not_found' >/dev/null 2>&1; then
+    NATIVE_EVID_REASON=AGENT_TYPE_NOT_FOUND
+    NATIVE_EVID_DETAIL="tool_use_id $tu 의 도구 결과가 Agent 정의 미발견 오류다(toolDenialKind $(printf '%s' "$rec" | jq -r '.kind // "없음"')) — 정의 로딩 실패이며 실행 전 거부가 증명되지 않는다. 거부 종류가 함께 있어도 재전송 가능한 거부로 보지 않는다(실행 여부 불명): $(printf '%s' "$rec" | jq -r '.text')"
+  elif printf '%s' "$rec" | jq -e --argjson kinds "$NATIVE_DENIAL_KINDS" '.is_error and (.kind as $k | $kinds | index($k) != null)' >/dev/null 2>&1; then
     NATIVE_EVID=DENIED
     NATIVE_EVID_DETAIL="$(printf '%s' "$rec" | jq -r '"거부 종류 \(.kind)" + (if .decision != null then " / \(.decision.source // "?"):\(.decision.reasonCode // "?")" else "" end) + " — \(.text)"')"
   elif printf '%s' "$rec" | jq -e '.is_error' >/dev/null 2>&1; then
-    NATIVE_EVID_DETAIL="tool_use_id $tu 의 도구 결과가 오류인데 알려진 '실행 전 거부' 종류가 아니다(toolDenialKind $(printf '%s' "$rec" | jq -r '.kind // "없음"')) — 실행 여부 불명: $(printf '%s' "$rec" | jq -r '.text')"
+    NATIVE_EVID_DETAIL="tool_use_id $tu 의 도구 결과가 오류인데 알려진 '실행 전 거부' 종류가 아니다(toolDenialKind $(printf '%s' "$rec" | jq -r 'if .results > 1 then "판정 불가 — 같은 레코드에 도구 결과가 \(.results)개라 레코드 단위 거부 정보가 이 호출의 것인지 알 수 없다" else (.kind // "없음") end')) — 실행 여부 불명: $(printf '%s' "$rec" | jq -r '.text')"
   else
     NATIVE_EVID=EXECUTED; NATIVE_EVID_DETAIL="메인 세션 전사의 도구 결과가 성공이다 — 실행됐는데 PostToolUse 훅이 기록하지 못했다"
   fi
+}
+# 단독 복구 명령의 표기. 명령은 그 요청이 속한 프로젝트 루트(피처 worktree)에서 돌아야 한다 — 메인 세션의 cwd 는 보통 원본 저장소이므로 cd 를 함께 적는다.
+native_recovery_cmd() { # redispatch|discard request-id
+  printf 'cd %q && bash %q %s %s' "$PROJECT_ROOT" "$(native_bridge_file)" "$1" "$2"
 }
 # 요청 state 를 바꾸지 않는 중단(43): 낡은 것은 요청이 아니라 바깥 조건(설정·다른 훅의 거부)이다.
 native_stop_keep_state() { # code detail recovery-line
@@ -278,7 +298,7 @@ native_dispatch_unconfirmed() {
   local id; id="$(native_request_field '.request_id')"
   native_stop_keep_state NATIVE_DISPATCH_DENIED \
     "native 요청 $id($(native_request_field '.role'), $(native_request_field '.model'))의 dispatch 가 실행 전에 거부됐다 — $(native_request_field '.dispatch_attempt.tool') tool_use_id $(native_request_field '.dispatch_attempt.tool_use_id'): $NATIVE_EVID_DETAIL. Agent 는 실행되지 않았다(모델 호출 아님). 같은 원인이면 다시 보내도 같은 거부가 난다 — 거부 원인을 사용자에게 그대로 보고한다. 다른 Agent 종류·다른 모델·claude -p 로 대체하지 않고, 거부한 훅을 끄지 않는다" \
-    "거부 원인을 해소했으면 bash $(native_bridge_file) redispatch $id — 같은 요청을 PREPARED 로 되돌린다(같은 dispatch 한 줄을 한 번 더 보낼 수 있다). 요청을 버리려면 bash $(native_bridge_file) discard $id"
+    "거부 원인을 해소했으면 $(native_recovery_cmd redispatch "$id") — 같은 요청을 PREPARED 로 되돌린다(같은 dispatch 한 줄을 한 번 더 보낼 수 있다). 요청을 버리려면 $(native_recovery_cmd discard "$id")"
 }
 
 # ---------- 종료 ----------
@@ -297,18 +317,24 @@ native_print_dispatch() {
        + "\n  도구 호출 자체가 오류·거부로 돌아오면(다른 훅의 거부 포함) 다시 보내지 않는다 — 바로 같은 feature-run 명령을 재실행해 러너의 판정(거부 확인 / 실행 여부 불명)을 받는다."
        + (if .agent_definition_written != null then
             "\n  [주의] agent 정의 파일(\(.agent_definition_path))을 이번 실행이 \(if .agent_definition_written=="created" then "새로 만들었다" else "고쳐 썼다" end). "
-            + "도구가 \"Agent type \(.agent_definition) not found\" 로 거부하면(세션 시작 때 .claude/agents/ 가 없었던 경우 — Claude Code 2.1.330 실측) 사용자에게 Claude Code 세션 재시작(같은 대화 재개)을 요청한 뒤 같은 dispatch 를 다시 보낸다. 그 거부는 모델 호출이 아니며 요청은 PREPARED 그대로다. 다른 Agent 종류로 대체하지 않는다."
+            + "도구가 \"Agent type \(.agent_definition) not found\" 로 돌아오면(세션 시작 때 .claude/agents/ 가 없었던 경우 — Claude Code 2.1.330 실측) 다시 보내지 말고 같은 feature-run 명령을 재실행해 요청 state 를 확인한다. "
+            + "state 가 PREPARED 그대로일 때만(PreToolUse 훅이 그 호출을 기록하지 않았다) 사용자에게 Claude Code 세션 재시작(같은 대화 재개)을 요청한 뒤 이 dispatch 를 한 번 보낸다. "
+            + "state 가 DISPATCHING 이면 실행 여부 불명이다 — 세션을 재시작한 뒤에도 다시 보내지 않고 러너가 낸 판정 근거를 사용자에게 보고한다. 다른 Agent 종류로 대체하지 않는다."
           else "" end)
      elif .state=="DISPATCHING" then
        "  dispatch 를 시도했지만(\(.dispatch_attempt.tool // "?") tool_use_id \(.dispatch_attempt.tool_use_id // "?"), \(.dispatch_attempt.at // "?")) 실행 확인(PostToolUse)도 결과 캡처도 없다 — 실행 여부 불명.\n" +
        "  판정 근거: \($evid) — \($evdetail)\n" +
+       (if $evreason=="AGENT_TYPE_NOT_FOUND" then
+          "  [Agent 정의 미발견] 도구가 \(.agent_definition) 정의를 찾지 못했다고 답했다(정의 파일 \(.agent_definition_path) — 세션 시작 뒤에 생겼거나 바뀐 정의는 Claude Code 세션을 재시작해야 읽힌다). " +
+          "이 요청은 이미 DISPATCHING 이다: 세션을 재시작한 뒤에도 같은 dispatch 를 다시 보내지 않는다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 discard 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하고, 거부가 확인되지 않았다는 경고가 붙는다). redispatch 는 거부 증거가 없어 거절된다.\n"
+        else "" end) +
        "  다시 호출하지 않는다(훅이 같은 요청의 두 번째 dispatch 를 거부한다). 방금 호출이 background 로 시작됐으면 완료 알림을 기다린 뒤 같은 명령을 재실행한다.\n" +
        "  도구 호출이 오류로 돌아왔거나 Agent 가 끝났는데도 이 상태면 그 사실과 위 근거를 사용자에게 보고한다(자동 재호출·자동 fresh 없음). 정리는 사용자 결정 뒤 discard 뿐이다."
      elif .state=="DISPATCHED" then
        "  실행이 확인됐고(\(.dispatched_at // "?"), agent \(.dispatched_agent_id // "?")) 결과가 아직 캡처되지 않았다 — 다시 호출하지 않는다. Agent 완료 알림을 기다린 뒤 같은 명령을 재실행한다.\n" +
        "  Agent 가 끝났는데도 이 상태면 SubagentStop 훅(.claude/hooks/feature_native_agent.sh)이 등록돼 있는지 확인하고 사용자에게 보고한다(자동 재호출·자동 fresh 없음)."
      else "  결과 캡처됨 — 같은 명령을 재실행하면 Shell 이 검증·수용한다." end) +
-    "\n  요청: \(.request_path)"' --arg evid "${NATIVE_EVID:-}" --arg evdetail "${NATIVE_EVID_DETAIL:-}" "$f"
+    "\n  요청: \(.request_path)"' --arg evid "${NATIVE_EVID:-}" --arg evdetail "${NATIVE_EVID_DETAIL:-}" --arg evreason "${NATIVE_EVID_REASON:-}" "$f"
 }
 native_stop_required() {
   native_print_dispatch
@@ -322,7 +348,7 @@ native_reject() { # code detail
   fi
   echo "[STOP] NATIVE_RESULT_REJECTED($1): $2" >&2
   echo "       요청: ${f:-?} — 결과를 수용하지 않았고 자동 재호출·자동 원복·자동 fresh 도 하지 않는다. 그대로 재실행하면 모델 호출 0회로 같은 사유로 멈춘다." >&2
-  echo "       복구(사용자 결정 뒤): bash $(native_bridge_file) discard <request_id> — 작업 트리가 호출 전 상태일 때만 요청을 치운다(아니면 변경을 먼저 확인·정리)." >&2
+  echo "       복구(사용자 결정 뒤): $(native_recovery_cmd discard '<request_id>') — 작업 트리가 호출 전 상태일 때만 요청을 치운다(아니면 변경을 먼저 확인·정리)." >&2
   printf '%s\n' "$1: $2" > "$(native_dir)/last-rejection.txt" 2>/dev/null || true
   ! declare -F native_on_rejected >/dev/null || native_on_rejected "$1" "$2"
   exit "$NATIVE_EXIT_REJECTED"
@@ -339,7 +365,7 @@ native_pending_backend_guard() {
   detail="처리되지 않은 native 요청($(native_pending_field '.request_id'), $prole, 호출 지점 '$(native_pending_field '.slot')', state $(native_request_field '.state'))이 있는데 지금 $prole 의 backend 는 '${be:-판정 불가}' 다(요청은 claude_native / $(native_request_field '.model')) — 요청 발행 뒤 모델·CLAUDE_BACKEND 가 바뀌었다. 남은 요청 위에서 다른 backend 를 호출하지 않는다. 설정을 요청 발행 시점으로 되돌려 재실행하면 같은 요청이 이어지고, backend 변경이 의도라면 사용자 결정 뒤 요청을 discard 한다"
   echo "[STOP] NATIVE_RESULT_REJECTED($code): $detail" >&2
   echo "       요청: $(native_request_file) — 요청 state 는 바꾸지 않았다. 모델 호출 0회. 자동 재호출·자동 원복·자동 fresh 없음." >&2
-  echo "       복구(사용자 결정 뒤): 설정 원복 후 재실행, 또는 bash $(native_bridge_file) discard <request_id> — 작업 트리가 호출 전 상태일 때만 요청을 치운다." >&2
+  echo "       복구(사용자 결정 뒤): 설정 원복 후 재실행, 또는 $(native_recovery_cmd discard '<request_id>') — 작업 트리가 호출 전 상태일 때만 요청을 치운다." >&2
   printf '%s\n' "$code: $detail" > "$(native_dir)/last-rejection.txt" 2>/dev/null || true
   ! declare -F native_on_rejected >/dev/null || native_on_rejected "$code" "$detail"
   exit "$NATIVE_EXIT_REJECTED"
@@ -467,13 +493,20 @@ native_message_json() { # message-file out
     | fromjson | select(type=="object")' "$1" > "$2.tmp" 2>/dev/null && mv "$2.tmp" "$2"
 }
 native_log_usage() { # role model label inv rc status
-  local cap; cap="$(native_capture_file)"
-  jq -nc --slurpfile c "$cap" --arg label "$3" --arg role "$1" --arg model "$2" --arg inv "$4" --argjson rc "$5" --arg st "$6" \
+  local cap rates est='{"estimated_cost_usd":null,"assumptions":null}' basis=null
+  cap="$(native_capture_file)"
+  # native subagent 는 비용을 보고하지 않는다 — 전사에서 읽은 토큰을 가격표(config.sh 의 claude_model_pricing)로 환산한다. 가격표에 없는 모델·환산할 수 없는 usage 는 unknown(0 달러 아님).
+  if declare -F claude_model_pricing >/dev/null && rates="$(claude_model_pricing "$2")"; then
+    est="$(claude_native_estimate_cost "$(jq -c '.usage // {}' "$cap")" "$rates")" || est='{"estimated_cost_usd":null,"assumptions":null}'
+    basis="\"$CLAUDE_PRICING_BASIS\""
+  fi
+  jq -nc --slurpfile c "$cap" --argjson est "$est" --argjson basis "$basis" --arg label "$3" --arg role "$1" --arg model "$2" --arg inv "$4" --argjson rc "$5" --arg st "$6" \
     --argjson v "${USAGE_SCHEMA_VERSION:-1}" --arg now "$(date '+%FT%T%z')" --arg req "$(native_request_field '.request_id')" '
     $c[0] as $c | ($c.usage // {}) as $u
     | { schema_version: $v, invocation_id: $inv, label: $label, role: $role, cli: "claude_native", backend: "claude_native", model: $model,
         effort: ($c.efforts_observed[0] // null), session: $c.agent_id, request_id: $req, agent_id: $c.agent_id, parent_session_id: $c.session_id,
-        cost_usd: null, cost_kind: "unknown", estimated_cost_usd: null, pricing_basis: null, pricing_assumptions: null, long_context_turns: null,
+        cost_usd: null, cost_kind: (if $est.estimated_cost_usd == null then "unknown" else "estimated" end), estimated_cost_usd: $est.estimated_cost_usd,
+        pricing_basis: (if $est.estimated_cost_usd == null then null else $basis end), pricing_assumptions: $est.assumptions, long_context_turns: null,
         input_uncached: ($u.input_tokens // null), cache_read: ($u.cache_read_input_tokens // null), cache_write: ($u.cache_creation_input_tokens // null),
         output: ($u.output_tokens // null), reasoning_output: null,
         input_effective: (if $u.input_tokens == null then null else (($u.input_tokens // 0) + ($u.cache_read_input_tokens // 0) + ($u.cache_creation_input_tokens // 0)) end),
@@ -537,20 +570,63 @@ native_role_call() { # mode ROLE session label prompt conv schema out raw
 }
 
 # ---------- 단독 실행: redispatch / discard (사용자 결정 뒤의 명시적 수리) ----------
-# 사용(피처 worktree 루트에서):
+# 사용:
 #   bash native-agent-bridge.sh redispatch <request_id>   거부가 확인된 dispatch 시도를 이력으로 옮기고 같은 요청을 PREPARED 로 되돌린다.
 #        조건: state DISPATCHING + 그 시도의 거부가 메인 전사에서 확인됨(native_dispatch_evidence == DENIED) + 작업 트리·원본 저장소가 요청 발행 시점 그대로.
 #        요청 id·session_intent·payload 는 그대로다 — 새 요청도 새 Agent(fresh)도 만들지 않는다. 불명·실행됨이면 거부한다.
 #   bash native-agent-bridge.sh discard <request_id>      요청을 버린다(재실행하면 같은 호출 지점이 새 요청을 발행한다).
 #        작업 트리가 요청의 호출 전 tree 와 같을 때만 pending 을 abandoned/ 로 옮긴다 — Agent 가 남긴 변경 위에서 조용히 새 요청을 만들지 않는다.
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+#
+# 프로젝트 루트(= .agent-work 가 있는 곳) 선택 — native_standalone_project_root 한 곳에서 정한다:
+#   ① FEATURE_PROJECT_ROOT 가 있으면 그 경로(명시가 우선). 상대 경로면 실행한 디렉터리 기준으로 풀어 절대 경로로 확정한 뒤에 쓴다.
+#   ② 없으면 현재 디렉터리가 속한 git worktree 의 루트. 다만 그 worktree 가 이 스킬이 설치된 저장소와 **같은 저장소**(git common dir 일치)일 때만이다.
+#      설치 저장소의 main working tree 자신이면 config.sh 의 기본값을 그대로 쓴다(종전 동작).
+#   ③ 다른 저장소·git 밖에서는 멈춘다 — 설치 위치(원본)의 .agent-work 로 조용히 넘어가지 않고, 무관한 저장소의 .agent-work 도 건드리지 않는다.
+#   이 판정은 단독 복구 명령에만 쓴다. config.sh 를 source 하는 다른 사용처(러너·하위 루프·집계 도구)의 PROJECT_ROOT 기본값과 러너의 경로 재바인딩은 그대로다.
+#   agent 정의 위치와 원본 상태 검사(native_origin_root / FEATURE_ORIGIN_ROOT)는 프로젝트 루트와 별개이며 바뀌지 않는다. 다른 worktree 의 요청은 찾지 않는다.
+# 진입은 프로세스당 한 번이다: 아래에서 config.sh 를 source 하면 config.sh 가 이 파일을 다시 source 한다(절대 경로 실행이면 그때도 BASH_SOURCE[0] == $0).
+#   재진입은 함수 정의만 다시 읽고 명령 처리는 하지 않는다. NATIVE_BRIDGE_MAIN_PID 는 export 하지 않는다(부모 프로세스에서 물려받은 값은 pid 가 달라 무시된다).
+_native_git_common_dir() { # dir → 그 저장소의 git common dir(물리 경로)
+  ( cd "$1" 2>/dev/null && c="$(git rev-parse --git-common-dir 2>/dev/null)" && cd "$c" 2>/dev/null && pwd -P )
+}
+NATIVE_STANDALONE_ROOT=""; NATIVE_STANDALONE_ROOT_EXPLICIT=0
+native_standalone_project_root() { # install-root → NATIVE_STANDALONE_ROOT (+ NATIVE_STANDALONE_ROOT_EXPLICIT). 실패하면 사유를 stderr 에 내고 1
+  local install="$1" top c_top c_install
+  NATIVE_STANDALONE_ROOT=""; NATIVE_STANDALONE_ROOT_EXPLICIT=0
+  if [ -n "${FEATURE_PROJECT_ROOT:-}" ]; then
+    [ -d "$FEATURE_PROJECT_ROOT" ] || { echo "[FAIL] FEATURE_PROJECT_ROOT 가 디렉터리가 아니다: $FEATURE_PROJECT_ROOT" >&2; return 1; }
+    top="$(git -C "$FEATURE_PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)" && [ "$(cd "$top" && pwd -P)" = "$(cd "$FEATURE_PROJECT_ROOT" && pwd -P)" ] \
+      || { echo "[FAIL] FEATURE_PROJECT_ROOT($FEATURE_PROJECT_ROOT)가 git working tree 의 루트가 아니다 — 프로젝트(피처 worktree) 루트를 지정하라" >&2; return 1; }
+    # 적힌 문자열이 아니라 확정한 절대 경로(git toplevel — 러너의 재바인딩과 같은 형태)를 쓴다. 상대 경로를 그대로 두면 아래의 cd 뒤에 다른 디렉터리를 가리킨다.
+    NATIVE_STANDALONE_ROOT="$top"; NATIVE_STANDALONE_ROOT_EXPLICIT=1; return 0
+  fi
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" \
+    || { echo "[FAIL] 현재 디렉터리($(pwd))가 git working tree 안이 아니다 — 어느 프로젝트의 요청인지 정할 수 없다. 요청이 속한 피처 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정하라(설치 위치 $install 의 요청으로 넘어가지 않는다)" >&2; return 1; }
+  if [ "$(cd "$top" && pwd -P)" = "$(cd "$install" && pwd -P)" ]; then NATIVE_STANDALONE_ROOT="$install"; return 0; fi
+  c_top="$(_native_git_common_dir "$top")"; c_install="$(_native_git_common_dir "$install")"
+  if [ -z "$c_top" ] || [ -z "$c_install" ] || [ "$c_top" != "$c_install" ]; then
+    echo "[FAIL] 현재 디렉터리의 저장소($top)는 이 스킬이 설치된 저장소($install)의 worktree 가 아니다(git common dir: ${c_top:-확인 불가} / ${c_install:-확인 불가}) — 무관한 저장소의 .agent-work 를 건드리지 않고, 설치 저장소의 요청으로 넘어가지도 않는다. 요청이 속한 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 명시하라" >&2
+    return 1
+  fi
+  NATIVE_STANDALONE_ROOT="$top"
+}
+if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${NATIVE_BRIDGE_MAIN_PID:-}" != "$$" ]; then
+  NATIVE_BRIDGE_MAIN_PID=$$
   set -euo pipefail
   NATIVE_BRIDGE_STANDALONE=1
-  case "${1:-}" in redispatch|discard) [ -n "${2:-}" ] || { echo "사용법: bash $0 {redispatch|discard} <request_id>   (피처 worktree 루트에서 실행)" >&2; exit 1; };;
-    *) echo "사용법: bash $0 {redispatch|discard} <request_id>   (피처 worktree 루트에서 실행)" >&2; exit 1;; esac
-  source "$(cd "$(dirname "$0")/.." && pwd)/config.sh"
-  native_pending_present || { echo "[FAIL] pending native 요청이 없다: $(native_pending_file)" >&2; exit 1; }
-  [ "$(native_pending_field '.request_id')" = "$2" ] || { echo "[FAIL] pending 요청은 $(native_pending_field '.request_id') 다 — '$2' 가 아니다" >&2; exit 1; }
+  _usage="사용법: bash $0 {redispatch|discard} <request_id>   (요청이 속한 프로젝트·피처 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)"
+  case "${1:-}" in redispatch|discard) [ -n "${2:-}" ] || { echo "$_usage" >&2; exit 1; };;
+    *) echo "$_usage" >&2; exit 1;; esac
+  _skill_dir="$(cd "$(dirname "$0")/.." && pwd)"
+  native_standalone_project_root "$(cd "$_skill_dir/../../.." && pwd)" || exit 1
+  # 스냅샷·세션 원장·산출물 경로($WORK_DIR 상대)는 현재 디렉터리 기준이다 — 정한 루트로 옮겨 PROJECT_ROOT 기준 경로와 같은 트리를 보게 한다.
+  cd "$NATIVE_STANDALONE_ROOT" || { echo "[FAIL] 프로젝트 루트로 이동 실패: $NATIVE_STANDALONE_ROOT" >&2; exit 1; }
+  # 설치 저장소 자신이면 config.sh 기본값(종전 문자열)을 그대로 둔다. worktree 면 러너의 재바인딩과 같은 값(git toplevel)을 넘긴다. export 하지 않는다.
+  # 명시한 FEATURE_PROJECT_ROOT 는 확정한 절대 경로로 바꿔 넘긴다(상대 경로는 cd 뒤에 뜻이 달라진다).
+  if [ "$NATIVE_STANDALONE_ROOT_EXPLICIT" = 1 ] || [ "$(pwd -P)" != "$(cd "$_skill_dir/../../.." && pwd -P)" ]; then FEATURE_PROJECT_ROOT="$NATIVE_STANDALONE_ROOT"; fi
+  source "$_skill_dir/config.sh"
+  native_pending_present || { echo "[FAIL] pending native 요청이 없다: $(native_pending_file) (프로젝트 루트 $PROJECT_ROOT — 다른 worktree 의 요청이면 그 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)" >&2; exit 1; }
+  [ "$(native_pending_field '.request_id')" = "$2" ] || { echo "[FAIL] 요청 ID 불일치: 프로젝트 루트 $PROJECT_ROOT 의 pending 요청은 $(native_pending_field '.request_id') 다 — '$2' 가 아니다(다른 worktree 의 요청을 찾아 처리하지 않는다)" >&2; exit 1; }
   cur="$(snapshot_worktree_tree)"
   state="$(native_request_field '.state')"
   if [ "$1" = redispatch ]; then

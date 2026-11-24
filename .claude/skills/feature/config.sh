@@ -169,6 +169,16 @@ UNIT_CHECK_TIMEOUT_SEC=120   # 제한 시간(초, 양의 정수). 넘으면 실�
 # 예: UNIT_CHECK_POLICY_PATHS="config/lint-rules.yml tools/checks"
 UNIT_CHECK_POLICY_PATHS=""
 
+# --- 검사 안내 문서 (선택) ---
+# 워커가 코드를 쓰기 전에 '어떤 결정론적 검사가 언제 도는지'를 알도록, 러너는 워커 호출 직전에 위 설정(UNIT_CHECK_CMD · FAST_CHECK_CMD · UNIT_CHECK_POLICY_PATHS)만으로
+# 작은 검사 계획(.agent-work/units/<id>/check-plan.json)을 만들어 경로와 요약을 프롬프트에 싣는다(검사 명령·모델 호출 0회 — 실제 검사는 종전 위치에서 그대로 다시 돈다).
+# 검사 명령 문자열만으로는 규칙을 알 수 없다. 프로젝트가 검사 규칙을 사람이 읽을 문서로 정리해 두었으면 그 파일 하나의 **worktree 상대 경로**를 여기 적는다 —
+# 본문을 프롬프트에 붙이지 않고 경로만 전달하며, 워커가 필요한 부분만 읽는다. 이 문서는 검사 판정을 대신하지 않는다.
+# 적은 경로가 worktree 의 일반 파일이 아니면(오타·절대 경로·'..'·디렉터리·심볼릭 링크) 워커를 부르기 전에 ENV_ERROR 로 멈춘다.
+# 비어 있으면(또는 이 줄이 없는 기존 config.sh 면) 미설정이다. 검사 두 개와 이 문서가 모두 미설정이면 검사 계획 자체를 만들지 않는다.
+# 예: CHECK_GUIDE_FILE="docs/check-guide.md"
+CHECK_GUIDE_FILE=""
+
 # --- 위험도별 추가 검증 (선택) ---
 # 리뷰 승인 뒤, 전체 TEST_CMD 앞에서 실행하는 프로젝트 명령 하나. 명령이 변경 내용(RISK_VERIFY_CHANGED_FILES)을 보고 위험도를 판정하고 그 위험도에 필요한
 # 추가 검증(계약·보안·통합 테스트 등)을 직접 수행한다 — 위험도 규칙과 테스트 명령은 프로젝트가 소유하고 스킬에는 없다. 새 LLM 호출·리뷰어는 없다.
@@ -2574,6 +2584,36 @@ USAGE_SCHEMA_VERSION=4
 #   gpt-6.2-astra 는 2026-11-18 같은 페이지에서 추가 조회했다(같은 규칙을 따른다 — 캐시 입력만 입력의 5%).
 #   gpt-5.6-sol 단가는 2026-11-21 까지 최소 유지 예정인 프로모션 단가다 — 이 날짜 뒤에는 요금표 재확인이 필요하다(basis 의 날짜가 그 근거).
 CODEX_PRICING_BASIS="openai-api-standard-2026-10-30"
+# Claude 모델 가격표 — native Agent(claude_native) 호출의 비용 추정에만 쓴다. claude -p 는 CLI 가 보고한 total_cost_usd(reported)를 그대로 쓴다.
+#   native subagent 는 비용을 보고하지 않고 전사에 토큰만 남긴다 → 토큰 × API 표준 요금으로 환산한다(estimated). 구독 사용량·실제 청구액이 아니다.
+#   per 1M tokens USD: {input, cache_read, cache_write_5m, cache_write_1h, output}. 기준: platform.claude.com/docs/en/about-claude/pricing (2026-11-24 조회).
+#   등록한 모델은 전 구간 단일 요금이다(1M context 를 표준 요금에 포함). 프롬프트 길이로 요금이 갈리는 모델(claude-haiku-5-5: 100,000 토큰 초과 구간)은
+#   요청별 프롬프트 길이가 있어야 계산할 수 있어 등록하지 않는다 — 여기 없는 모델은 estimated_cost_usd=null, cost_kind=unknown 이다(추측 가격 금지).
+#   정확한 모델 ID 만 매칭한다. fast mode(usage.speed != standard)·US 전용 추론(inference_geo == us)은 요금이 달라 추정하지 않는다(unknown).
+CLAUDE_PRICING_BASIS="anthropic-api-standard-2026-11-24"
+claude_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
+  case "$1" in
+    claude-fable-5-2|claude-mythos-5-2) printf '%s' '{"input":8,"cache_read":0.2,"cache_write_5m":10,"cache_write_1h":16,"output":40}' ;;
+    claude-opus-5-5)   printf '%s' '{"input":4,"cache_read":0.2,"cache_write_5m":5,"cache_write_1h":8,"output":20}' ;;
+    claude-opus-5)     printf '%s' '{"input":5,"cache_read":0.5,"cache_write_5m":6.25,"cache_write_1h":10,"output":25}' ;;
+    claude-sonnet-5-5) printf '%s' '{"input":2,"cache_read":0.1,"cache_write_5m":2.5,"cache_write_1h":4,"output":10}' ;;
+    claude-sonnet-5)   printf '%s' '{"input":2,"cache_read":0.2,"cache_write_5m":2.5,"cache_write_1h":4,"output":10}' ;;
+    *) return 1 ;;
+  esac
+}
+# claude_native_estimate_cost <capture.usage JSON> <가격 JSON> → {estimated_cost_usd, assumptions}. 추정할 수 없으면 estimated_cost_usd=null 과 그 사유.
+#   캐시 쓰기는 TTL 별 단가가 다르다 — 전사의 TTL 구분(5분/1시간) 합이 캐시 쓰기 총량과 맞을 때만 계산한다(구분이 없으면 추측하지 않는다).
+claude_native_estimate_cost() {
+  jq -nc --argjson u "$1" --argjson r "$2" '
+    ($u.cache_creation_input_tokens // 0) as $cw | ($u.cache_write_5m_input_tokens // 0) as $w5 | ($u.cache_write_1h_input_tokens // 0) as $w1
+    | if $u.input_tokens == null then {estimated_cost_usd:null, assumptions:"usage 미관측"}
+      elif ($w5 + $w1) != $cw then {estimated_cost_usd:null, assumptions:"캐시 쓰기 토큰의 TTL 구분(5분/1시간)이 전사에 없어 단가를 정할 수 없다"}
+      elif (($u.speeds // ["standard"]) - ["standard","unreported"] | length) > 0 then {estimated_cost_usd:null, assumptions:"fast mode 요청이 섞여 있다(표준 요금표로 환산하지 않는다)"}
+      elif (($u.inference_geos // []) | index("us")) != null then {estimated_cost_usd:null, assumptions:"US 전용 추론(inference_geo us) 요청이 섞여 있다(1.1x — 표준 요금표로 환산하지 않는다)"}
+      else {estimated_cost_usd: ((($u.input_tokens // 0) * $r.input + ($u.cache_read_input_tokens // 0) * $r.cache_read + $w5 * $r.cache_write_5m + $w1 * $r.cache_write_1h
+                                  + ($u.output_tokens // 0) * $r.output) / 1000000),
+            assumptions: "전사의 요청별 usage 합산 × API 표준 요금(캐시 쓰기는 TTL 별 단가). 구독 사용량·실제 청구액 아님"} end'
+}
 codex_model_pricing() { # model → 가격 JSON / 가격표에 없으면 1
   case "$1" in
     gpt-6.2-astra)
@@ -2850,7 +2890,8 @@ log_role_usage() { # cli role model label raw_or_log_path [exit_code] [invocatio
 # 파생 집계(별도 명령). legacy 행(in/out, v2 codex tokens_total 만 있는 행)도 읽는다. 사용: usage_summary [usage.jsonl]
 # 비용은 provenance 별로 따로 낸다 — 섞은 값은 이름에 estimate 를 붙인다:
 #   reported_cost_usd        = provider 가 보고한 cost_usd 의 합(claude)            / cost_usd = 같은 값(외부 호환용 옛 이름, 의미 불변)
-#   estimated_cost_usd       = 가격표 추정치 estimated_cost_usd 의 합(codex)
+#   estimated_cost_usd       = 가격표 추정치 estimated_cost_usd 의 합(codex + native Agent 로 실행한 claude)
+#   usage_unobserved_invocations = 사용량을 관측하지 못한 행 수(usage_observation_status 가 complete·transcript 가 아닌 것 — transcript 는 native Agent 전사에서 토큰을 읽은 관측이다)
 #   combined_cost_usd_estimate = reported + estimated (실제 청구액이 아니라 비교용 추정치)
 #   cost_unknown_invocations = 둘 다 null 인 행 수(가격표에 없는 codex 모델, telemetry 없는 행 등)
 # by_role / by_label / by_session: 어느 역할·호출·Claude 세션이 cache read 를 만드는지 보는 그룹 합계(같은 지표 세트).
@@ -2867,7 +2908,7 @@ usage_summary() {
       estimated_cost_usd: (map(.estimated_cost_usd // 0) | add),
       combined_cost_usd_estimate: (map((.cost_usd // 0) + (.estimated_cost_usd // 0)) | add),
       cost_unknown_invocations: (map(select(.cost_usd == null and .estimated_cost_usd == null)) | length),
-      usage_unobserved_invocations: (map(select((.usage_observation_status // "complete") != "complete")) | length),
+      usage_unobserved_invocations: (map(select((.usage_observation_status // "complete") as $s | $s != "complete" and $s != "transcript")) | length),
       pricing_bases: (map(.pricing_basis // empty) | unique),
       cache_read: (map(.cache_read // 0) | add),
       num_turns: (map(.num_turns // 0) | add),
@@ -2884,7 +2925,7 @@ usage_summary() {
       input_uncached: (map(.input_uncached // .in // 0) | add),
       cache_write: (map(.cache_write // 0) | add),
       tokens_total_codex: (map(select(.cli == "codex") | .tokens_total // 0) | add),
-      cost_note: "reported_cost_usd = provider 보고(claude) / estimated_cost_usd = codex 토큰 × API 표준 요금 환산 추정치 / combined 는 두 값의 합(실제 청구액 아님) / cost_unknown_invocations 는 둘 다 null 인 호출 수",
+      cost_note: "reported_cost_usd = provider 보고(claude -p) / estimated_cost_usd = 토큰 × API 표준 요금 환산 추정치(codex, native Agent 로 실행한 claude — 구독 사용량·실제 청구액 아님) / combined 는 두 값의 합(실제 청구액 아님) / cost_unknown_invocations 는 둘 다 null 인 호출 수",
       by_role: grouped(.role // "legacy"),
       by_label: grouped(.label // "legacy"),
       by_session: grouped(.session // "none"),
@@ -2898,7 +2939,7 @@ usage_cost_report_line() { # [usage.jsonl]
   [ "$s" != '{}' ] || return 0
   printf '%s' "$s" | jq -r '
     def money: if . == null then "n/a" else ("$" + (. * 10000 | round / 10000 | tostring)) end;
-    "비용(usage_summary, child invocation \(.invocations)건): Claude 보고 비용 \(.reported_cost_usd|money) (reported) / Codex 추정 비용 \(.estimated_cost_usd|money) (API 표준 요금 기준 환산, estimated) / 합계 추정 \(.combined_cost_usd_estimate|money) (실제 청구액 아님) / 추정 불가 \(.cost_unknown_invocations)건(사용량 미관측 \(.usage_unobserved_invocations)건 — 0달러 아님)"
+    "비용(usage_summary, child invocation \(.invocations)건): Claude 보고 비용 \(.reported_cost_usd|money) (reported) / 추정 비용(codex·claude native) \(.estimated_cost_usd|money) (API 표준 요금 기준 환산, estimated) / 합계 추정 \(.combined_cost_usd_estimate|money) (실제 청구액 아님) / 추정 불가 \(.cost_unknown_invocations)건(사용량 미관측 \(.usage_unobserved_invocations)건 — 0달러 아님)"
     + " — by_cli: " + ([ .by_cli | to_entries[] | "\(.key)=\(.value.invocations)건(reported \(.value.reported_cost_usd|money), estimated \(.value.estimated_cost_usd|money), unknown \(.value.cost_unknown_invocations))" ] | join(", "))'
 }
 

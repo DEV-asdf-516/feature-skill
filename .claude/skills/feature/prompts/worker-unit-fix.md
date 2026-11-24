@@ -10,6 +10,7 @@ ${UNIT_JSON}
 [IMPLEMENTATION CONTEXT]
 ${IMPL_CONTEXT}
 [/IMPLEMENTATION CONTEXT]
+${CHECK_PLAN}
 위 블록은 앞선 unit 들이 실제 코드로 확정한 구현 문맥의 압축 색인이다(source of truth 아님 — 무엇을 해야 하는가는 합의 문서 > 현재 코드 > 블록, 무엇이 존재하는가는 현재 코드. 적힌 symbol 은 현재 구현을 확인하고 재사용한다).
 
 기준 문서: ${WORK_DIR}/implementation.md(무엇 — material 구현 계약), ${WORK_DIR}/approach.md(어떻게 — REQUIRED 는 material decision 이며 적힌 symbol·책임 위치·호출 횟수·상태 변경 순서·transaction/lock/retry/cache 의미·외부 동작을 그대로, DELEGATED 는 그 안의 local implementation expression 으로 당신이 convention 과 기존 코드에 맞춰 가장 단순하게 정한다), ${WORK_DIR}/design.md(설계). [REFERENCE CODE] 와 문서가 인용한 참조 구현은 책임 배치·재사용 symbol·material control-flow·상태 invariant 를 고정한다 — 수정하면서 그것을 바꾸지 않는다(local 이름·helper 개수·줄 구조 같은 incidental expression 은 계약이 아니다). approach.md 의 동작 분기 계약은 수정 중에도 그대로다 — 문서에 없는 방어 분기·fallback·재시도로 실패를 덮지 않는다.

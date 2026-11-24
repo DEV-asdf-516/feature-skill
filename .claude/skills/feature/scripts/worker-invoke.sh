@@ -72,6 +72,13 @@ worker_native_input_fingerprint() { # [unit-dir]
     _fingerprint_files "$WORK_DIR/request.md" "$WORK_DIR/design.md" "$WORK_DIR/implementation.md" "$WORK_DIR/approach.md" "$WORK_DIR/decisions.md" \
       "$WORK_DIR/feature-scope.json" "$WORK_DIR/implementation-units.json"
     [ -z "${1:-}" ] || _fingerprint_files "$1/unit.json" "$1/scope.json" "$IMPL_CONTEXT_FILE"
+    # 검사 계획(선택): 요청 발행 뒤 검사 설정(명령·제한 시간)·안내 문서 내용·워커가 고칠 수 없는 선언 정책 파일이 바뀌면 낡은 안내를 받은 결과다(쓰기 범위 = unit scope / feature scope). 검사·안내 문서가 전부 미설정이면 아무것도 더하지 않는다(지문 불변).
+    if declare -F check_plan_input_fingerprint >/dev/null; then
+      local plan_fp plan_scope="$FEATURE_SCOPE_FILE"
+      [ -z "${1:-}" ] || plan_scope="$1/scope.json"
+      plan_fp="$(check_plan_input_fingerprint "${1:-$WORK_DIR}/check-plan.json" "$plan_scope")" || return 1
+      [ -z "$plan_fp" ] || printf 'check-plan\0%s\0' "$plan_fp"
+    fi
   } | sha256_stdin
 }
 
@@ -393,6 +400,7 @@ run_worker() { # prompt-file [unit-dir]
   local native_resume=0
   local stamp="" raw="" index_before="" index_after worker_rc before_tree="" after_tree violations scope_hash_before="" scope_hash_after baseline_before="" baseline_after units_hash_before=""
   local gap_context="${GAP_CONTEXT:-}" resolved_gaps=""
+  local check_plan_file="${unit_dir:-$WORK_DIR}/check-plan.json"
   if native_resume_active WORKER "$tag"; then native_resume=1; fi
   if [ "$native_resume" -eq 0 ]; then
   # 직전 실행이 기준선 변조로 멈췄으면 복구 전에는 워커를 부르지 않는다(변조된 값을 새 기준선으로 읽는 재실행 우회 차단)
@@ -462,6 +470,27 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   local rules_mode="short — 같은 작업 단위의 후속 턴"
   if [ "$resumed_turn" -eq 0 ]; then rules_mode="full — fresh 세션 최초 턴"; elif [ -n "$rules_recheck" ]; then rules_mode="full — $rules_recheck"; fi
   log "워커 규칙 전달${unit_id:+ (unit $unit_id)} [$tag]: $rules_mode, $(printf '%s' "$worker_rules" | wc -c | tr -d ' ') bytes"
+  # ---------- 검사 계획(check plan — scripts/fast-check.sh): 이 턴 뒤에 하네스가 돌릴 결정론적 검사를 워커가 코드를 쓰기 전에 알게 한다 ----------
+  # 설정과 작업 트리만으로 만든다(검사 명령·모델 호출 0회). 검사·안내 문서가 전부 미설정이면 파일도 프롬프트 블록도 없다(종전 프롬프트 그대로).
+  # CHECK_GUIDE_FILE 이 틀렸으면 여기서 멈춘다 — 모델 호출 전이다. 전달 범위는 규칙 재전달과 같은 경계를 쓴다(새 상태 파일 없음):
+  #   full  = fresh 세션 최초 턴 · 규칙 재전달 경계(러너 재실행 뒤 첫 턴·작업 단위 변경·압축 관측) · unit 구현 턴 · 직전 계획에서 지문이 바뀜
+  #   short = 같은 작업 단위의 후속 턴(경로·지문·변경 없음만)
+  # 블록은 ${CHECK_PLAN} 자리가 있는 템플릿(worker-unit.md · worker-unit-fix.md · worker-implement.md)에만 들어간다. unit 수정 턴은 보통 short 한 줄(경로·변경 없음)이고,
+  # 계획 지문이 바뀌었거나 규칙 재전달 경계면 전문이다. check-fix 템플릿은 계획 파일 경로를 고정 문장으로 가리킨다.
+  # 러너 밖(tests/worker-regression.sh — fast-check.sh 를 읽지 않는다)에서는 이 구간이 통째로 빠진다.
+  local check_plan="" check_plan_mode=""
+  if declare -F check_plan_prepare >/dev/null; then
+    check_plan_prepare "$check_plan_file" "$unit_id" "$unit_dir" \
+      || env_error "검사 계획(check plan)을 만들 수 없다 — ${CHECK_PLAN_ERROR:-원인 불명}. 워커를 부르지 않았다(모델·검사 명령 호출 0회)"
+    if [ "$CHECK_PLAN_STATUS" = enabled ]; then
+      check_plan_mode=short
+      if [ "$resumed_turn" -eq 0 ] || [ -n "$rules_recheck" ] || [ "$tag" = worker ] || [ "$CHECK_PLAN_CHANGED" = 1 ]; then check_plan_mode=full; fi
+      if grep -qF '${CHECK_PLAN}' "$SKILL_DIR/prompts/$prompt_file"; then
+        check_plan="$(check_plan_prompt_block "$check_plan_file" "$check_plan_mode")" || env_error "검사 계획 프롬프트 블록 구성 실패: $check_plan_file"
+      fi
+      log "검사 계획${unit_id:+ (unit $unit_id)} [$tag]: $check_plan_file (지문 ${CHECK_PLAN_FP:0:12}$([ "$CHECK_PLAN_CHANGED" != 1 ] || printf ', 직전 계획에서 바뀜')) — 프롬프트 전달 ${check_plan:+$check_plan_mode, }$(printf '%s' "$check_plan" | wc -c | tr -d ' ') bytes"
+    fi
+  fi
   _WORKER_RULES_EPOCH="$rules_epoch"; _WORKER_COMPACTION_SEEN=0
   # unit 호출: run_unit 이 워커 호출 전에 갱신한 implementation-context.json(앞 unit 확정 사실)을 그대로 넣는다 — test-fix 도 같은 파일(확정 전 상태)
   local impl_context=""
@@ -498,8 +527,8 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   fi
   prompt="$(WORKER_RULES="$worker_rules" REFERENCE_CODE="$reference_code" WORK_DIR="$WORK_DIR" TEST_CMD="$TEST_CMD" TEST_LOG="${TEST_LOG:-}" \
     UNIT_JSON="$unit_json" UNIT_ID="$unit_id" IMPL_CONTEXT="$impl_context" REVIEW_FILE="${REVIEW_FILE:-}" GAP_CONTEXT="$gap_context" \
-    UNIT_TURN="$unit_turn" CHANGED_CONTRACT="$changed_contract" \
-    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT} ${UNIT_TURN} ${CHANGED_CONTRACT}')" \
+    UNIT_TURN="$unit_turn" CHANGED_CONTRACT="$changed_contract" CHECK_PLAN="$check_plan" \
+    render_prompt "$SKILL_DIR/prompts/$prompt_file" '${WORKER_RULES} ${REFERENCE_CODE} ${WORK_DIR} ${TEST_CMD} ${TEST_LOG} ${UNIT_JSON} ${UNIT_ID} ${IMPL_CONTEXT} ${REVIEW_FILE} ${GAP_CONTEXT} ${UNIT_TURN} ${CHANGED_CONTRACT} ${CHECK_PLAN}')" \
     || env_error "워커 프롬프트 렌더링 실패"
   stamp="$(date '+%Y%m%d-%H%M%S')"; raw="$out_dir/$tag-$stamp.log"
   mkdir -p "$out_dir"

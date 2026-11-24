@@ -222,7 +222,7 @@ summary="$(bash -c "source $CFG; usage_summary")"
 [ -f .agent-work/usage-summary.json ] && [ "$(jq -c '[.invocations,.reported_cost_usd,.estimated_cost_usd,.combined_cost_usd_estimate,.cost_unknown_invocations]' .agent-work/usage-summary.json)" = "$(printf '%s' "$summary" | jq -c '[.invocations,.reported_cost_usd,.estimated_cost_usd,.combined_cost_usd_estimate,.cost_unknown_invocations]')" ] \
   || fail "I: usage-summary.json 이 usage_summary 와 다름"
 line="$(grep '비용(usage_summary' "$TMP/run.log")" || fail "I: DONE 로그에 비용 보고 줄이 없음"
-case "$line" in *"Claude 보고 비용 \$0.25 (reported)"*"Codex 추정 비용 \$0.0016 (API 표준 요금 기준 환산, estimated)"*"합계 추정 \$0.2516 (실제 청구액 아님)"*"추정 불가 0건(사용량 미관측 0건"*) ;; *) fail "I: 보고 줄의 숫자가 usage_summary 와 다름: $line";; esac
+case "$line" in *"Claude 보고 비용 \$0.25 (reported)"*"추정 비용(codex·claude native) \$0.0016 (API 표준 요금 기준 환산, estimated)"*"합계 추정 \$0.2516 (실제 청구액 아님)"*"추정 불가 0건(사용량 미관측 0건"*) ;; *) fail "I: 보고 줄의 숫자가 usage_summary 와 다름: $line";; esac
 case "$line" in *"claude=1건(reported \$0.25, estimated \$0"*"codex=1건(reported \$0, estimated \$0.0016"*) ;; *) fail "I: by_cli 분리 보고 없음: $line";; esac
 [ "$(printf '%s' "$summary" | jq -r '[.by_cli.codex.invocations,.by_cli.claude.invocations,.by_model["gpt-5.6-luna"].invocations,(.by_model["gpt-5.6-luna"].estimated_cost_usd*100000000|round),(.pricing_bases|join(","))]|@csv')" = '1,1,1,157000,"openai-api-standard-2026-10-30"' ] || fail "I: by_cli/by_model/pricing_bases 불일치: $summary"
 pass "I: DONE 보고(reported + estimated + combined 추정 + unknown 건수)가 usage_summary·usage-summary.json 과 같은 숫자, by_cli/by_model 분리"

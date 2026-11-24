@@ -190,6 +190,7 @@ tests/
 ├── smoke-worker-regression.sh  # worker-regression 하네스 회귀 — 가짜 워커로 DONE=exit 0 / DOC_GAP=exit 2 + 체크포인트가 production 이 인정하는 impl PASS 위에 생김 · provenance 가드 불변 · usage summary v3 (LLM 호출 없음)
 ├── smoke-fast-check.sh          # 프로젝트 빠른 검사 연결 회귀 — fixture 프로젝트의 정상·위반·실행 오류 명령: 미설정 생략·리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지 (mock)
 ├── smoke-verification-gates.sh  # 검증 게이트 회귀 — Unit 정적 검사(PASS·위반·오류·읽기 전용·수정 턴 1회·설정 변경)·위험도별 추가 검증(LOW·HIGH·UNKNOWN·위반→재승인)·DONE 사후 분석 보고서 (mock)
+├── smoke-check-plan.sh          # 검사 계획 사전 전달·검사 진단 요약 회귀 — 미설정 무변화·Unit/빠른 검사 사전 안내·안내 문서 경로 검증·큰 로그 요약(8 KiB)·판정은 종료 코드·세션 연속성 (mock)
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 39개 (문서·src·expected.json)
@@ -257,6 +258,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    FAST_CHECK_CMD=""                      # (선택) 리뷰 전 프로젝트 빠른 검사 명령. 빈 값 = 미설정(생략) — 아래 "프로젝트 빠른 검사"
    UNIT_CHECK_CMD=""                      # (선택) unit 마다 targeted test 앞에서 도는 정적 검사 명령 — 아래 "검증 게이트"
    RISK_VERIFY_CMD=""                     # (선택) 리뷰 승인 뒤 TEST_CMD 앞에서 도는 위험도별 추가 검증 명령 — 아래 "검증 게이트"
+   CHECK_GUIDE_FILE=""                    # (선택) 프로젝트가 쓴 검사 규칙 안내 문서의 worktree 상대 경로 — 아래 "검사 계획 사전 전달"
    ```
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
    빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 모든 스크립트 실행을 거부한다.
@@ -414,6 +416,19 @@ printf '{"risk_level":"%s","checks":%s}\n' "$level" "$checks" > "$RISK_VERIFY_RE
 - 위반 하나는 워커 수정 턴 하나를 쓴다(unit 한도·verify 한도 공유). 검사가 엄격할수록 리뷰어가 볼 위반은 줄지만 수정 턴과 `*_RETRIES_EXHAUSTED` 중단은 늘 수 있다.
 - 위험도 판정의 정확도는 프로젝트 명령에 달려 있다. 스킬은 결과 JSON 의 형식과 UNKNOWN 처리만 강제한다.
 
+### 검사 계획 사전 전달 · 검사 진단 요약
+
+`UNIT_CHECK_CMD` 나 `FAST_CHECK_CMD` 를 설정했으면, 러너는 워커를 부르기 직전에 **설정값만으로** 작은 검사 계획(`.agent-work/units/<id>/check-plan.json`)을 만들어 워커 프롬프트에 경로와 짧은 요약을 싣는다. 워커는 코드를 쓰기 전에 어떤 결정론적 검사가 언제 도는지, 선언된 규칙·설정 파일이 어디 있는지 안다. 목적은 뻔한 위반 때문에 드는 수정 턴(unit test-fix · check-fix)을 줄이는 것이다.
+
+- 검사 명령·모델을 추가로 부르지 않는다. 실제 검사는 종전 위치(Unit 검사 = unit 워커 턴 뒤, 빠른 검사 = 모든 unit 뒤 리뷰 직전)에서 그대로 다시 돌고 종료 코드로 판정한다. 계획은 사전 안내일 뿐이다.
+- 명령 문자열에서 규칙을 추측하지 않는다. 규칙 경로는 `UNIT_CHECK_POLICY_PATHS` 와 명령 문자열에 나온 작업 트리 파일만 싣고, 없으면 `unknown` 으로 적는다. 규칙을 사람이 읽을 문서로 정리해 두었으면 `CHECK_GUIDE_FILE="docs/check-guide.md"` 처럼 worktree 상대 경로를 적는다 — 본문은 프롬프트에 붙지 않고 경로만 간다. 틀린 경로는 워커 호출 전에 멈춘다.
+- 두 검사와 안내 문서가 모두 미설정이면 계획 파일도 프롬프트 블록도 없다.
+- 검사가 위반·오류로 끝나면 원본 로그 옆에 8 KiB 이하의 요약(`check-NNNN.log.digest.json` — 후보 줄·마지막 줄·잘림 여부·원본 경로)이 생긴다. 수정 턴은 요약을 먼저 보고 필요할 때만 원본을 읽는다. 원본 로그·실행 기록·판정은 그대로다.
+- 워커 프롬프트 템플릿(`worker-unit.md`)이 바뀌었으므로, 이 버전으로 올리기 전에 워커 단계에 들어간 **진행 중인 피처**는 `WORKER_SESSION_MISMATCH` 로 멈춘다(워커 세션 계약 지문). 이전 버전에서 마치거나 `--new` 로 시작한다. 처리되지 않은 native 요청은 `NATIVE_STALE_REQUEST` 가 된다. native 요청을 발행한 뒤 검사 명령·제한 시간·안내 문서 내용이나 워커가 고칠 수 없는 선언 정책 파일이 바뀌어도 같다(워커가 자기 scope 안의 규칙 파일을 고친 것은 해당하지 않는다).
+- 토큰·비용 절감 폭은 실모델로 재지 않았다. mock 실측: 2 unit 피처에서 unit 워커 첫 턴 프롬프트는 계획 블록만큼(약 1.2 KB) 늘고, 10,001 줄(369 KB) 검사 로그의 수정 턴 진단 묶음은 약 4 KB 다.
+
+상세 계약: `references/pipeline-contracts.md` 의 "검사 계획 사전 전달 · 검사 진단 요약".
+
 ### ntfy 완료 푸시 알림 (선택)
 
 `DONE`(리뷰 승인 + 테스트·린트 통과 — 사용자 승인 뒤의 `FINALIZED` 가 아니다)이 기록되면 러너가 [ntfy](https://ntfy.sh) HTTP API 로 휴대폰 푸시 알림을 보낸다(`scripts/notify-done.sh`). 발송 경로는 `curl` HTTP 요청 하나뿐이고 `uname`/OS 조건문이 없어 macOS·Linux·Windows(Git Bash/WSL) 어디서든 같게 동작한다.
@@ -518,6 +533,7 @@ bash tests/smoke-user-escalation-resume.sh # 합의 에스컬레이션(ASK_USER/
 bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 워커 DONE/DOC_GAP 종료 코드·impl PASS provenance 전제·usage summary. LLM 호출 없음
 bash tests/smoke-fast-check.sh            # 프로젝트 빠른 검사 연결: 미설정 생략·첫 검사/수정자 뒤 위반 시 리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도 소진·실행 오류·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지·혼합 설치·한글 경로·TERM 무시 자식 정리·수정 턴 중단 뒤 재실행·미결정 복구·확정 멱등. LLM 호출 없음
 bash tests/smoke-verification-gates.sh    # 검증 게이트: Unit 정적 검사·위험도별 추가 검증·DONE 사후 분석 보고서, mock LLM 호출 수 비교 출력. LLM 호출 없음
+bash tests/smoke-check-plan.sh            # 검사 계획 사전 전달·검사 진단 요약: 미설정 무변화, 워커 첫 턴 전 안내, 안내 문서 경로 검증, 10,000줄 로그 요약, 판정은 종료 코드. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
 bash tests/smoke-codex-usage.sh           # codex usage/비용: turn 합산·가격표(astra 단문/장문, 캐시 쓰기 별도율·12h-only TTL 근거, 가정 기록)·깨진 줄/usage:{} → unknown(과소 집계 없음)·DONE 비용 보고 일치. LLM 호출 없음

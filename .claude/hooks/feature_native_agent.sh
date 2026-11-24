@@ -227,7 +227,10 @@ case "$event" in
               last_stop_reason: ($last.message.stop_reason // null),
               usage: ([$a[] | {id:.message.id, u:.message.usage}] | group_by(.id) | map(last.u) | map(select(. != null))
                       | if length==0 then null else {api_requests:length, input_tokens:(map(.input_tokens // 0)|add), cache_read_input_tokens:(map(.cache_read_input_tokens // 0)|add),
-                          cache_creation_input_tokens:(map(.cache_creation_input_tokens // 0)|add), output_tokens:(map(.output_tokens // 0)|add)} end),
+                          cache_creation_input_tokens:(map(.cache_creation_input_tokens // 0)|add), output_tokens:(map(.output_tokens // 0)|add),
+                          cache_write_5m_input_tokens:(map(.cache_creation.ephemeral_5m_input_tokens // 0)|add),
+                          cache_write_1h_input_tokens:(map(.cache_creation.ephemeral_1h_input_tokens // 0)|add),
+                          speeds:(map(.speed // "unreported")|unique), inference_geos:(map(.inference_geo // "unreported")|unique)} end),
               context_last_turn: ($last.message.usage | if . == null then null else ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)) end),
               compacted: (any(.[$p.key+1:][]; .type=="system" and .subtype=="compact_boundary")) }
         end' "$transcript" 2>/dev/null; }

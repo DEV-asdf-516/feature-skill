@@ -359,4 +359,90 @@ run; [ "$RC" = 42 ] || fail "J: 재개 재시도 뒤 다음 요청이 발행되�
 [ -f .agent-work/units/02-drop/done.json ] && [ ! -s "$CLI_LOG" ] || fail "J: unit02 가 완료되지 않았거나 CLI 가 호출됨"
 pass "J. 다른 PreToolUse 훅이 워커 dispatch 를 거부 → NATIVE_DISPATCH_DENIED(NEED_USER, 요청·호출 전 기준 보존), 명시적 redispatch 뒤 같은 요청·같은 Agent 로 이어짐"
 
+# ================= K. 검사 계획(check plan)과 native 재실행 pass =================
+# 계획은 요청 발행(PREPARE) 전에 한 번 만들어 payload 에 실린다. 결과 없는 재실행·수용 pass 는 계획·프롬프트·호출 전 기준을 다시 만들지 않는다.
+# 요청 발행 뒤 검사 설정이 바뀌면 그 결과는 낡은 안내를 받은 것이다 — 기존 입력 지문 규칙(NATIVE_STALE_REQUEST)으로 불수용하고, 요청을 새 설정으로 덮어쓰거나 새 요청을 만들지 않는다.
+kcfg() { sed -i.bak "s|^$1=.*|$1=\"$2\"|" "$CFG" && rm -f "$CFG.bak" || fail "K: config 수정 실패($1)"; }
+ksha() { shasum -a 256 < "$1" | cut -d' ' -f1; }
+reset_tree; kcfg UNIT_CHECK_CMD "true"
+kplan=".agent-work/units/01-intake/check-plan.json"
+run; expect_req 01-intake worker NEW "K/unit01"
+idk="$(req_get '.request_id')"
+[ -f "$kplan" ] && jq -e '.unit_id=="01-intake" and .checks[0].status=="configured" and .checks[0].command=="true" and .checks[0].rule_sources=="unknown"' "$kplan" >/dev/null || fail "K: 요청 발행 전에 검사 계획이 만들어지지 않음"
+grep -q '^\[CHECK PLAN — ' "$(req_get '.prompt_path')" && grep -q "계획 파일: $kplan" "$(req_get '.prompt_path')" || fail "K: native payload 에 검사 계획 블록이 없음"
+k_plan="$(ksha "$kplan")"; k_prompt="$(req_get '.prompt_sha256')"; k_dispatch="$(req_get '.dispatch_sha256')"; k_before="$(cat .agent-work/units/01-intake/worker-before.tree)"; k_fp="$(req_get '.input_fingerprint')"
+run; expect_req 01-intake worker NEW "K/unit01 재실행"
+[ "$(req_get '.request_id')" = "$idk" ] && [ "$(req_count)" = 1 ] && [ "$(ksha "$kplan")" = "$k_plan" ] && [ "$(req_get '.prompt_sha256')" = "$k_prompt" ] && [ "$(req_get '.dispatch_sha256')" = "$k_dispatch" ] \
+  && [ "$(cat .agent-work/units/01-intake/worker-before.tree)" = "$k_before" ] && [ "$(req_get '.pre_tree')" = "$k_before" ] && [ "$(req_get '.input_fingerprint')" = "$k_fp" ] \
+  || fail "K: 결과 없는 재실행이 요청·프롬프트·계획·호출 전 기준을 다시 만듦"
+SIM_SIDE='echo "worker 01" >> src/u01.txt' sim_agent "$DONE_JSON" || fail "K: unit01 dispatch 실패"
+agentk="$SIM_LAST_AGENT"
+# 수용 pass: 계획을 다시 만들지 않고(파일 그대로) 결과를 받는다 → Unit 정적 검사(종전 위치) → targeted test → 다음 unit 요청(같은 Agent 재개, 그 unit 의 계획)
+run; expect_req 02-drop worker RESUME "K/unit02"
+[ "$(ksha "$kplan")" = "$k_plan" ] && [ -f .agent-work/units/01-intake/done.json ] && [ "$(req_get '.resume_agent_id')" = "$agentk" ] || fail "K: 수용 pass 가 계획을 다시 썼거나 unit01 완료·세션 재개가 아님"
+grep -q '\[unit-check\] #0001 통과' "$TMP/run.log" && [ "$(jq -r '.status' .agent-work/units/01-intake/unit-check/last.json)" = PASS ] || fail "K: 수용 뒤 Unit 정적 검사가 종전 위치에서 돌지 않음"
+grep -q '계획 파일: .agent-work/units/02-drop/check-plan.json' "$(req_get '.prompt_path')" || fail "K: 다음 unit 의 요청이 그 unit 의 계획을 싣지 않음"
+# 요청 발행 뒤 검사 설정 변경 → 수용 직전 입력 지문이 달라 불수용. 요청·계획 파일은 그대로, 새 요청·CLI 호출·세션 변경 없음
+idk2="$(req_get '.request_id')"; k_plan2="$(ksha .agent-work/units/02-drop/check-plan.json)"; : > "$MOCK_LOG"; : > "$CLI_LOG"
+SIM_SIDE='echo "worker 02" >> src/u02.txt' sim_agent "$DONE_JSON" || fail "K: unit02 dispatch 실패"
+kcfg UNIT_CHECK_CMD "true --strict"
+run; [ "$RC" = 2 ] && [ "$(reason)" = NATIVE_RESULT_REJECTED ] && grep -q 'NATIVE_STALE_REQUEST' "$TMP/run.log" && grep -q '입력 지문' "$TMP/run.log" \
+  || fail "K: 요청 뒤 검사 설정이 바뀌었는데 결과가 수용됨 (rc $RC, $(status) / $(reason))"
+[ "$(req_get '.request_id')" = "$idk2" ] && [ "$(req_count)" = 2 ] && [ "$(ksha .agent-work/units/02-drop/check-plan.json)" = "$k_plan2" ] && [ ! -e .agent-work/units/02-drop/done.json ] \
+  && [ ! -s "$MOCK_LOG" ] && [ ! -s "$CLI_LOG" ] && [ "$(jq -r '.agent_id' .agent-work/.session-feature-worker.native.json)" = "$agentk" ] && grep -q 'worker 02' src/u02.txt \
+  || fail "K: 불수용인데 요청·계획이 덮어써졌거나 새 요청·unit 완료·검사·CLI 호출·세션 변경·자동 원복이 생김"
+kcfg UNIT_CHECK_CMD ""
+pass "K. 검사 계획 — 요청 발행 전 1회 구성·payload 전달, 재실행 pass 는 계획·프롬프트·호출 전 기준 불변, 요청 뒤 검사 설정 변경은 NATIVE_STALE_REQUEST(요청·계획 보존, 새 요청 없음)"
+
+# ================= L. 검사 입력 지문 — 제한 시간·안내 문서 내용·워커가 고칠 수 없는 정책 파일 내용 =================
+# 요청 발행 뒤 이 값들이 바뀌면 그 결과는 다른 검사 조건을 안내받은 것이다. 다만 그 턴의 워커가 고칠 수 있는 범위(unit scope) 안의 정책 파일은
+# 워커가 정상적으로 고칠 수 있으므로 입력 지문에 넣지 않는다 — 그 변경으로 결과를 불수용하지 않는다(그 변경은 Unit 정적 검사 증거 지문이 맡는다).
+# 안내 문서는 gitignore 된 경로(.claude/)에 둔다: 작업 트리 스냅샷에 없어 범위 검사가 보지 못하므로 입력 지문만이 그 변경을 잡는다.
+LGUIDE=".claude/check-guide.md"
+mkdir -p tools && echo "rules v1" > tools/rules.txt && echo "guide v1" > "$LGUIDE"
+l_setup() { # 설정을 처음 값으로 되돌리고 unit01 요청을 발행한 뒤 Agent 가 src/u01.txt(이 unit 의 scope 안에 있는 선언된 정책 파일)를 고친 상태까지
+  reset_tree; echo "rules v1" > tools/rules.txt; echo "guide v1" > "$LGUIDE"
+  kcfg UNIT_CHECK_CMD "true"; kcfg UNIT_CHECK_POLICY_PATHS "tools/rules.txt src/u01.txt"; kcfg CHECK_GUIDE_FILE "$LGUIDE"; kcfg UNIT_CHECK_TIMEOUT_SEC "120"; kcfg FAST_CHECK_TIMEOUT_SEC "120"
+  run; expect_req 01-intake worker NEW "L/$1"
+  SIM_SIDE='echo "worker 01 edits an in-scope policy file" >> src/u01.txt' sim_agent "$DONE_JSON" || fail "L/$1: unit01 dispatch 실패"
+}
+l_stale() { # label — 방금 바꾼 것 때문에 수용 직전 입력 지문이 달라 불수용. 새 요청·unit 완료·CLI 호출 없음
+  run; [ "$RC" = 2 ] && [ "$(reason)" = NATIVE_RESULT_REJECTED ] && grep -q 'NATIVE_STALE_REQUEST' "$TMP/run.log" && grep -q '입력 지문' "$TMP/run.log" \
+    || { tail -8 "$TMP/run.log"; fail "L: $1 이(가) 바뀌었는데 결과가 수용됨 (rc $RC, $(status) / $(reason))"; }
+  [ "$(req_count)" = 1 ] && [ ! -e .agent-work/units/01-intake/done.json ] && [ ! -s "$CLI_LOG" ] || fail "L: $1 불수용인데 새 요청·unit 완료·CLI 호출이 생김"
+}
+lfp() { # scope-file → 지금 설정·작업 트리의 검사 입력 지문(헬퍼 직접 호출 — 모델·검사 명령 0회)
+  ( set -e; source "$CFG"; source .claude/skills/feature/scripts/fast-check.sh; check_plan_input_fingerprint .agent-work/units/01-intake/check-plan.json "$1" )
+}
+# 워커가 자기 scope 안의 선언된 정책 파일을 고친 결과는 수용된다(과잉 차단 없음)
+l_setup "scope 안 정책 파일"
+jq -e '[.checks[0].policy_paths[].path] == ["src/u01.txt","tools/rules.txt"]' .agent-work/units/01-intake/check-plan.json >/dev/null || fail "L: 픽스처 — 계획의 선언 경로가 다름"
+run; expect_req 02-drop worker RESUME "L/unit02"
+[ -f .agent-work/units/01-intake/done.json ] && grep -q 'in-scope policy file' src/u01.txt || fail "L: scope 안 정책 파일을 고친 워커 결과가 수용되지 않음"
+# 지문 자체(헬퍼): 쓰기 범위 안 정책 파일의 내용은 지문 밖, 범위 밖 정책 파일의 내용은 지문 안. 같은 파일도 쓰기 범위가 다르면(다른 unit 의 턴) 지문 안이다
+l_scope1=".agent-work/units/01-intake/scope.json"; l_scope2=".agent-work/units/02-drop/scope.json"
+f1="$(lfp "$l_scope1")"; f2="$(lfp "$l_scope2")"; [ "${#f1}" = 64 ] && [ "${#f2}" = 64 ] || fail "L: 검사 입력 지문 계산 실패"
+echo "more in-scope edits" >> src/u01.txt
+[ "$(lfp "$l_scope1")" = "$f1" ] || fail "L: 쓰기 범위 안 정책 파일의 변경이 입력 지문을 바꿈(정상 구현을 낡은 요청으로 만든다)"
+[ "$(lfp "$l_scope2")" != "$f2" ] || fail "L: 다른 unit 의 턴에서 고칠 수 없는 정책 파일(src/u01.txt)의 변경이 입력 지문에 없음"
+f1="$(lfp "$l_scope1")"; echo "rules v2" > tools/rules.txt
+[ "$(lfp "$l_scope1")" != "$f1" ] || fail "L: 쓰기 범위 밖 정책 파일(tools/rules.txt)의 내용 변경이 입력 지문에 없음"
+f1="$(lfp "$l_scope1")"; echo "unrelated" >> src/outside.txt
+[ "$(lfp "$l_scope1")" = "$f1" ] || fail "L: 선언되지 않은 범위 밖 파일의 변경이 입력 지문을 바꿈(무관한 파일로 요청이 낡는다)"
+# 파이프라인: 워커가 고칠 수 없는(scope 밖) 정책 파일이 요청 발행 뒤 바뀌면 결과를 수용하지 않는다 — 추적되는 파일이면 기존 범위 검사(SCOPE_VIOLATION)가 먼저 멈춘다
+l_setup "scope 밖 정책 파일"; echo "rules v2 (changed outside the worker)" > tools/rules.txt
+run; [ "$RC" = 2 ] && { [ "$(reason)" = SCOPE_VIOLATION ] || grep -q 'NATIVE_STALE_REQUEST' "$TMP/run.log"; } && [ ! -e .agent-work/units/01-intake/done.json ] && [ "$(req_count)" = 1 ] \
+  || { tail -8 "$TMP/run.log"; fail "L: scope 밖 정책 파일이 바뀌었는데 결과가 수용됨 (rc $RC, $(status) / $(reason))"; }
+grep -q 'rules v2' tools/rules.txt || fail "L: 범위 밖 변경이 자동 원복됨"
+# 안내 문서의 내용이 바뀜(경로는 그대로, 스냅샷에 없는 파일)
+l_setup "안내 문서"; echo "guide v2" > "$LGUIDE"
+l_stale "안내 문서 내용"
+# 제한 시간이 바뀜
+l_setup "Unit 검사 제한 시간"; kcfg UNIT_CHECK_TIMEOUT_SEC "77"
+l_stale "UNIT_CHECK_TIMEOUT_SEC"
+l_setup "빠른 검사 제한 시간"; kcfg FAST_CHECK_TIMEOUT_SEC "77"
+l_stale "FAST_CHECK_TIMEOUT_SEC"
+kcfg UNIT_CHECK_CMD ""; kcfg UNIT_CHECK_POLICY_PATHS ""; kcfg CHECK_GUIDE_FILE ""; kcfg UNIT_CHECK_TIMEOUT_SEC "120"; kcfg FAST_CHECK_TIMEOUT_SEC "120"
+pass "L. 검사 입력 지문 — scope 안 정책 파일을 고친 워커 결과는 수용(지문 불변), scope 밖 정책 파일은 지문 포함·불수용, 무관한 파일은 지문 밖, 안내 문서 내용·두 제한 시간의 변경은 NATIVE_STALE_REQUEST"
+
 echo "[SMOKE OK] native worker — check-fix·review-gap 호출 지점은 tests/smoke-native-pipeline.sh"

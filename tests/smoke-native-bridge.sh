@@ -235,7 +235,7 @@ pass "R08. async_launched 는 완료가 아니다 — 대기 상태 재제시, �
 # 위에서 dispatch 된 Agent(agentbg1)가 이제 끝났다: 전사 작성 + SubagentStop
 prompt="$(cat "$(req_get '.prompt_path')")"
 { jq -nc --arg p "$prompt" '{type:"user", agentId:"agentbg1", sessionId:"sess-main", message:{role:"user", content:$p}}'
-  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentbg1", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"m1", model:"claude-opus-5-5", stop_reason:"end_turn", usage:{input_tokens:3, cache_read_input_tokens:500, cache_creation_input_tokens:20, output_tokens:40}, content:[{type:"text", text:$r}]}}'
+  jq -nc --arg r "$PASS_JSON" '{type:"assistant", agentId:"agentbg1", sessionId:"sess-main", requestedModel:"claude-opus-5-5", effort:"medium", message:{id:"m1", model:"claude-opus-5-5", stop_reason:"end_turn", usage:{input_tokens:3, cache_read_input_tokens:500, cache_creation_input_tokens:20, output_tokens:40, cache_creation:{ephemeral_5m_input_tokens:12, ephemeral_1h_input_tokens:8}, speed:"standard", inference_geo:"global"}, content:[{type:"text", text:$r}]}}'
 } > "$TMP/transcripts/agent-agentbg1.jsonl"
 sim_stop agentbg1 feature-validator
 [ "$(req_get '.state')" = RESULT_READY ] || fail "R09: SubagentStop 뒤 state 가 RESULT_READY 가 아님"
@@ -248,8 +248,26 @@ role_ro VALIDATOR "validator-design-01-ddd" "design-validator-round-01" "$TMP/v1
 sim_stop agentbg1 feature-validator   # 소비 뒤의 늦은 중복 이벤트
 [ "$(jq -r '.state' "$ND/requests/$id1.json")" = CONSUMED ] || fail "R06: 소비된 요청의 상태가 다시 바뀜"
 [ "$(wc -l < .agent-work/usage.jsonl | tr -d ' ')" = 1 ] || fail "R26: usage 행이 1개가 아님"
-jq -e --arg id "$id1" '.backend=="claude_native" and .role=="VALIDATOR" and .model=="claude-opus-5-5" and .effort=="medium" and .request_id==$id and .agent_id=="agentbg1" and .cost_usd==null and .cost_kind=="unknown" and .context_last_turn==523 and .output==40' .agent-work/usage.jsonl >/dev/null \
+jq -e --arg id "$id1" '.backend=="claude_native" and .role=="VALIDATOR" and .model=="claude-opus-5-5" and .effort=="medium" and .request_id==$id and .agent_id=="agentbg1" and .cost_usd==null and .context_last_turn==523 and .output==40' .agent-work/usage.jsonl >/dev/null \
   || fail "R26: usage 행이 backend/role/model/effort/request/agent 를 담지 않거나 비용을 0 으로 위장함: $(cat .agent-work/usage.jsonl)"
+# native subagent 는 비용을 보고하지 않는다 — 전사의 토큰을 Claude 가격표(API 표준 요금)로 환산한 추정치를 적는다(reported 아님).
+#   claude-opus-5-5: 입력 3×$4 + 캐시 읽기 500×$0.20 + 캐시 쓰기 5분 12×$5 + 1시간 8×$8 + 출력 40×$20 = $1036 / 1M
+jq -e '.cost_kind=="estimated" and ((.estimated_cost_usd - 0.001036) | fabs) < 1e-12 and .pricing_basis=="anthropic-api-standard-2026-11-24" and .usage_observation_status=="transcript"
+  and .input_uncached==3 and .cache_read==500 and .cache_write==20 and (.pricing_assumptions|test("실제 청구액 아님"))' .agent-work/usage.jsonl >/dev/null \
+  || fail "R26: native 호출의 비용 추정이 가격표 환산과 다름: $(cat .agent-work/usage.jsonl)"
+# 전사에서 토큰을 읽은 호출은 '사용량 미관측'이 아니다. 보고 줄은 추정 비용에 포함하고 추정 불가 0건으로 적는다
+r26_line="$( ( source "$CFG"; usage_cost_report_line ) )"
+case "$r26_line" in *"추정 비용(codex·claude native) \$0.001 (API 표준 요금 기준 환산, estimated)"*"추정 불가 0건(사용량 미관측 0건"*"claude_native=1건(reported \$0, estimated \$0.001, unknown 0)"*) ;;
+  *) fail "R26: 비용 보고 줄이 native 추정 비용을 싣지 않거나 관측된 호출을 미관측으로 셈: $r26_line";; esac
+# 환산할 수 없는 경우는 0 달러가 아니라 unknown: 캐시 쓰기의 TTL 구분 없음 · fast mode · US 전용 추론 · 가격표에 없는 모델(프롬프트 길이별 요금인 haiku 포함)
+r26_est() { ( source "$CFG"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.estimated_cost_usd' ); }
+[ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":500,"cache_creation_input_tokens":20,"output_tokens":40}')" = null ] || fail "R26: 캐시 쓰기 TTL 구분이 없는데 단가를 추측해 추정함"
+[ "$(r26_est '{"input_tokens":3,"cache_creation_input_tokens":0,"output_tokens":40,"speeds":["fast"]}')" = null ] || fail "R26: fast mode 요청을 표준 요금으로 추정함"
+[ "$(r26_est '{"input_tokens":3,"cache_creation_input_tokens":0,"output_tokens":40,"inference_geos":["us"]}')" = null ] || fail "R26: US 전용 추론 요청을 표준 요금으로 추정함"
+[ "$(r26_est '{"input_tokens":1000000,"cache_creation_input_tokens":0,"output_tokens":0,"speeds":["standard"],"inference_geos":["global"]}')" = 4 ] || fail "R26: 입력 1M 토큰의 추정이 $4 가 아님"
+( source "$CFG"; claude_model_pricing claude-haiku-5-5 >/dev/null || claude_model_pricing claude-opus-5-5-20260101 >/dev/null ) && fail "R26: 가격표에 없는 모델(길이별 요금·날짜 접미사 ID)에 가격을 돌려줌"
+( source "$CFG"; printf '{"cli":"claude_native","cost_usd":null,"estimated_cost_usd":null,"usage_observation_status":"unavailable"}\n' > "$TMP/r26.usage"; [ "$(usage_summary "$TMP/r26.usage" | jq -r '.usage_unobserved_invocations')" = 1 ] ) \
+  || fail "R26: 전사에 usage 가 없는 native 호출이 미관측으로 세어지지 않음"
 [ ! -e .agent-work/.session-validator-design-01-ddd.native.json ] || fail "R19: accept 하지 않은 검증자 세션이 확정됨"
 pass "R09·R06·R26. completed 원문만 수용(1회), 중복 훅 무시, usage 는 관측값 + 비용 unknown"
 
@@ -611,6 +629,191 @@ loop; [ "$RC" = 2 ] && grep -q DESIGNER_SCOPE_VIOLATION "$TMP/loop.log" && [ "$(
   || { cat "$TMP/loop.log"; fail "R14: 디자이너의 source 변경이 DESIGNER_SCOPE_VIOLATION 으로 멈추지 않음 (rc $RC)"; }
 grep -q hacked src/u01.txt || fail "R14: 변경이 자동 원복됨"
 pass "R14. native 디자이너가 합의 문서 밖 source 를 바꾸면 DESIGNER_SCOPE_VIOLATION 유지(자동 원복 없음)"
+
+# ================= S1~S3 단독 복구 명령: 절대 경로 재진입 · worktree 루트 격리 · Agent 정의 미발견 =================
+# 제한 시간은 python subprocess 로 건다(macOS 에 timeout 실행 파일이 없을 수 있다). 124 = 제한 시간 초과(무한 재귀·멈춤).
+cat > "$TMP/bin/run_to.py" <<'EOS'
+import subprocess, sys
+try:
+    r = subprocess.run(sys.argv[3:], cwd=sys.argv[2], timeout=float(sys.argv[1]), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    sys.stdout.buffer.write(r.stdout); sys.exit(r.returncode)
+except subprocess.TimeoutExpired as e:
+    sys.stdout.buffer.write(e.stdout or b""); print("RUN_TO_TIMEOUT"); sys.exit(124)
+EOS
+run_to() { # cwd cmd...  → RC, 출력은 $TMP/last.log (FEATURE_PROJECT_ROOT 는 호출자가 env 로 줄 때만 있다)
+  local cwd="$1"; shift; RC=0
+  env -u FEATURE_PROJECT_ROOT ${RUN_TO_ENV:+"$RUN_TO_ENV"} python3 "$TMP/bin/run_to.py" 30 "$cwd" "$@" > "$TMP/last.log" 2>&1 || RC=$?
+}
+dir_sum() { ( cd "$1" && find . -type f ! -name '.snapshot-index.*' | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(shasum -a 256 < "$f" | cut -d' ' -f1)" "$f"; done ) | shasum -a 256 | cut -d' ' -f1; }
+ABS_BR="$TMP/repo/.claude/skills/feature/scripts/native-agent-bridge.sh"
+REPO_PHYS="$(pwd -P)"
+unset FEATURE_PROJECT_ROOT FEATURE_ORIGIN_ROOT
+
+# ---- S1 [A] 절대 경로 단독 실행이 끝난다(재진입 없음) ----
+reset_native; : > "$CLI_LOG"
+git checkout -q -- src/u01.txt   # 앞 사례(R14)가 남긴 source 변경을 걷어 낸다
+# source 만 한 호출자는 복구 명령을 실행하지 않는다(위치 인자가 discard 여도)
+role_ro VALIDATOR "validator-design-21-a" "design-validator-round-21" "$TMP/s1.json"; [ "$RC" = 42 ] || { cat "$TMP/last.log"; fail "S1: 요청 발행 실패"; }
+ids1="$(req_get '.request_id')"
+run_to "$TMP/repo" bash -c 'f="$1"; set -- discard "$2"; source "$f"; echo SOURCED-CONFIG' _ "$CFG" "$ids1"
+[ "$RC" = 0 ] && grep -q SOURCED-CONFIG "$TMP/last.log" && [ -f "$ND/pending.json" ] && [ "$(req_get '.state')" = PREPARED ] || { cat "$TMP/last.log"; fail "S1: config.sh 를 source 만 했는데 복구 명령이 실행됨 (rc $RC)"; }
+run_to "$TMP/repo" bash -c 'f="$1"; set -- discard "$2"; source "$f"; declare -F native_role_call >/dev/null && echo SOURCED-BRIDGE' _ "$ABS_BR" "$ids1"
+[ "$RC" = 0 ] && grep -q SOURCED-BRIDGE "$TMP/last.log" && [ -f "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "S1: 브리지를 source 만 했는데 복구 명령이 실행됨 (rc $RC)"; }
+# 조건 불충분(다른 요청 id)은 절대 경로에서도 거부한다
+run_to "$TMP/repo" bash "$ABS_BR" discard native-nope
+[ "$RC" = 1 ] && grep -q '요청 ID 불일치' "$TMP/last.log" && [ -f "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "S1: 절대 경로 discard 가 다른 요청 id 를 거부하지 않음 (rc $RC)"; }
+# 절대 경로 discard 는 제한 시간 안에 exit 0 으로 끝나고 요청을 ABANDONED 로 치운다
+run_to "$TMP/repo" bash "$ABS_BR" discard "$ids1"
+[ "$RC" = 0 ] && [ ! -e "$ND/pending.json" ] && [ "$(jq -r '.state + "/" + .abandoned_from_state' "$ND/requests/$ids1.json")" = "ABANDONED/PREPARED" ] && [ -f "$ND/abandoned/$ids1.pending.json" ] \
+  || { tail -5 "$TMP/last.log"; fail "S1: 절대 경로 discard 가 끝나지 않았거나(124=제한 시간) 요청을 치우지 않음 (rc $RC)"; }
+# 상대 경로도 같은 결과
+role_ro VALIDATOR "validator-design-21-b" "design-validator-round-21" "$TMP/s1.json"; [ "$RC" = 42 ] || fail "S1: 요청 재발행 실패"
+ids1b="$(req_get '.request_id')"
+run_to "$TMP/repo" bash "$BR" discard "$ids1b"
+[ "$RC" = 0 ] && [ ! -e "$ND/pending.json" ] && [ "$(jq -r '.state' "$ND/requests/$ids1b.json")" = ABANDONED ] || { tail -5 "$TMP/last.log"; fail "S1: 상대 경로 discard 결과가 절대 경로와 다름 (rc $RC)"; }
+# 호출 전 tree 가 다르면 절대 경로에서도 거부한다(검증 생략 없음)
+role_ro VALIDATOR "validator-design-21-c" "design-validator-round-21" "$TMP/s1.json"; [ "$RC" = 42 ] || fail "S1: 요청 재발행 실패"
+ids1c="$(req_get '.request_id')"; echo drift >> src/u01.txt
+run_to "$TMP/repo" bash "$ABS_BR" discard "$ids1c"
+[ "$RC" = 1 ] && grep -q '호출 전 tree' "$TMP/last.log" && [ -f "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "S1: 작업 트리가 달라졌는데 절대 경로 discard 가 통과함 (rc $RC)"; }
+git checkout -q -- src/u01.txt
+# 실행 전 거부가 확인된 DISPATCHING 요청의 절대 경로 redispatch: 같은 id·payload·session intent 로 PREPARED. 거부 확인 전에는 거부한다
+sim_pre; tus1="$SIM_TU"; psha="$(req_get '.dispatch_sha256')"; pint="$(req_get '.session_intent')"
+run_to "$TMP/repo" bash "$ABS_BR" redispatch "$ids1c"
+[ "$RC" = 1 ] && grep -q '거부가 확인되지 않았다' "$TMP/last.log" && [ "$(req_get '.state')" = DISPATCHING ] || { cat "$TMP/last.log"; fail "S1: 거부 증거 없는 절대 경로 redispatch 가 통과함 (rc $RC)"; }
+sim_main_result "$tus1" permission-rule "$DENY_TEXT"
+run_to "$TMP/repo" bash "$ABS_BR" redispatch "$ids1c"
+[ "$RC" = 0 ] && [ "$(req_get '.state')" = PREPARED ] && [ "$(req_get '.request_id')" = "$ids1c" ] && [ "$(req_get '.dispatch_sha256')" = "$psha" ] && [ "$(req_get '.session_intent')" = "$pint" ] \
+  && [ "$(req_get '.dispatch_history[0].outcome')" = DENIED ] && [ "$(req_count)" = 3 ] \
+  || { tail -5 "$TMP/last.log"; fail "S1: 절대 경로 redispatch 가 끝나지 않았거나 같은 요청을 PREPARED 로 되돌리지 않음 (rc $RC, state $(req_get '.state'))"; }
+# 저장소를 가리키는 심볼릭 링크 경로로 실행해도 끝난다
+ln -s "$TMP/repo" "$TMP/repo-link"
+run_to "$TMP/repo-link" bash "$TMP/repo-link/.claude/skills/feature/scripts/native-agent-bridge.sh" discard "$ids1c"
+[ "$RC" = 0 ] && [ ! -e "$ND/pending.json" ] || { tail -5 "$TMP/last.log"; fail "S1: 심볼릭 링크 경로의 discard 실패 (rc $RC)"; }
+[ ! -s "$CLI_LOG" ] || fail "S1: CLI 가 호출됨: $(cat "$CLI_LOG")"
+pass "S1. 단독 discard/redispatch: 절대·상대·심볼릭 링크 경로 모두 제한 시간 안에 종료, 요청 id·호출 전 tree·거부 증거 검사 유지, source 만 한 호출자는 부작용 없음"
+
+# ---- S2 [B] 피처 worktree 와 원본의 .agent-work 격리 ----
+reset_native
+git worktree add -q "$TMP/wt" -b feature/s2 HEAD || fail "S2: worktree 생성 실패"
+mkdir -p "$TMP/wt/.claude/hooks" "$TMP/wt/.agent-work/reviews" && cp "$TMP/repo/.claude/hooks/core_rules.md" "$TMP/wt/.claude/hooks/" || fail "S2: worktree 준비 실패"
+WND="$TMP/wt/.agent-work/native-agent"
+# 원본과 worktree 에 서로 다른 pending 요청을 둔다(러너의 재바인딩과 같은 값 = worktree 의 git toplevel)
+role_ro VALIDATOR "validator-design-22-o" "design-validator-round-22" "$TMP/s2o.json"; [ "$RC" = 42 ] || fail "S2: 원본 요청 발행 실패"
+id_origin="$(req_get '.request_id')"
+WT_TOP="$(git -C "$TMP/wt" rev-parse --show-toplevel)"
+RC=0; ( cd "$TMP/wt" && set -e && FEATURE_PROJECT_ROOT="$WT_TOP" && export FEATURE_PROJECT_ROOT && source "$CFG" && run_readonly_json_role VALIDATOR "validator-design-22-w" "design-validator-round-22" "$TMP/repo/$SCHEMA" "$TMP/s2w.json" "smoke prompt wt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+[ "$RC" = 42 ] && [ -f "$WND/pending.json" ] || { cat "$TMP/last.log"; fail "S2: worktree 요청 발행 실패 (rc $RC)"; }
+id_wt="$(jq -r '.request_id' "$WND/pending.json")"
+[ "$id_wt" != "$id_origin" ] && [ "$(jq -r '.worktree_root' "$WND/requests/$id_wt.json")" = "$WT_TOP" ] || fail "S2: 두 요청이 구분되지 않음"
+# agent 정의는 원본(메인 세션이 읽는 곳)에만 있다 — worktree 에 만들지 않는다
+[ -f "$TMP/repo/.claude/agents/feature-validator.md" ] && [ ! -e "$TMP/wt/.claude/agents" ] || fail "S2: agent 정의 위치가 원본이 아님"
+[ "$(jq -r '.agent_definition_path' "$WND/requests/$id_wt.json")" -ef "$TMP/repo/.claude/agents/feature-validator.md" ] || fail "S2: worktree 요청의 agent 정의 경로가 원본이 아님: $(jq -r '.agent_definition_path' "$WND/requests/$id_wt.json")"
+sum_origin="$(dir_sum "$TMP/repo/.agent-work")"; sum_wt="$(dir_sum "$TMP/wt/.agent-work")"
+# FEATURE_PROJECT_ROOT 없이 worktree 루트에서 절대 경로로: 원본 id 는 '요청 ID 불일치'로 거부, 원본·worktree 모두 그대로
+run_to "$TMP/wt" bash "$ABS_BR" discard "$id_origin"
+[ "$RC" = 1 ] && grep -q '요청 ID 불일치' "$TMP/last.log" && grep -q "$id_wt" "$TMP/last.log" || { cat "$TMP/last.log"; fail "S2: worktree 에서 원본 id 를 준 discard 가 요청 ID 불일치로 거부되지 않음 (rc $RC)"; }
+[ "$(dir_sum "$TMP/repo/.agent-work")" = "$sum_origin" ] && [ "$(dir_sum "$TMP/wt/.agent-work")" = "$sum_wt" ] || fail "S2: 거부된 discard 가 .agent-work 를 바꿈"
+# 무관한 저장소·git 밖에서는 멈춘다(어느 .agent-work 도 건드리지 않는다)
+run_to "$TMP/origin" bash "$ABS_BR" discard "$id_origin"
+[ "$RC" = 1 ] && grep -q 'worktree 가 아니다' "$TMP/last.log" && [ ! -e "$TMP/origin/.agent-work" ] || { cat "$TMP/last.log"; fail "S2: 무관한 저장소에서 실행한 discard 가 명시적으로 멈추지 않음 (rc $RC)"; }
+run_to "$TMP/bin" bash "$ABS_BR" discard "$id_origin"
+[ "$RC" = 1 ] && grep -q 'git working tree 안이 아니다' "$TMP/last.log" || { cat "$TMP/last.log"; fail "S2: git 밖에서 실행한 discard 가 설치 위치로 넘어감 (rc $RC)"; }
+[ "$(dir_sum "$TMP/repo/.agent-work")" = "$sum_origin" ] && [ "$(dir_sum "$TMP/wt/.agent-work")" = "$sum_wt" ] || fail "S2: 거부된 실행이 .agent-work 를 바꿈"
+# worktree 를 가리키는 심볼릭 링크 경로에서 worktree id: worktree 요청만 치워지고 원본은 byte 단위로 그대로
+ln -s "$TMP/wt" "$TMP/wt-link"
+run_to "$TMP/wt-link" bash "$ABS_BR" discard "$id_wt"
+[ "$RC" = 0 ] && [ ! -e "$WND/pending.json" ] && [ "$(jq -r '.state' "$WND/requests/$id_wt.json")" = ABANDONED ] || { cat "$TMP/last.log"; fail "S2: worktree 루트에서 worktree 요청의 discard 실패 (rc $RC)"; }
+[ "$(dir_sum "$TMP/repo/.agent-work")" = "$sum_origin" ] && [ "$(jq -r '.request_id' "$ND/pending.json")" = "$id_origin" ] && [ "$(req_get '.state')" = PREPARED ] || fail "S2: worktree 의 discard 가 원본 .agent-work 를 바꿈"
+# 명시한 FEATURE_PROJECT_ROOT 가 현재 디렉터리보다 우선한다(worktree 에서 실행해도 원본 요청을 다룬다)
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=$TMP/repo" run_to "$TMP/wt" bash "$ABS_BR" discard "$id_wt"
+[ "$RC" = 1 ] && grep -q '요청 ID 불일치' "$TMP/last.log" && grep -q "$id_origin" "$TMP/last.log" || { cat "$TMP/last.log"; fail "S2: 명시한 FEATURE_PROJECT_ROOT 가 우선하지 않음 (rc $RC)"; }
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=$TMP/repo" run_to "$TMP/wt" bash "$ABS_BR" discard "$id_origin"
+[ "$RC" = 0 ] && [ ! -e "$ND/pending.json" ] && [ "$(jq -r '.state' "$ND/requests/$id_origin.json")" = ABANDONED ] || { cat "$TMP/last.log"; fail "S2: 명시한 FEATURE_PROJECT_ROOT 의 요청을 치우지 못함 (rc $RC)"; }
+# 상대 경로 FEATURE_PROJECT_ROOT 는 실행한 디렉터리 기준의 절대 경로로 확정된다(cd 뒤에 <루트>/<상대 경로>/.agent-work 를 보지 않는다)
+role_ro VALIDATOR "validator-design-22-r" "design-validator-round-22" "$TMP/s2r.json"; [ "$RC" = 42 ] || fail "S2: 원본 요청 재발행 실패"
+id_rel="$(req_get '.request_id')"
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=repo" run_to "$TMP" bash "$ABS_BR" discard native-nope
+[ "$RC" = 1 ] && grep -q "요청 ID 불일치: 프로젝트 루트 $(git -C "$TMP/repo" rev-parse --show-toplevel) 의 pending 요청은 $id_rel" "$TMP/last.log" \
+  || { cat "$TMP/last.log"; fail "S2: 상대 경로 FEATURE_PROJECT_ROOT 가 절대 경로로 확정되지 않음 (rc $RC)"; }
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=repo" run_to "$TMP" bash "$ABS_BR" discard "$id_rel"
+[ "$RC" = 0 ] && [ ! -e "$ND/pending.json" ] && [ "$(jq -r '.state' "$ND/requests/$id_rel.json")" = ABANDONED ] && [ ! -e "$TMP/repo/repo" ] \
+  || { cat "$TMP/last.log"; fail "S2: 상대 경로 FEATURE_PROJECT_ROOT 의 요청을 치우지 못함 (rc $RC)"; }
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=../repo" run_to "$TMP/bin" bash "$ABS_BR" discard "$id_rel"
+[ "$RC" = 1 ] && grep -q "pending native 요청이 없다: .* (프로젝트 루트 $(git -C "$TMP/repo" rev-parse --show-toplevel) " "$TMP/last.log" || { cat "$TMP/last.log"; fail "S2: '../' 상대 경로 FEATURE_PROJECT_ROOT 가 절대 경로로 확정되지 않음 (rc $RC)"; }
+RUN_TO_ENV="FEATURE_PROJECT_ROOT=$TMP/bin" run_to "$TMP/wt" bash "$ABS_BR" discard "$id_origin"
+[ "$RC" = 1 ] && grep -q 'git working tree 의 루트가 아니다' "$TMP/last.log" || { cat "$TMP/last.log"; fail "S2: 잘못된 FEATURE_PROJECT_ROOT 가 거부되지 않음 (rc $RC)"; }
+# 원본 저장소에서 실행한 종전 동작(상대 경로, 변수 없음)은 그대로다 — S1 과 R11 이 확인한다
+git worktree remove --force "$TMP/wt" >/dev/null 2>&1 || true
+pass "S2. 단독 복구의 프로젝트 루트: worktree 루트에서 절대 경로 실행은 그 worktree 의 요청만 다룸(원본 byte 불변), 원본 id 는 요청 ID 불일치, 무관한 저장소·git 밖은 중단, 명시한 FEATURE_PROJECT_ROOT 우선(상대 경로는 절대 경로로 확정), agent 정의는 원본"
+
+# ---- S3 [C] "Agent type … not found" 는 거부 종류가 함께 있어도 UNKNOWN ----
+reset_native; : > "$CLI_LOG"; : > "$MAIN_TR"
+mv .claude/agents/feature-validator.md "$TMP/s3.def.moved" || fail "S3: 정의 파일 준비 실패"   # 이번 요청이 정의를 새로 쓰게 한다
+role_ro VALIDATOR "validator-design-23-a" "design-validator-round-23" "$TMP/s3.json"; [ "$RC" = 42 ] || fail "S3: 요청 발행 실패"
+ids3="$(req_get '.request_id')"
+# PREPARED 안내: 정의를 이번 실행이 새로 썼다 — 무조건 재전송 문장이 없고 state 별 안내가 있다
+grep -q 'agent 정의 파일' "$TMP/last.log" && grep -q 'state 가 PREPARED 그대로일 때만' "$TMP/last.log" && grep -q 'state 가 DISPATCHING 이면 실행 여부 불명' "$TMP/last.log" \
+  || { cat "$TMP/last.log"; fail "S3: PREPARED 안내에 state 별 not found 복구 안내가 없음"; }
+grep -q '같은 dispatch 를 다시 보낸다' "$TMP/last.log" && fail "S3: 런타임 출력에 무조건 재전송 안내가 남아 있음"
+grep -q '같은 dispatch 를 다시 보낸다' .claude/skills/feature/references/native-agent.md && fail "S3: references/native-agent.md 에 무조건 재전송 안내가 남아 있음"
+sim_pre; tus3="$SIM_TU"; [ "$(req_get '.state')" = DISPATCHING ] || fail "S3: DISPATCHING 이 아님"
+sim_main_result "$tus3" permission-rule "Agent type 'feature-validator' not found. Available agents: general-purpose"
+role_ro VALIDATOR "validator-design-23-b" "design-validator-round-23" "$TMP/s3.json"
+[ "$RC" = 42 ] && [ "$(req_get '.state')" = DISPATCHING ] && [ "$(req_count)" = 1 ] && grep -q 'Agent 정의 미발견' "$TMP/last.log" && grep -q 'UNKNOWN' "$TMP/last.log" \
+  && ! grep -q NATIVE_DISPATCH_DENIED "$TMP/last.log" && grep -q '다시 보내지 않는다' "$TMP/last.log" \
+  || { cat "$TMP/last.log"; fail "S3: not found + 거부 종류가 UNKNOWN(42, DISPATCHING 유지)이 아님 (rc $RC, state $(req_get '.state'), 요청 $(req_count)개)"; }
+run_to "$TMP/repo" bash "$ABS_BR" redispatch "$ids3"
+[ "$RC" = 1 ] && grep -q '거부가 확인되지 않았다(UNKNOWN' "$TMP/last.log" && [ "$(req_get '.state')" = DISPATCHING ] || { cat "$TMP/last.log"; fail "S3: not found 요청의 redispatch 가 거부되지 않음 (rc $RC)"; }
+sim_pre
+[ "$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.permissionDecision')" = deny ] && [ "$(req_get '.dispatch_attempt.tool_use_id')" = "$tus3" ] || fail "S3: DISPATCHING 요청의 두 번째 dispatch 가 거부되지 않음"
+[ ! -s "$CLI_LOG" ] && [ ! -e .agent-work/.session-validator-design-23-a.native.json ] || fail "S3: CLI fallback 또는 새 Agent 세션이 생김"
+# 따옴표·agent 이름이 달라도 같은 판정이다(레코드 단위 오류 필드만 있어도)
+evid() { ( set -e; source "$CFG"; native_dispatch_evidence; printf '%s/%s' "$NATIVE_EVID" "$NATIVE_EVID_REASON" ); }
+: > "$MAIN_TR"
+jq -nc --arg tu "$tus3" '{type:"user", sessionId:"sess-main", toolDenialKind:"user-rejected", toolUseResult:"Error: Agent type \"my-custom-agent\" not found", message:{role:"user", content:[{type:"tool_result", is_error:true, tool_use_id:$tu, content:"tool failed"}]}}' >> "$MAIN_TR"
+[ "$(evid)" = "UNKNOWN/AGENT_TYPE_NOT_FOUND" ] || fail "S3: 레코드 오류 필드의 not found 가 UNKNOWN 이 아님: $(evid)"
+# 다른 tool_use_id 의 not found 는 영향이 없다 — 이 호출의 알려진 거부는 DENIED 그대로(다른 레코드)
+: > "$MAIN_TR"
+sim_main_result "toolu_other_1" permission-rule "Agent type 'feature-validator' not found"
+sim_main_result "$tus3" permission-rule "$DENY_TEXT"
+[ "$(evid)" = "DENIED/" ] || fail "S3: 다른 tool_use_id 의 not found 가 이 호출의 판정을 바꿈: $(evid)"
+: > "$MAIN_TR"
+jq -nc --arg tu "$tus3" --arg t "$DENY_TEXT" '{type:"user", sessionId:"sess-main", toolDenialKind:"permission-rule", toolUseResult:"Error: Agent type x not found",
+  message:{role:"user", content:[{type:"tool_result", is_error:true, tool_use_id:"toolu_other_2", content:"Agent type x not found"}, {type:"tool_result", is_error:true, tool_use_id:$tu, content:$t}]}}' >> "$MAIN_TR"
+[ "$(evid)" = "UNKNOWN/" ] || fail "S3: tool_result 가 여럿인 레코드의 레코드 단위 거부 정보를 이 호출의 거부 증거로 씀(다른 tool_result 의 not found 문구는 무영향이어야 함): $(evid)"
+# 다른 도구의 거부가 같은 레코드에 있고 이 Agent 호출은 실행 뒤 오류다 — 레코드 단위 거부 정보는 이 호출에 결속되지 않으므로 DENIED 가 아니다(재전송 불가)
+: > "$MAIN_TR"
+jq -nc --arg tu "$tus3" --arg t "$DENY_TEXT" '{type:"user", sessionId:"sess-main", toolDenialKind:"permission-rule",
+  permissionDecision:{decision:"reject", source:"hook", reasonType:"hook", reasonCode:"hook:PreToolUse"},
+  message:{role:"user", content:[{type:"tool_result", is_error:true, tool_use_id:"toolu_other_3", content:$t}, {type:"tool_result", is_error:true, tool_use_id:$tu, content:"Agent crashed after launch"}]}}' >> "$MAIN_TR"
+[ "$(evid)" = "UNKNOWN/" ] || fail "S3: 다른 도구의 거부(같은 레코드)를 이 Agent 호출의 거부 증거로 씀: $(evid)"
+run_to "$TMP/repo" bash "$ABS_BR" redispatch "$ids3"
+[ "$RC" = 1 ] && grep -q '거부가 확인되지 않았다(UNKNOWN' "$TMP/last.log" && grep -q '도구 결과가 2개' "$TMP/last.log" && [ "$(req_get '.state')" = DISPATCHING ] \
+  || { cat "$TMP/last.log"; fail "S3: 다른 도구의 거부만 있는 요청의 redispatch 가 거부되지 않음 (rc $RC)"; }
+# 이 호출 하나만 담긴 레코드의 알려진 거부는 종전대로 DENIED(43)
+: > "$MAIN_TR"
+sim_main_result "$tus3" permission-rule "$DENY_TEXT"
+[ "$(evid)" = "DENIED/" ] || fail "S3: 단일 tool_result 레코드의 알려진 거부가 DENIED 가 아님: $(evid)"
+role_ro VALIDATOR "validator-design-23-c" "design-validator-round-23" "$TMP/s3.json"
+[ "$RC" = 43 ] && grep -q NATIVE_DISPATCH_DENIED "$TMP/last.log" && grep -q "cd .* && bash .* redispatch $ids3" "$TMP/last.log" || { cat "$TMP/last.log"; fail "S3: 알려진 다른 훅 거부가 43(DENIED)으로 올라오지 않음 (rc $RC)"; }
+# 거부 종류 없는 오류는 UNKNOWN(사유 없음), 성공 결과·캡처 증거는 not found 문구가 있어도 EXECUTED
+: > "$MAIN_TR"
+jq -nc --arg tu "$tus3" '{type:"user", sessionId:"sess-main", message:{role:"user", content:[{type:"tool_result", is_error:true, tool_use_id:$tu, content:"Agent crashed after launch"}]}}' >> "$MAIN_TR"
+[ "$(evid)" = "UNKNOWN/" ] || fail "S3: 거부 종류 없는 오류가 UNKNOWN 이 아님: $(evid)"
+: > "$MAIN_TR"
+sim_main_result "$tus3" permission-rule "Agent type 'feature-validator' not found"
+mkdir -p "$ND/results" && echo '{}' > "$ND/results/$ids3.capture.json"
+[ "$(evid)" = "EXECUTED/" ] || fail "S3: 캡처 증거가 있는데 not found 문구로 판정이 바뀜: $(evid)"
+mv "$ND/results/$ids3.capture.json" "$TMP/s3.capture.moved"
+: > "$MAIN_TR"; sim_main_result "$tus3"
+[ "$(evid)" = "EXECUTED/" ] || fail "S3: 성공 도구 결과가 EXECUTED 가 아님: $(evid)"
+: > "$MAIN_TR"
+sim_main_result "$tus3" permission-rule "Agent type 'feature-validator' not found"
+run_to "$TMP/repo" bash "$ABS_BR" discard "$ids3"
+[ "$RC" = 0 ] && grep -q 'Agent 가 아직 돌고 있을 수 있다' "$TMP/last.log" && [ ! -e "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "S3: not found 요청의 사용자 결정 discard 가 실패했거나 경고가 없음 (rc $RC)"; }
+reset_native; : > "$MAIN_TR"
+pass "S3. Agent 정의 미발견은 거부 종류가 함께 있어도 UNKNOWN: 대기(42)·DISPATCHING 유지·redispatch 거부·중복 dispatch 0회, 다른 훅 거부는 DENIED 유지, 다른 tool_use_id 의 문구·거부 정보는 무영향(여러 tool_result 레코드의 거부는 UNKNOWN)"
 
 # ================= 러너 연결(정적) =================
 RUN=".claude/skills/feature/scripts/feature-run.sh"

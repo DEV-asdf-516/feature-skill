@@ -305,8 +305,13 @@ rc="$(run_runner)"
 [ "$(seq_all)" = "worker:01|ucheck:01|test-01|unit-fix:01:diag|ucheck:01|test-01|worker:02|ucheck:02|test-02|reviewer|full-test|full-lint" ] || fail "U3: 호출 순서 불일치: $(seq_all)"
 [ "$(calls reviewer)" -eq 1 ] && [ "$(calls fixer)" -eq 0 ] || fail "U3: 위반 처리에 리뷰어·수정자가 쓰임"
 diag="$(cat "$MOCK_STATE/unitfix-log-path")"
-[ "$diag" = ".agent-work/units/01-a/unit-verify-01.diag.log" ] && grep -q '^\[no-bad-token\] src/a.txt:3: 금지 토큰 — BAD token by worker$' "$diag" \
-  || fail "U3: 수정 턴이 검사 진단 원본을 받지 못함: $diag"
+# 묶음은 원본 전체가 아니라 요약(색인)과 원본 경로를 싣는다 — 원본 로그는 그대로 남는다
+u3_raw=".agent-work/units/01-a/unit-check/check-0001.log"
+[ "$diag" = ".agent-work/units/01-a/unit-verify-01.diag.log" ] && grep -q 'L1: \[no-bad-token\] src/a.txt:3: 금지 토큰 — BAD token by worker' "$diag" \
+  && grep -q "출력 원본: $u3_raw" "$diag" && grep -q "$u3_raw.digest.json" "$diag" && grep -q '^\[no-bad-token\] src/a.txt:3: 금지 토큰 — BAD token by worker$' "$u3_raw" \
+  || fail "U3: 수정 턴이 검사 진단(요약 + 원본 경로)을 받지 못했거나 원본 로그가 보존되지 않음: $diag"
+jq -e '.kind=="check-digest" and .status=="VIOLATION" and .exit_code==1 and .truncated==false and .matched_count==1 and .raw_log_path==$raw' --arg raw "$u3_raw" "$u3_raw.digest.json" >/dev/null \
+  || fail "U3: 진단 요약의 상태·원본 경로·집계가 다름: $(cat "$u3_raw.digest.json" 2>/dev/null)"
 grep -q 'targeted test(.*) = PASS' "$diag" || fail "U3: 진단 묶음에 targeted test 결과가 없음"
 [ "$(jq -sr '[.[].status] | join(",")' .agent-work/units/01-a/unit-check/history.jsonl)" = "VIOLATION,PASS" ] || fail "U3: 검사 기록이 VIOLATION → PASS 가 아님"
 grep -q 'BAD' src/a.txt && fail "U3: 완료된 unit 에 위반이 남아 있음"
