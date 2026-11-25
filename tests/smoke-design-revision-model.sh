@@ -22,7 +22,7 @@ mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/ski
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
 # 역할 CLI 고정: 디자이너=claude(mock), 검증자=codex(fake). 모델 ID 는 라우팅과 무관한 값으로 두어 DESIGNER_CLI 명시가 실제로 쓰이는지 확인한다.
-sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
+sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
   s|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL=\"smoke-revision-model\"|; s|^DESIGNER_EFFORT=.*|DESIGNER_EFFORT=\"smoke-effort\"|; s|^DESIGNER_CLI=.*|DESIGNER_CLI=\"claude\"|; \
   s|^VALIDATOR_MODEL=.*|VALIDATOR_MODEL=\"gpt-smoke\"|; s|^VALIDATOR_CLI=.*|VALIDATOR_CLI=\"codex\"|; s|^WORKER_CLI=.*|WORKER_CLI=\"codex\"|; s|^REVIEWER_CLI=.*|REVIEWER_CLI=\"claude\"|; s|^FIXER_CLI=.*|FIXER_CLI=\"claude\"|" "$CFG" && rm -f "$CFG.bak"
 grep -q '^DESIGNER_MODEL=' "$CFG" && fail "config.sh 에 DESIGNER_MODEL 이 남아 있음(호환 alias 금지)"

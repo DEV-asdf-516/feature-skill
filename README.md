@@ -8,9 +8,9 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 
 ## 역할
 
-역할은 고정이지만 **어느 CLI 로 돌릴지는 모델 ID 로 정한다**: `claude*` → claude CLI, `gpt-*`/`o*`/`codex*` → codex CLI. 이름으로 정할 수 없는 모델은 `config.sh` 의 `<ROLE>_CLI=claude|codex` 로 명시한다. 아래 CLI 열은 기본 설정 기준이다. 각 역할이 요구하는 실행 형태(읽기 전용+스키마 JSON / 편집)는 두 CLI 의 플래그로 각각 옮겨진다(`config.sh` 의 `run_readonly_json_role` / `run_edit_role`).
+역할은 고정이지만 **어느 계열로 돌릴지는 모델 ID 로 정한다**: `claude*` → claude, `gpt-*`/`o*`/`codex*` → codex(실행 수단은 아래 두 backend 설정이 정한다). 이름으로 정할 수 없는 모델은 `config.sh` 의 `<ROLE>_CLI=claude|codex` 로 명시한다. 아래 CLI 열은 기본 설정 기준이다. 각 역할이 요구하는 실행 형태(읽기 전용+스키마 JSON / 편집)는 두 CLI 의 플래그로 각각 옮겨진다(`config.sh` 의 `run_readonly_json_role` / `run_edit_role`).
 
-**Claude 모델의 실행 backend (`config.sh` `CLAUDE_BACKEND`).** `claude*` 모델을 무엇으로 실행할지는 역할이 아니라 이 설정 하나가 정한다. `gpt-*`/`o*`/`codex*` 는 값과 무관하게 codex CLI 다.
+**Claude 모델의 실행 backend (`config.sh` `CLAUDE_BACKEND`).** `claude*` 모델을 무엇으로 실행할지는 역할이 아니라 이 설정 하나가 정한다. `gpt-*`/`o*`/`codex*` 는 이 값과 무관하게 codex 계열이며 아래 `CODEX_BACKEND` 를 따른다.
 
 | 값 | 실행 | 비고 |
 |---|---|---|
@@ -21,6 +21,21 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 - **실모델 검증 범위**(Claude Code 2.1.330, 2026-11-23): 디자이너·워커·리뷰어·수정자의 신규 `Agent` 호출과 `SendMessage` 재개가 Shell 수용까지 확인됐다 — PreToolUse `updatedInput` 적용(프롬프트 해시 일치), agent 정의의 full model ID·effort 적용, 같은 agent id·대화 문맥 유지, 세션 cwd 밖 worktree 읽기·쓰기, SubagentStop 캡처. 검증자·리뷰어를 codex 로 둔 혼합 구성의 작은 피처 종단(DONE)도 확인됐다. 실모델 미검증: 검증자 native, 워커의 test-fix·check-fix·review-gap·verify worker-fix 호출 지점, 세대 교체, `--feature` worktree 모드, 다섯 역할 전부 Claude 인 종단, 그리고 PostToolUse 실행 확인(`DISPATCHING → DISPATCHED`)의 실제 페이로드(mock 과 기존 전사 대조만 했다). 관측된 주의점: `.claude/agents/` 디렉터리가 세션 시작 때 없었으면 세션 재시작이 필요하고, SubagentStop 이 보고 레코드가 전사에 쓰이기 전에 발화할 수 있어 훅이 잠깐 기다리며 다시 읽는다(끝까지 없으면 `NO_REPORT` — 성공으로 받지 않는다).
 - dispatch 상태는 `PREPARED → DISPATCHING → DISPATCHED → RESULT_READY → CONSUMED` 다. PreToolUse 는 시도만 기록하고(`DISPATCHING`), 같은 `tool_use_id` 의 PostToolUse 가 실행 성공을 확인해야 `DISPATCHED` 가 된다. 다른 PreToolUse 훅이 호출을 거부하면 러너가 메인 전사에서 거부를 확인해 `NATIVE_DISPATCH_DENIED`(NEED_USER)로 올린다 — 재시도는 사용자 결정 뒤 `native-agent-bridge.sh redispatch <request_id>`(같은 요청), 정리는 `discard`. 실행 여부가 불명인 요청은 자동으로 다시 보내지 않는다.
 - 진행 중인 피처의 세션은 backend 를 바꿔도 자동으로 옮겨 가지 않는다(`SESSION_CLI_MISMATCH`). 절차와 중단 코드는 `.claude/skills/feature/references/native-agent.md`.
+
+**Codex 모델의 실행 backend (`config.sh` `CODEX_BACKEND`).** `gpt-*`/`o*`/`codex*` 모델을 무엇으로 실행할지도 역할이 아니라 이 설정 하나가 정한다.
+
+| 값 | 실행 | 비고 |
+|---|---|---|
+| `app_server` (기본값) | 하네스가 로컬 `codex app-server`(stdio JSON-RPC)를 자식 프로세스로 직접 띄워 thread/turn 을 관리한다(`scripts/codex-app-server.sh` + `codex-app-server.mjs`) | `codex exec` 0회. 로컬 codex 바이너리와 기존 codex 인증·설정을 그대로 쓰고 Node.js 18+ 가 추가로 필요하다(외부 패키지·daemon·네트워크 listener 없음). 실패해도 `codex exec` 로 자동 대체하지 않는다 |
+| `legacy_exec` | 종전의 `codex exec` / `codex exec resume` | 이미 `codex exec` 로 진행 중인 피처를 마칠 때와 CLI 어댑터 회귀용. `CODEX_BACKEND` 줄이 없는 예전 `config.sh` 도 이 값으로 동작한다 |
+
+- native Agent 와 달리 exit 42 가 없다 — Shell 이 자식 프로세스를 직접 띄우므로 Codex 역할 호출은 한 번의 러너 실행 안에서 끝난다. 호출 1회 = 프로세스 1개 = turn 1개이고, 이어지는 것은 codex 가 저장하는 thread 다(수용된 key 는 세션 원장의 thread id 로만 `thread/resume`).
+- `turn/start` 를 보내기 전에 전송 의도를 `.agent-work/.session-<key>.codex-turn.json` 에 남기고 `PREPARED → THREAD_READY → SEND_UNCONFIRMED → RUNNING → RESULT_READY → CONSUMED → ACCEPTED` 로 전이한다. 전송 뒤 서버 종료·timeout·스트림 손상은 `UNKNOWN` 이고, 재실행은 모델 호출 0회로 멈춘다(`CODEX_TURN_UNCERTAIN`). 확인은 조회 전용 `codex-app-server.sh status|reconcile`, 정리는 사용자가 정한 뒤의 `discard` 다.
+- 결과는 그 호출의 thread/turn 에 결속된 완료 agentMessage 뿐이다(델타·다른 turn·과거 파일 아님). 서버의 승인 요청은 수락하지 않고, 모델·sandbox·승인 정책이 요청과 다르게 돌아오면 turn 을 보내기 전에 멈춘다. 읽기 전용 역할은 호출 전후의 작업 트리·git index 가 다르면 판정을 쓰지 않고(`CODEX_APP_SERVER_READONLY_VIOLATION`), 그 스냅샷을 만들지 못하면 실행하지 않거나 결과를 쓰지 않는다(`CODEX_APP_SERVER_READONLY_SNAPSHOT_FAILED`).
+- 편집 역할(워커·디자이너·수정자)의 호출이 완료 여부 불명(`UNKNOWN` 등)으로 끝나면 범위 안 변경이 있어도 다음 리뷰어·검증자로 넘기지 않고 세션도 확정하지 않는다(`CODEX_TURN_UNCERTAIN`, 재실행도 모델 0회). turn 이 끝난 것이 확인된 실패(`TURN_FAILED`)만 종전의 `CLI_EXIT_STATUS_MISMATCH` 경로로 독립 검증을 받는다.
+- 워커의 하위 Agent 금지는 워커 프로세스에만 `agents.enabled=false`·`features.multi_agent_v2=false`·`features.multi_agent=false` 를 붙이고, 그 프로세스의 유효 설정·기능 상태를 읽어 확인한 뒤에만 turn 을 보낸다. 확인하지 못하면 모델 호출 전에 멈춘다(`CODEX_APP_SERVER_AGENTS_POLICY_*`). 사용자 전역 codex 설정은 바꾸지 않는다.
+- 현재 상태(2026-11-24): 다섯 역할 모두 같은 두 헬퍼(`run_readonly_json_role` / `run_edit_role`)에서 App Server 로 위임되고 mock 스모크 두 개를 통과한다 — `tests/smoke-codex-app-server.sh`(가짜 App Server 프로세스로 핸드셰이크·신규/재개·스키마·역할 정책·크래시 재개·완료 분기·backend 변경·격리·사용량; 리뷰어·검증자·워커·수정자·디자이너를 어댑터 단위로 호출), `tests/smoke-codex-app-server-pipeline.sh`(실제 `feature-run.sh` 로 Codex 검증자·워커(신규 + 같은 thread 재개)·리뷰어(재개) + native 수정자 혼합 종단, 검증자 호출 중 서버 종료의 복구 포함). Codex 디자이너의 합의 루프 한 바퀴는 종단으로 돌리지 않았다(불명으로 끝난 Codex 디자이너·수정자가 다음 검증자·리뷰어로 넘어가지 않는 것은 루프 단위로 확인). 설치된 codex(0.169.1)로는 모델 호출 없이 프로토콜 스키마·`initialize` 프레이밍·`agents.enabled` 키 인식만 확인했다. **실제 Codex 모델 호출은 3회뿐이다**(codex-cli 0.169.1, 2026-11-24 — 리뷰어 신규 1 turn + 다른 프로세스에서 같은 thread 재개 1 turn, 워커 신규 1 turn). 읽기 전용 2회로: `thread/start`·`thread/resume`·`turn/start` 의 실제 응답과 최종 메시지 추출, 세션 수용, `thread/tokenUsage/updated.total` 이 프로세스를 넘어 누적된다는 것(재개 호출의 사용량이 `complete` 로 기록됨)까지 확인됐다. 워커 1회로: `workspace-write`·승인 없음으로 셸 명령 실행(`commandExecution`), 하위 Agent 금지의 유효 적용 확인(thread 기준 조회 포함), 프롬프트에 모양을 적지 않은 결과가 `outputSchema` 모양대로 온 것, `last` 가 모델 요청 단위라는 것(`context_last_turn` 의 근거)이 확인됐다. **편집 역할의 필수 훅 게이트**: codex 는 신뢰하지 않은 프로젝트의 훅을 로드하지 않고, 프로젝트를 신뢰했어도 검토되지 않은 훅 정의는 돌리지 않는다. 그래서 워커·수정자·디자이너 호출은 그 프로세스의 `hooks/list` 로 `PreToolUse` 의 `worker_guard.sh` 가 등록·활성·신뢰 상태인 것을 확인한 뒤에만 `turn/start` 를 보내고, 확인하지 못하면 모델 0회로 멈춘다(`CODEX_APP_SERVER_HOOK_GATE_*`). 신뢰 설정은 사용자가 관리한다 — 하네스는 판정만 하고 `~/.codex/config.toml` 을 고치지 않는다. linked worktree 는 원본 저장소의 프로젝트 신뢰를 물려받고 훅의 신뢰 key 도 원본 경로로 나온다(모델 호출 없이 조회로 관측했고, 원본에서 신뢰한 훅이 worktree 에서 통과하는 것은 아래 실모델 프로브로 확인했다). 위 워커 1회는 이 게이트가 없던 때의 호출이라 훅 기반 보호의 증거가 아니다. 가드 스크립트 자체의 우회는 계약 세대를 올려 가며 막았다 — 2 세대: `git -C . commit` · 허용 삭제에 섞은 다른 삭제 · `apply_patch` 의 Delete File · 입력 해석 실패 시 허용, 3 세대(2026-11-25): 허용 접두사 뒤의 변수·글로브·중괄호 확장 대상(`.agent-work/$X`) · 프로젝트 밖으로의 이동(`mv`, `apply_patch` 의 Move to — 프로젝트 안의 이름 바꾸기는 허용, `git mv` 는 index 조작으로 차단) · 심볼릭 링크를 거친 삭제 · `.codex/`(가드·훅 정의)를 대상으로 한 `apply_patch`. 무과금 회귀 `tests/smoke-worker-guard.sh` 가 본다. 게이트는 옛 세대 가드를 거르고, 세대 줄만 붙인 가드는 파일 지문(sha256)을 검토된 지문 — 배포본의 지문 또는 사용자가 `CODEX_APP_GUARD_REVIEWED_SHA256` 에 등록한 지문 — 과 대조해 거른다(`script_unreviewed`). 게이트는 가드 스크립트를 실행하지 않는다(신뢰 확인 전·sandbox 밖 실행은 2026-11-25 외부 리뷰 P1 로 제거). 훅 정의는 명령이 글자 그대로 같고 matcher 가 없어야 통과다(`command_mismatch` · `matcher_scoped`). 가드 파일 자체는 codex `workspace-write` sandbox 가 `.codex/` 쓰기를 거부하는 것(모델 호출 없이 셸 경로만 확인)과 turn 전후 지문 대조(`CODEX_APP_SERVER_HOOK_FILES_CHANGED` — 사후 탐지)가 맡는다. 실모델 프로브(`guard` 모드) 2회(2026-11-25)로 신뢰된 훅이 실제 turn 에서 셸의 삭제·`git add` 와 `apply_patch` 의 Delete File·프로젝트 밖 Move to·`.codex/` 수정을 거부하는 것(2차 실행: `hook/completed` 의 `blocked` 5건 — 금지 호출 다섯 개 전부, 파일·index·가드 불변)과 원본에서 신뢰한 훅이 linked worktree 에서 `trusted` 로 통과하는 것을 확인했다(1차는 Move to 지시가 patch 파서에서 먼저 거부돼 4건이었고, 지시를 고친 2차에서 확인했다). **실모델 미검증**: 스키마에 어긋나는 출력을 서버가 막는지, 수정자·디자이너, 워커의 재개 turn, 셸 `mv` 에 대한 훅 차단, reconcile 조회, 불명 상태 복구. 상세는 `references/codex-app-server.md` 의 검증 범위.
+- 진행 중인 피처의 세션은 backend 를 바꿔도 옮겨 가지 않는다(`SESSION_BACKEND_MISMATCH` / `WORKER_SESSION_MISMATCH`). 상태·중단 코드·수리 절차는 `.claude/skills/feature/references/codex-app-server.md`.
 
 | 역할 | 모델·effort 설정 | CLI (기본 설정) | 하는 일 |
 |---|---|---|---|
@@ -144,10 +159,10 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **사용자 결정의 의존성 범위**: design PASS 지문은 `scope=design` 결정만, impl PASS 지문은 `scope=design`+`scope=impl` 결정을 본다.
   impl 합의 중 사용자가 검증자 요구를 기각해도 design PASS 는 그대로 재사용되고, impl 도 그 에스컬레이션의 모든 blocker 에 `[escalation=<id>]` 답이 있으면 재검증 없이 워커로 간다(위 "합의 에스컬레이션의 사용자 결정은 최종이다"). 에스컬레이션과 무관하게 추가한 `scope=impl` 결정은 기존처럼 impl 만 재검증시킨다(design 검증자 0회). `scope=design` 결정은 design PASS 와 impl upstream 지문을 함께 깨서 정상 design → impl 재합의를 거친다 — 옛 `doc-gap-resume.json` 으로 건너뛰지 않는다. 검증자에게 주는 결정 파일(`reviews/user-decisions-<target>.md`)과 지문은 같은 함수의 출력이라 서로 어긋나지 않는다. 두 지문 모두 worktree `conventions.md` 내용을 포함하므로(없으면 고정 부재 표지) conventions 가 바뀌면 design·impl PASS 가 함께 무효화된다. `request.md`/`design.md` 변경은 기존처럼 design 부터 다시 돈다.
   scope 없는 옛 형식 줄은 러너가 LLM 호출 전에 `DECISION_SCOPE_REQUIRED` 로 멈추고 사람이 태그를 붙인다(자동 추정 없음). 지문 의미가 바뀌면 `CONSENSUS_CHECKPOINT_VERSION` 을 올린다.
-- **워커 하위 Agent·백그라운드 차단(SH 강제)**: `run_edit_role` 이 `role=WORKER` 호출에만 claude `--disallowedTools "Agent,ScheduleWakeup"` + child 전용 환경변수(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`), codex `exec`/`exec resume` 양쪽에 `-c 'agents.enabled=false'` 를 배열로 붙인다(`SendMessage` 는 막지 않음, 다른 역할·전역 codex 설정 불변, CLI 가 거부하면 그 호출은 실패 — 제한 없는 재실행 없음). claude 워커의 stream-json 은 `result` 이벤트가 정확히 하나일 때만 수용하고, 워커 세션 확정은 CLI rc 가 아니라 결과 검증(`worker_result_valid`) 뒤 `role_session_accept` 에서만 한다(무효 첫 턴의 대화는 잇지 않음). unit 미결정을 사용자가 해결하면 재개 프롬프트의 `[RESOLVED GAPS]` 에 ID·질문·답이 들어가고, 같은 ID·질문을 다시 내면 `RESOLVED_GAP_REPEATED` 로 멈춘다(자동 재시도 없음).
+- **워커 하위 Agent·백그라운드 차단(SH 강제)**: `run_edit_role` 이 `role=WORKER` 호출에만 claude `--disallowedTools "Agent,ScheduleWakeup"` + child 전용 환경변수(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`), codex `exec`/`exec resume` 양쪽에 `-c 'agents.enabled=false'` 를 배열로 붙인다 — Codex App Server backend 에서는 그 워커 호출의 `codex app-server` 자식 프로세스 인자에만 `agents.enabled=false`·`features.multi_agent_v2=false`·`features.multi_agent=false` 가 들어가고(호출마다 프로세스가 따로라 다른 역할에 새지 않는다), 런타임이 그 프로세스의 유효 설정으로 적용을 확인하지 못하면 turn 을 보내지 않는다(`SendMessage` 는 막지 않음, 다른 역할·전역 codex 설정 불변, CLI 가 거부하면 그 호출은 실패 — 제한 없는 재실행 없음). claude 워커의 stream-json 은 `result` 이벤트가 정확히 하나일 때만 수용하고, 워커 세션 확정은 CLI rc 가 아니라 결과 검증(`worker_result_valid`) 뒤 `role_session_accept` 에서만 한다(무효 첫 턴의 대화는 잇지 않음). unit 미결정을 사용자가 해결하면 재개 프롬프트의 `[RESOLVED GAPS]` 에 ID·질문·답이 들어가고, 같은 ID·질문을 다시 내면 `RESOLVED_GAP_REPEATED` 로 멈춘다(자동 재시도 없음).
 - **커밋 통제**: 워커는 커밋·푸시 불가(claude 훅 + codex 훅 이중 차단). 커밋은 사용자가 요청했을 때만
   오케스트레이터가 1회용 `ALLOW_COMMIT` 플래그를 만들고 수정자에게 위임한다.
-- **토큰 절약**: 역할별 세션 재사용(claude `--session-id`/`--resume`, codex `exec resume`)으로 라운드 간 저장소 재탐색을 없애고
+- **토큰 절약**: 역할별 세션 재사용(claude `--session-id`/`--resume`, codex 는 원장의 thread id 로 `thread/resume` — legacy_exec 는 `exec resume`)으로 라운드 간 저장소 재탐색을 없애고
   프롬프트 캐시를 살린다. 사용량은 `usage.jsonl`에 CLI invocation 한 번당 행 1개로 기록한다(아래 "usage telemetry").
 - **역할별 규칙 전달**: 필수 `core_rules.md`는 워커에게만 주입하고 선택 `conventions.md`는 디자이너·검증자·워커·리뷰어·수정자 모두에게 주입.
 - **실시간 관찰**: 두 루프의 판정, 상세 이슈, 참고사항, 디자이너 반영 결정을 `.agent-work/live.log`에 누적. 러너가 `feature-live` 뷰어 창을 스스로 연다(이미 열려 있으면 `.agent-work/.feature-live.lock/viewer.pid` 로 감지해 다시 열지 않음). 오케스트레이터는 직접 실행하지 않는다. 수동 관찰은 절대 경로 `"$(git rev-parse --show-toplevel)/feature-live"`.
@@ -169,7 +184,9 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
     │   ├── impl-docs.md             # NEED_DOCS(IMPL_DOCS_MISSING / SCOPE_MISSING): implementation.md·approach.md·feature-scope.json·implementation-units.json
     │   ├── exit-states-resume.md    # NEED_USER 전 reason 의 행동·decisions.md 태그·재합의 우회 조건·체크포인트/지문 재개 규칙
     │   ├── done-finalize.md         # DONE 보고·finalize 승인/실행·커밋 경계
-    │   └── pipeline-contracts.md    # 구현 단위 직렬 실행·강제 규칙(역할 경계)·변경 소유권·세션/사용량 기록
+    │   ├── pipeline-contracts.md    # 구현 단위 직렬 실행·강제 규칙(역할 경계)·변경 소유권·세션/사용량 기록
+    │   ├── native-agent.md          # exit 42 NATIVE_AGENT_REQUIRED: native Agent dispatch 절차·중단 코드
+    │   └── codex-app-server.md      # Codex App Server backend: 호출 기록 상태·중단 코드(CODEX_TURN_* 등)·status/reconcile/discard 수리 절차
     ├── config.sh                # 모델/effort/라운드 한도/프로젝트 명령 + 가드 + 헬퍼
     ├── prompts/                 # 역할별 페르소나 템플릿 (envsubst 변수 치환 — unit 워커·unit 테스트 수정·빠른 검사 위반 수정 포함)
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
@@ -179,6 +196,8 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
         ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지 (리뷰어 호출 직전 프로젝트 빠른 검사 게이트)
         ├── fast-check.sh        # 프로젝트 빠른 검사 연결(선택, FAST_CHECK_CMD) — worktree 루트 실행·타임아웃·결과 구분(통과/위반/실행 오류)·읽기 전용 확인·실행 기록. 같은 엔진으로 Unit 정적 검사(UNIT_CHECK_CMD)·위험도별 추가 검증(RISK_VERIFY_CMD)도 실행한다
+        ├── codex-app-server.sh  # Codex App Server backend 연결부(config.sh 가 source) — 모델 0회 사전 검사·재전송 차단 게이트·호출 기록·세션 원장·사용량 행, 직접 실행하면 status/reconcile/discard/preflight
+        ├── codex-app-server.mjs # Codex App Server 런타임(Node.js 18+, 외부 패키지 없음) — `codex app-server` 자식 프로세스·JSON-RPC·이벤트 수집·상태 전이 기록
         ├── post-run-report.sh   # DONE 뒤 사후 분석 보고서(post-run-report.json) — 비용·검증·실패 회고·규칙 개선 후보. 기존 기록 집계만(모델 호출 0회), 실패해도 DONE 유지
         └── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
 
@@ -191,6 +210,9 @@ tests/
 ├── smoke-fast-check.sh          # 프로젝트 빠른 검사 연결 회귀 — fixture 프로젝트의 정상·위반·실행 오류 명령: 미설정 생략·리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지 (mock)
 ├── smoke-verification-gates.sh  # 검증 게이트 회귀 — Unit 정적 검사(PASS·위반·오류·읽기 전용·수정 턴 1회·설정 변경)·위험도별 추가 검증(LOW·HIGH·UNKNOWN·위반→재승인)·DONE 사후 분석 보고서 (mock)
 ├── smoke-check-plan.sh          # 검사 계획 사전 전달·검사 진단 요약 회귀 — 미설정 무변화·Unit/빠른 검사 사전 안내·안내 문서 경로 검증·큰 로그 요약(8 KiB)·판정은 종료 코드·세션 연속성 (mock)
+├── smoke-codex-app-server.sh    # Codex App Server backend 회귀 — 가짜 App Server 프로세스(fake-codex-app-server.mjs)로 프로토콜·재개 안전성·역할 정책·사용량, codex exec 0회 (mock)
+├── smoke-codex-app-server-pipeline.sh # Codex App Server(검증자·워커·리뷰어) + native 수정자 혼합 종단 — 실제 feature-run.sh 로 DONE 까지 (mock)
+├── fake-codex-app-server.mjs    # 위 두 스모크가 CODEX_BIN 으로 쓰는 가짜 codex — app-server stdio JSONL, 시나리오별 실패 주입
 ├── smoke-cli-exit-mismatch.sh   # CLI 종료코드 ≠ 의미적 완료 회귀 — 워커 유효 결과/불확실 변경(WORKER_OUTCOME_UNCERTAIN)/디자이너·수정자 변경 후 non-zero 는 다음 검증자·리뷰어로, 안전 게이트 우선, read-only 결과 재사용 (mock)
 ├── validator-cases.md           # 검증자 판정 감도 회귀 세트 설명
 ├── validator-cases/             # 고정 픽스처 39개 (문서·src·expected.json)
@@ -205,7 +227,7 @@ tests/
 
 .codex/
 ├── hooks.json                   # codex PreToolUse 훅 등록 (프로젝트 레벨)
-└── hooks/worker_guard.sh        # 워커 가드: commit/push 차단 (프로젝트별 보호는 직접 추가)
+└── hooks/worker_guard.sh        # 워커 가드: commit/push·index 조작·삭제·프로젝트 밖 이동 차단, 검사 못 한 호출은 불허 (프로젝트별 보호를 추가하면 지문을 CODEX_APP_GUARD_REVIEWED_SHA256 에 등록)
 
 feature-live                     # 실시간 로그 뷰어 (러너가 자동으로 연다 — tail -f 대체, 수동 실행은 절대 경로)
 conventions.md                   # 선택: 모든 역할에 추가 주입할 프로젝트 규범
@@ -217,7 +239,8 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
 ## 요구사항
 
 - [Claude Code](https://claude.com/claude-code) CLI (`claude`): 로그인 상태
-- OpenAI Codex CLI (`codex`): 로그인 상태
+- OpenAI Codex CLI (`codex`): 로그인 상태. 기본 backend(`CODEX_BACKEND=app_server`)는 이 바이너리의 `codex app-server` 를 쓴다(`codex-app-server.sh preflight` 가 설치된 버전의 프로토콜 지원을 모델 호출 없이 확인한다)
+- Node.js 18 이상(`node`): Codex App Server backend 의 런타임. npm 패키지는 쓰지 않는다. `CODEX_BACKEND=legacy_exec` 로만 쓰면 필요 없다
 - `jq`, `uuidgen`, `envsubst`(gettext). macOS: `brew install jq gettext`
 - git 저장소 (브랜치 생성·diff 리뷰·훅 판정에 사용)
 
@@ -261,7 +284,10 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    CHECK_GUIDE_FILE=""                    # (선택) 프로젝트가 쓴 검사 규칙 안내 문서의 worktree 상대 경로 — 아래 "검사 계획 사전 전달"
    ```
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
-   빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 모든 스크립트 실행을 거부한다.
+   빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 스크립트 실행을 거부한다(예외: 프로젝트 명령을 실행하지 않는 조회 전용 `codex-app-server.sh status|preflight|hooks` 는 `TEST_CMD`/`LINT_CMD` 의 `CHANGE_ME` 를 넘어간다).
+   **기존 설치의 Codex backend 전환**: `install.sh` 는 기존 `config.sh` 를 덮어쓰지 않으므로 `CODEX_BACKEND` 줄이 없는 설정은 종전대로 `codex exec`(legacy_exec)로 돈다(설치가 `[INFO]` 로 알린다).
+   App Server 로 바꾸려면 ① 진행 중인 피처를 먼저 마치고 ② `config.sh.new` 의 `Codex 모델의 실행 backend` 블록(`CODEX_BACKEND`·`CODEX_APP_SERVER_*`)을 사용자 설정 영역에 옮겨 적은 뒤
+   ③ `bash .claude/skills/feature/scripts/codex-app-server.sh preflight` 로 codex·Node.js 호환성을 확인한다. 런타임 계약 표식(`FEATURE_RUNTIME_CONTRACT_VERSION`)이 옛 값인 `config.sh` 위에는 새 스크립트가 설치되지 않는다(혼합 설치 사전 거부).
 3. (선택) 프로젝트별 보호가 필요하면 훅을 추가한다. 생성 코드·마이그레이션 편집 금지 같은 규칙은
    `.codex/hooks/worker_guard.sh` 와 claude `PreToolUse` 훅에 같은 패턴(경로 grep → exit 2)으로 넣는다.
 4. (선택) 저장소 루트에 `conventions.md`를 두면 모든 역할에 주입된다. 파일이 없으면 생략한다. `core_rules.md`는 워커에게만 별도로 주입된다.
@@ -485,8 +511,9 @@ MAX_TEST_RETRIES=1   # 최종 테스트 실패 시 워커 재수정 허용 횟�
 `usage.jsonl` 한 행 = CLI invocation 한 번의 관측 telemetry. 세션 누계가 아니며, 같은 Claude 세션을 `--resume`해도 행은 invocation 별로 기록한다.
 writer 는 append-only 원시 기록만 하고 session 별 delta·누적 total·가격 추정을 하지 않는다. 집계는 그 위에서 한다(`usage_summary` 또는 아래 jq).
 세션은 key 로 관리하고 CLI 와 독립이다 — stage/attempt 단위(`designer-design`/`designer-impl`, `reviewer-a01`, `fixer-a01`)와 Feature 단위(워커 — `feature-worker` 세션 하나를 unit 턴으로 이어 쓴다, `worker-session.json` 저널). 합의 루프의 검증자만 호출마다 fresh 세션이다(`validator-<target>-round-NN-<invocation id>`).
-같은 key 안의 라운드·재시도만 잇고(claude `--resume` / codex `exec resume <thread_id>` — 원장 `.session-<key>.codex.json`) 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
-codex thread id 는 최초 실행 이벤트 JSONL 의 `thread.started` 에서만 얻으며, resume 실패·원장 불일치·수용 미확인(`.resume-pending.json` marker)은 새 세션으로 조용히 대체하지 않고 중단한다.
+같은 key 안의 라운드·재시도만 잇고(claude `--resume` / codex 는 원장 `.session-<key>.codex.json` 의 thread id 로 App Server `thread/resume`, legacy_exec 는 `exec resume <thread_id>`) 다른 stage/attempt 로는 대화 문맥을 넘기지 않는다(상태는 문서·JSON·체크포인트·지문으로만).
+codex thread id 는 그 호출이 만든 thread 에서만 얻으며(App Server: `thread/start` 응답 / legacy_exec: 최초 실행 이벤트 JSONL 의 `thread.started`), resume 실패·원장 불일치·수용 미확인(App Server: 호출 기록 `.session-<key>.codex-turn.json` 의 상태 / legacy_exec: `.resume-pending.json` marker)은 새 세션으로 조용히 대체하지 않고 중단한다.
+Codex App Server 행(`source: codex-app-server`, `backend: codex_app_server`)은 `thread/tokenUsage/updated` 의 thread 누적값에서 그 호출의 turn 이벤트만 골라 `마지막 누적 − 기준 누적`(새 thread 는 0, 재개는 직전 호출 기록의 누적값)으로 낸다. 기준·이벤트가 없거나 손상되면 토큰·비용은 `null`(unknown)이다 — `codex exec` 이벤트 파서에 넣지 않는다.
 
 ```json
 {"invocation_id":"…","label":"impl-review-a01-round-01","role":"REVIEWER","cli":"claude","model":"claude-sonnet-5","session":"…",
@@ -498,7 +525,7 @@ codex thread id 는 최초 실행 이벤트 JSONL 의 `thread.started` 에서만
 - `context_last_turn` — 그 invocation 의 마지막 model 호출이 실제로 넣은 입력 = 그 시점의 컨텍스트 창 점유량. claude 는 워커 호출을 `--output-format stream-json` 으로 받아(원본 `<raw>.stream.jsonl` 보존, `result` 이벤트가 **정확히 하나**일 때만 기존 단일 JSON 으로 추출 — 0개/복수/파싱 실패는 `CLAUDE_RESULT_MISSING|MULTIPLE|INVALID` 로 결과를 만들지 않고 `WORKER_OUTCOME_UNCERTAIN` 가드 경로로 간다) 마지막 `assistant` 메시지 usage 의 입력 합, codex 는 이 invocation 의 `thread.started.thread_id` 와 파일명이 일치하는 rollout(`~/.codex/sessions/**/rollout-*-<thread_id>.jsonl`, 정확히 1개일 때만 — 최근 파일을 집지 않는다) 마지막 `token_count.last_token_usage.input_tokens`(관측 전용 — 완료 판정에는 쓰지 않는다). `context_window` 는 모델 창 크기. 세션 교체 판단은 이 값을 먼저 쓴다.
 - `input_per_turn` = floor(`input_effective` / `num_turns`) — 턴당 평균 입력, `context_last_turn` 이 `null` 일 때의 근사 대체값(`num_turns` 없으면 `null`).
 - `cache_read` 는 현재 context 크기가 아니라 해당 invocation 안의 model turn 들에서 읽힌 cache 토큰 누계일 수 있으므로 `num_turns` 와 함께 해석한다.
-- `null` 은 0 이 아니라 "관측 불가" 다. codex 는 `codex exec --json` 이벤트 JSONL 의 `turn.completed.usage` 를 invocation 안에서 합산해 `input_uncached`/`cache_read`/`cache_write`/`output`/`reasoning_output`/`num_turns`/`tokens_total` 을 채운다(`source: codex-events`). 비용은 provenance 로 나뉜다. `cost_usd` 는 provider 가 보고한 실제 비용(claude, codex 는 항상 null)이다. `estimated_cost_usd` 는 codex 토큰 × 명시적 가격표(`codex_model_pricing` — OpenAI API Standard 2026-10-30 조회, USD/1M, 입력/캐시 입력/30분 캐시 쓰기/12시간 캐시 쓰기/출력: `gpt-6.2-astra` 8/0.4/10/20/40(장문 16/0.8/20/40/60, 2026-11-18 조회), `gpt-6-astra` 10/1/12.5/25/50(장문 20/2/25/50/75), `gpt-5.6-sol` 4/0.4/5/10/20(장문 8/0.8/10/20/30, 2026-11-21 까지 유지 예정 프로모션 단가), `gpt-6-sol` 2/0.2/2.5/5/10(장문 4/0.4/5/10/15), `gpt-5.6-luna` 0.2/0.02/0.25/0.5/1.2(장문 ×2, 출력 1.8), `gpt-6-luna` 0.1/0.01/0.125/0.25/0.5(장문 ×2, 출력 0.75); 장문 = 요청 입력 > 272,000 이면 요청 전체; 정확한 ID 만 매칭, 가격표에 없는 모델은 null/`cost_kind: unknown`)의 **API 표준 요금 기준 환산 추정치**이며 실제 청구액이 아니다. 수식(schema_version 4)은 turn 마다 `(uncached × input + cache_read × cached + cache_write(30m) × 30분 단가 + cache_write(12h, 분리 관측 시) × 12시간 단가 + output × output) / 1M`(uncached 는 0 이상으로 clamp 하고 캐시 쓰기 토큰을 일반 입력으로 다시 과금하지 않음, reasoning 은 output 의 부분집합이라 중복 가산 없음)이고, 장문 구간은 invocation 누적이 아니라 turn 별 입력(`long_context_tier=turn_proxy`, 요청 단위 입력은 관측 불가)으로 고른다. 관측할 수 없는 과금 조건(캐시 쓰기 TTL → 30분 가정, service tier/리전 → standard 가정, 요청 단위 입력 → turn proxy)은 행의 `pricing_assumptions` 에 적힌다. 실제로 시작한 모든 child invocation 은 행 1개를 남긴다 — 결과 판정 실패(result 0개/복수/파싱 실패)·usage 이벤트 없음(`USAGE_EVENTS_MISSING`)·이벤트 JSONL 에 JSON 아닌 줄 혼재(`USAGE_EVENTS_CORRUPT`, 정상 turn 이 섞여 있어도 합산하지 않음)·`turn.completed.usage` 필수 필드 누락(`USAGE_FIELDS_INCOMPLETE`, `usage:{}` 는 0 이 아님)은 비용·토큰 `null` 의 `unknown` 행(`usage_observation_status`·`usage_error`·`raw_log`)으로 남고 0 달러로 숨지 않는다. `usage_summary` 는 `reported_cost_usd`(= `cost_usd`)·`estimated_cost_usd`·`combined_cost_usd_estimate`(둘의 합, 청구액 아님)·`cost_unknown_invocations`·`usage_unobserved_invocations`·`pricing_bases` 를 따로 내고 `by_cli`/`by_model` 도 준다. 러너는 DONE 뿐 아니라 NEED_USER/NEED_DOCS/ENV_ERROR 로 멈출 때도, 예기치 않은 종료(EXIT trap, 1회)에도 같은 숫자로 비용 한 줄을 `live.log` 에 남기고 `usage-summary.json` 을 쓴다(usage.jsonl 이 없으면 빈 상태로 표시).
+- `null` 은 0 이 아니라 "관측 불가" 다. codex 는 `codex exec --json` 이벤트 JSONL 의 `turn.completed.usage` 를 invocation 안에서 합산해 `input_uncached`/`cache_read`/`cache_write`/`output`/`reasoning_output`/`num_turns`/`tokens_total` 을 채운다(`source: codex-events`). 비용은 provenance 로 나뉜다. `cost_usd` 는 provider 가 보고한 실제 비용(claude, codex 는 항상 null)이다. `estimated_cost_usd` 는 codex 토큰 × 명시적 가격표(`codex_model_pricing` — OpenAI API Standard 2026-10-30 조회, USD/1M, 입력/캐시 입력/30분 캐시 쓰기/12시간 캐시 쓰기/출력: `gpt-6.2-astra` 8/0.4/10/20/40(장문 16/0.8/20/40/60, 2026-11-18 조회), `gpt-6-astra` 10/1/12.5/25/50(장문 20/2/25/50/75), `gpt-5.6-sol` 4/0.4/5/10/20(장문 8/0.8/10/20/30, 2026-11-30 까지 유지 예정 프로모션 단가 — 2026-11-24 확인), `gpt-6-sol` 2/0.2/2.5/5/10(장문 4/0.4/5/10/15), `gpt-5.6-luna` 0.2/0.02/0.25/0.5/1.2(장문 ×2, 출력 1.8), `gpt-6-luna` 0.1/0.01/0.125/0.25/0.5(장문 ×2, 출력 0.75); 장문 = 요청 입력 > 272,000 이면 요청 전체; 정확한 ID 만 매칭, 가격표에 없는 모델은 null/`cost_kind: unknown`)의 **API 표준 요금 기준 환산 추정치**이며 실제 청구액이 아니다. 수식(schema_version 4)은 turn 마다 `(uncached × input + cache_read × cached + cache_write(30m) × 30분 단가 + cache_write(12h, 분리 관측 시) × 12시간 단가 + output × output) / 1M`(uncached 는 0 이상으로 clamp 하고 캐시 쓰기 토큰을 일반 입력으로 다시 과금하지 않음, reasoning 은 output 의 부분집합이라 중복 가산 없음)이고, 장문 구간은 invocation 누적이 아니라 turn 별 입력(`long_context_tier=turn_proxy`, 요청 단위 입력은 관측 불가)으로 고른다. 관측할 수 없는 과금 조건(캐시 쓰기 TTL → 30분 가정, service tier/리전 → standard 가정, 요청 단위 입력 → turn proxy)은 행의 `pricing_assumptions` 에 적힌다. 실제로 시작한 모든 child invocation 은 행 1개를 남긴다 — 결과 판정 실패(result 0개/복수/파싱 실패)·usage 이벤트 없음(`USAGE_EVENTS_MISSING`)·이벤트 JSONL 에 JSON 아닌 줄 혼재(`USAGE_EVENTS_CORRUPT`, 정상 turn 이 섞여 있어도 합산하지 않음)·`turn.completed.usage` 필수 필드 누락(`USAGE_FIELDS_INCOMPLETE`, `usage:{}` 는 0 이 아님)은 비용·토큰 `null` 의 `unknown` 행(`usage_observation_status`·`usage_error`·`raw_log`)으로 남고 0 달러로 숨지 않는다. `usage_summary` 는 `reported_cost_usd`(= `cost_usd`)·`estimated_cost_usd`·`combined_cost_usd_estimate`(둘의 합, 청구액 아님)·`cost_unknown_invocations`·`usage_unobserved_invocations`·`pricing_bases` 를 따로 내고 `by_cli`/`by_model` 도 준다. 러너는 DONE 뿐 아니라 NEED_USER/NEED_DOCS/ENV_ERROR 로 멈출 때도, 예기치 않은 종료(EXIT trap, 1회)에도 같은 숫자로 비용 한 줄을 `live.log` 에 남기고 `usage-summary.json` 을 쓴다(usage.jsonl 이 없으면 빈 상태로 표시).
 - CLI 가 실패해도 파싱 가능한 usage 가 있으면 `exit_code`/`success` 와 함께 기록한다. 같은 `label` 이 재시도되면 행이 여러 개이며 `invocation_id` 로 구분한다.
 - 옛 행(`in`/`out`)은 rewrite 하지 않는다. `usage_summary` 는 두 형식을 함께 읽는다.
 - `usage_summary [usage.jsonl]` 은 전체와 `by_role`/`by_label`/`by_session` 그룹마다 `invocations`·`cost_usd`·`cache_read`·`num_turns`·`output`·`cache_read_per_turn`(cache_read 합 ÷ num_turns 합, num_turns 를 보고한 행만; 없으면 `null`)을 낸다. 어느 역할·호출·세션이 cache read 를 만드는지 보는 관측값이며 임계치·자동 세션 교체 같은 판단은 하지 않는다.
@@ -536,7 +563,10 @@ bash tests/smoke-verification-gates.sh    # 검증 게이트: Unit 정적 검사
 bash tests/smoke-check-plan.sh            # 검사 계획 사전 전달·검사 진단 요약: 미설정 무변화, 워커 첫 턴 전 안내, 안내 문서 경로 검증, 10,000줄 로그 요약, 판정은 종료 코드. LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
-bash tests/smoke-codex-usage.sh           # codex usage/비용: turn 합산·가격표(astra 단문/장문, 캐시 쓰기 별도율·12h-only TTL 근거, 가정 기록)·깨진 줄/usage:{} → unknown(과소 집계 없음)·DONE 비용 보고 일치. LLM 호출 없음
+bash tests/smoke-codex-app-server.sh      # Codex App Server backend: 가짜 App Server 프로세스로 핸드셰이크·신규/재개·스키마·역할 정책(agents.enabled 누출 없음)·크래시 재개(추가 turn 0회)·완료 분기·backend 변경·격리·설치·사용량(누적값 차이·unknown). LLM 호출 없음
+bash tests/smoke-codex-app-server-pipeline.sh # Codex 검증자·워커·리뷰어(App Server) + native 수정자 혼합 종단(DONE), codex exec·claude CLI 0회. LLM 호출 없음
+bash tests/smoke-codex-resume.sh          # codex exec 어댑터(legacy_exec 고정): key 단위 세션·exec resume·marker·thread id 불일치. LLM 호출 없음
+bash tests/smoke-codex-usage.sh           # (legacy_exec 고정) codex usage/비용: turn 합산·가격표(astra 단문/장문, 캐시 쓰기 별도율·12h-only TTL 근거, 가정 기록)·깨진 줄/usage:{} → unknown(과소 집계 없음)·DONE 비용 보고 일치. LLM 호출 없음
 bash tests/smoke-worker-tool-policy.sh    # 워커 CLI 도구 제한: claude --disallowedTools + child 환경변수, codex -c agents.enabled=false(exec/resume), 다른 역할 불변. LLM 호출 없음
 bash tests/smoke-claude-result-events.sh  # claude stream-json result 이벤트 1개만 수용, 0/복수/깨짐 → 가드·원본 보존·재호출 0회·세션 미확정, 예기치 않은 종료에도 비용 보고 1회. LLM 호출 없음
 bash tests/smoke-review-output-contract.sh # 리뷰 출력 계약: fix_ref(수정 후 소스 경로·hunk 교차, 패치 파일 거부)·origin 별 필드, REVIEW_OUTPUT_INVALID 구조화 진단·재실행 리뷰어 0회·resume marker 보존·로컬 재검증·--new-attempt, 재검증 중 세션 확정 실패 재실행, 계약 문서 변경 시 저장 출력 미재사용, hunk 없는 변경의 fix_ref 거부, 검사기 버전 변경 시 승인 캐시 재검증, 스키마 전체 검사(필드 누락·enum·minItems), 계약 문서·conventions.md 변경 시 승인 캐시 미재사용. LLM 호출 없음
@@ -567,6 +597,7 @@ bash tests/worker-regression.sh      # 워커 material-contract 충실도. 사�
 - **리뷰 단계 중단은 세 가지 서로 다른 상태다** — 섞어서 "재실행하면 된다"로 처리하지 않는다:
   - **`NEED_USER(REVIEW_OUTPUT_INVALID)` — 형식 오류(반복 호출 금지)**: 리뷰어가 JSON 은 돌려줬지만 출력 계약에 어긋났다(증거 유형·action 필드, Round 2 `origin`/`previous_issue_id`/`fix_ref`, verdict 와 issues 모순, `schema_version` 불일치 — 업데이트 후 `REVIEWER_CONTRACT_VERSION` 미병합 포함). `reviews/invalid-review.json` 의 `errors[]`(`rule_id` 예: `INVALID_FIX_REF`)를 본다. **재실행해도 리뷰어는 호출되지 않고 같은 진단이 나온다.** 검사기 버그였으면 고친 뒤 재실행하면 저장된 출력을 로컬 재검증한다(입력·계약이 같을 때만, 모델 0회). 새 리뷰가 필요하면 `--new-review-attempt`(새 attempt Round 1, 새 세션 — `--new` 아님). 반복되면 `tests/reviewer-regression.sh`로 프롬프트 회귀를 본다.
   - **`ENV_ERROR` — CLI 결과 불확실(기존 resume marker 유지)**: 결과 JSON 자체가 없다(CLI 실패·중단). codex resume 호출이었으면 `.session-<key>.resume-pending.json` 이 남아 다음 실행이 `SESSION_RESUME_UNCERTAIN` 으로 모델 0회 중단한다 — 이벤트 로그로 중복 전송 여부를 확인한 사람이 marker 를 치운다. 러너는 지우지 않는다.
+  - **`ENV_ERROR` — Codex App Server 호출 불명(`CODEX_TURN_UNCERTAIN` 등)**: App Server backend 는 marker 대신 호출 기록 `.session-<key>.codex-turn.json` 의 상태로 같은 판정을 한다. `turn/start` 를 보낸 뒤 완료를 확인하지 못했으면 재실행이 모델 0회로 멈춘다 — `codex-app-server.sh status <key>` 로 기록·원본 로그를 보고, `reconcile <key>`(조회 전용)로 저장된 thread 에서 완료 결과를 복구할 수 있는지 확인한다. 복구되지 않으면 사용자가 확인한 뒤 `discard <key>` 로 기록을 치운다. 명령은 그 기록이 속한 프로젝트·피처 worktree 루트에서 실행한다(중단 메시지가 `cd <루트> && bash <절대 경로> …` 로 적어 준다). 러너와 오케스트레이터는 치우지 않는다(`references/codex-app-server.md`).
   - **`NEED_USER(DEADLOCK | MAX_ROUNDS)` — 정상 이슈 미해결(리뷰 루프)**: 유효한 `REQUEST_CHANGES` 가 리뷰 → 수정자 → 종결 검토(`MAX_IMPL_ROUNDS`) 안에 풀리지 않았다. 남은 이슈를 사람이 결정한다.
 - **리뷰 단계가 `NEED_USER(REVIEW_DOC_GAP)`로 돌아옴**: 리뷰어가 `DOC_GAP` 이슈(`user_question`/`options`)를 냈다. 사용자가 고른 답을 `decisions.md` 에 `- [USER-QUESTION][scope=impl][review-issue=<id>] <질문> → <답>` 으로 적고 approach.md 에 반영한 뒤 재실행한다(tag 는 중단 사유에 표기된 값 그대로 — 앞선 gap 과 id 가 겹치면 `review-issue=R-01@2` 처럼 `@N` 이 붙는다. 앞서 해결한 gap 은 `doc-gap-resume.json` 의 `prior_gaps` 에 원본 리뷰·결정과 함께 남는다). 그러면 검증자·디자이너 없이 review-gap 워커 1회(같은 리뷰의 FIX_CODE 포함) → 리뷰 순으로 진행된다. 워커 `UNDECIDED` 도 같은 경로다(`worker-gap=<unit>#<n>` 태그).
 - **codex 훅이 안 걸림**: codex를 저장소 루트에서 실행했는지 확인 (`hooks.json`의 가드 경로가 상대 경로).

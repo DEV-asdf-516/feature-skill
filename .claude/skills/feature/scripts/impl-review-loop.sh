@@ -147,6 +147,10 @@ fi
 # 위의 범위 lock·기준선 가드가 먼저다(범위 오류 우선순위 유지) — 그 오류를 복구한 뒤에도 사람이 marker 를 확인하고 치우기 전에는
 # 체크포인트가 무엇이든(FIXER_PENDING·NONE·그 밖) 새 attempt·리뷰어 호출·승인 재사용으로 가지 않는다.
 fixer_stop_if_any_unaccepted
+# Codex App Server backend 의 같은 판정: 수정자 호출 기록이 '완료 여부 불명'(SEND_UNCONFIRMED · RUNNING · UNKNOWN)으로 남아 있으면 여기서 멈춘다.
+# 아래 재개 판정은 FIXER_PENDING + 작업 트리 변경을 '수정자가 일부 고친 뒤 죽음'으로 보고 수정자 호출 없이 리뷰어로 넘어간다 — 그 경로는 run_edit_role 을
+# 거치지 않으므로 호출 전 게이트(CODEX_TURN_UNCERTAIN)가 걸리지 않는다. turn 이 아직 돌고 있을 수 있는 변경을 리뷰어에게 넘기지 않는다.
+codex_app_stop_if_uncertain 'fixer-a*' "재실행" || exit 1
 
 # ---------- 프로젝트 빠른 검사 게이트 (선택 — FAST_CHECK_CMD 미설정이면 생략 로그만) ----------
 # 리뷰어 호출(또는 저장된 리뷰 출력·승인 재사용) 직전에 한 번 부른다. 통과·미설정이면 돌아오고, 규칙 위반은 exit 5, 실행 오류는 exit 6 으로 끝낸다.
@@ -785,7 +789,8 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   # (호출 도중 프로세스가 죽으면 marker 가 남아 codex_session_begin 이 모델 0회로 멈춘다 — 그 계약은 그대로다. 리뷰어(읽기 전용) marker 는 건드리지 않는다.)
   # 지우는 것은 '이번 호출이 쓴' marker 뿐이다(워커와 같은 규칙): 이전 호출의 marker 때문에 CLI 를 부르지 않고 거부된 호출(SESSION_RESUME_UNCERTAIN)이나
   # 이벤트 thread id 가 원장과 달라 불수용된 resume 에서는 남긴다 — 지우면 확인 전에 다음 재실행이 같은 스레드에 프롬프트를 보낸다.
-  if [ "$(role_cli FIXER)" = codex ]; then
+  # marker 는 codex exec(legacy_exec) 어댑터의 장치다 — Codex App Server backend 는 호출 기록의 상태로 판정하므로(scripts/codex-app-server.sh) 이 구간을 타지 않는다.
+  if [ "$(role_backend FIXER)" = codex_cli ]; then
     fixer_marker="$(codex_resume_marker "fixer-a$attempt_tag")"
     if [ -f "$fixer_marker" ] && [ -n "${RUN_EDIT_ROLE_INVOCATION_ID:-}" ] \
       && [ "$(jq -r '.invocation_id // ""' "$fixer_marker" 2>/dev/null)" = "$RUN_EDIT_ROLE_INVOCATION_ID" ]; then
@@ -836,6 +841,9 @@ while [ "$round" -le $((MAX_IMPL_ROUNDS + 1)) ]; do
   # ---------- CLI 판정 (위 index → manifest → 기준선 → write-set 게이트를 모두 지난 뒤에만) ----------
   # 세션 불수용(thread id 불일치)은 CLI 종료 코드 불일치보다 먼저 본다 — 범위 안 변경이 있어도 아래의 FORWARD_TO_REVIEWER·세션 수용으로 넘어가지 않는다.
   fixer_session_stop_if_unaccepted "fixer-a$attempt_tag" "attempt $attempt round $round"
+  # 완료 여부 불명(Codex App Server 호출 기록 UNKNOWN 등)도 같은 자리에서 가린다 — '끝났지만 종료 코드만 비정상'(아래 CLI_EXIT_STATUS_MISMATCH)과 다르다.
+  # 범위 안 변경이 있어도 리뷰어 전달·세션 수용·anomaly 기록 없이 멈추고, 체크포인트(FIXER_PENDING)와 변경은 그대로 둔다. turn 이 끝난 것이 확인된 실패(TURN_FAILED/REJECTED)는 아래 경로 그대로다.
+  codex_app_stop_if_uncertain "fixer-a$attempt_tag" "attempt $attempt round $round" || exit 1
   if [ "$fixer_rc" -ne 0 ]; then
     fix_fp_after="$(compute_fixer_resume_fingerprint)" || { echo "[FAIL] 수정자 호출 후 지문 계산 실패" >&2; exit 1; }
     if [ "$fix_fp_after" = "$fix_fp_before" ]; then

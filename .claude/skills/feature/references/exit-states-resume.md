@@ -250,6 +250,10 @@ detail 을 보고하고 사용자가 고르게 한다: ① `--new` 로 새로 �
 
 원인 확인 후 재실행. 진행 금지
 
+- 로그에 `CODEX_TURN_UNCERTAIN` · `CODEX_TURN_RESULT_UNCONSUMED` · `SESSION_RESUME_UNCERTAIN` · `SESSION_BACKEND_MISMATCH` · `CODEX_APP_SERVER_*` 가 있으면 Codex 역할 호출(App Server backend)이 멈춘 것이다.
+  `references/codex-app-server.md` 를 읽고 그 절차를 따른다. 그대로 재실행해도 모델 호출 0회로 같은 사유가 나온다 — 호출 기록(`.session-<key>.codex-turn.json`)·세션 원장을 손으로 고치거나 지우지 않고,
+  `codex-app-server.sh discard` 를 스스로 실행하지 않으며, `CODEX_BACKEND` 를 바꿔 우회하지 않는다. `status`/`reconcile`(조회 전용) 결과를 사용자에게 보고하고 결정을 받는다.
+
 ## 재개 규칙 — 재개 지점 선택 · 지문 · 체크포인트
 
 재실행은 항상 같은 명령이다(`--feature <id>`, 수동 `--worktree`/`--branch` 를 썼다면 그 인자도 같이). 러너가 `run-state.json`의 stage 힌트와 실제 산출물(합의 체크포인트 `consensus-design.json`/`consensus-impl.json`의 PASS + 현재 입력 지문 + 참조 리뷰 JSON 내용, `worker-result.json` + `units/<id>/done.json`, `approved.fingerprint`)을 교차

@@ -374,6 +374,10 @@ worker_log_shows_compaction() { # raw-log-path
     [ -f "$f" ] || continue
     grep -Eq '"subtype"[[:space:]]*:[[:space:]]*"compact_boundary"|"type"[[:space:]]*:[[:space:]]*"[A-Za-z_.]*compact[A-Za-z_.]*"' "$f" 2>/dev/null && return 0
   done
+  # Codex App Server 원문 로그는 형식이 다르다(JSON-RPC 알림): thread/compacted 알림 또는 contextCompaction item.
+  if [ -f "$1.appserver.jsonl" ]; then
+    grep -Eq '"method"[[:space:]]*:[[:space:]]*"thread/compacted"|"type"[[:space:]]*:[[:space:]]*"contextCompaction"' "$1.appserver.jsonl" 2>/dev/null && return 0
+  fi
   return 1
 }
 
@@ -587,7 +591,9 @@ $(if [ -f "$CONVENTIONS_FILE" ]; then cat "$CONVENTIONS_FILE"; else printf '(현
   #   · marker 의 invocation_id 가 이번 호출과 다르다 — 이전 호출의 marker 때문에 codex_session_begin 이 CLI 를 부르지 않고 거부했다(SESSION_RESUME_UNCERTAIN).
   #     여기서 지우면 사람이 중복 전송 여부를 확인하기도 전에 다음 재실행이 같은 스레드에 프롬프트를 보낸다.
   #   · 이번 resume 의 이벤트 thread id 가 원장과 다르다 — run_edit_role 이 결과를 불수용했다(어느 스레드에 도달했는지 모른다).
-  if [ "$(role_cli WORKER)" = codex ]; then
+  # resume marker 는 codex exec(legacy_exec) 어댑터의 장치다. Codex App Server backend 는 marker 를 쓰지 않고 호출 기록(.session-<key>.codex-turn.json)의
+  # 상태로 같은 불확실성을 판정한다(scripts/codex-app-server.sh) — 그 기록은 여기서 건드리지 않는다.
+  if [ "$(role_backend WORKER)" = codex_cli ]; then
     local resume_marker; resume_marker="$(codex_resume_marker "$FEATURE_WORKER_SESSION")"
     if [ -f "$resume_marker" ] && [ -n "${RUN_EDIT_ROLE_INVOCATION_ID:-}" ] \
       && [ "$(jq -r '.invocation_id // ""' "$resume_marker" 2>/dev/null)" = "$RUN_EDIT_ROLE_INVOCATION_ID" ] \

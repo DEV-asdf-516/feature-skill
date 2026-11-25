@@ -65,7 +65,7 @@ echo full-test >> "$MOCK_LOG"
 [ ! -f "$MOCK_STATE/fail-full" ] || { rm -f "$MOCK_STATE/fail-full"; echo "full test failed"; exit 1; }
 EOS
 chmod +x "$TMP/bin/claude" "$TMP/bin/codex" "$TMP/bin/full-test"
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
+sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
   s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"native\"|; s|^WORKER_MODEL=.*|WORKER_MODEL=\"claude-opus-5-5\"|; s|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL=\"gpt-6-sol\"|; \
   s|^VALIDATOR_MODEL=.*|VALIDATOR_MODEL=\"gpt-6.2-astra\"|; s|^REVIEWER_MODEL=.*|REVIEWER_MODEL=\"gpt-5.6-sol\"|; s|^FIXER_MODEL=.*|FIXER_MODEL=\"gpt-5.6-sol\"|" "$CFG" && rm -f "$CFG.bak"
 

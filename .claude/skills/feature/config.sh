@@ -51,6 +51,22 @@ FIXER_CLI=""
 # 진행 중인 피처의 세션(.session-*)은 backend 를 바꿔도 자동으로 옮겨 가지 않는다 — SESSION_CLI_MISMATCH / WORKER_SESSION_MISMATCH 로 멈춘다.
 CLAUDE_BACKEND="native"
 
+# --- Codex 모델의 실행 backend ---
+# 모델 ID 가 gpt-*/o*/codex* 인 역할을 무엇으로 실행할지. 역할이 아니라 모델이 정한다 — 다섯 역할 모두 같은 규칙이다.
+#   app_server  : 하네스가 로컬 `codex app-server`(stdio JSON-RPC)를 자식 프로세스로 직접 띄워 thread/turn 을 관리한다(scripts/codex-app-server.sh · .mjs).
+#                 로컬 codex 바이너리(CODEX_BIN)와 기존 codex 인증·설정을 그대로 쓰고, 추가로 Node.js 18+ 가 필요하다(외부 패키지·daemon·네트워크 listener 없음).
+#                 `codex exec` / `codex exec resume` 은 부르지 않는다. 실패해도 codex exec 로 자동 대체하지 않는다.
+#   legacy_exec : 종전의 `codex exec` / `codex exec resume`. 이미 codex exec 로 진행 중인 피처를 마칠 때와 CLI 어댑터 회귀에만 명시적으로 고른다.
+# 기본값은 app_server 다. 이 줄이 없는 예전 config.sh 는 legacy_exec 로 동작한다(install 은 기존 config.sh 를 덮어쓰지 않는다 — 전환은 이 줄을 직접 옮겨 적는 것이다).
+# 진행 중인 피처의 세션(.session-*)은 backend 를 바꿔도 자동으로 옮겨 가지 않는다 — SESSION_BACKEND_MISMATCH / WORKER_SESSION_MISMATCH 로 멈춘다.
+CODEX_BACKEND="app_server"
+CODEX_APP_SERVER_NODE_BIN="${CODEX_APP_SERVER_NODE_BIN:-node}"               # Node.js 18+ 실행 파일
+CODEX_APP_SERVER_RPC_TIMEOUT_SEC="${CODEX_APP_SERVER_RPC_TIMEOUT_SEC:-120}"   # initialize · thread/start · thread/resume · turn/start '응답' 대기 한도(초). turn/start 응답이 이 안에 없으면 불명(UNKNOWN)으로 멈춘다
+CODEX_APP_SERVER_TURN_TIMEOUT_SEC="${CODEX_APP_SERVER_TURN_TIMEOUT_SEC:-0}"   # turn 완료 대기 한도(초). 0 = 한도 없음(codex exec 와 같다). 넘으면 재전송 없이 불명(UNKNOWN)으로 멈춘다
+# 프로젝트에 맞게 고쳐 쓴 .codex/hooks/worker_guard.sh 를 직접 검토한 뒤 등록하는 지문(sha256, 공백으로 여러 개). 비워 두면 배포본 가드만 통과한다.
+# 편집 역할의 필수 훅 게이트는 가드를 실행하지 않고 지문만 대조한다(references/codex-app-server.md). 이 줄이 없는 예전 config.sh 는 빈 값으로 동작한다.
+CODEX_APP_GUARD_REVIEWED_SHA256="${CODEX_APP_GUARD_REVIEWED_SHA256:-}"
+
 # --- 검증자 계약 버전 ---
 # 검증자 프롬프트(공통 계약 prompts/validator-review-*.md 와 오버레이 prompts/validator-overlays/*.md 모두)·spec-review 스키마·러너의 연계 검사 중 하나라도 바뀌면 올린다.
 # 러너는 이 값과 다른 이전 PASS 파일을 무효로 보고 검증 라운드를 다시 돈다(--new 불필요).
@@ -225,7 +241,9 @@ WORKER_SKILLS=()
 # install.sh 는 대상 config.sh 의 값이 소스와 다르면(없음 포함) 활성 코드를 바꾸기 전에 중단하고(config.sh.new 병합 안내), feature-run.sh 도 시작할 때 자신이 요구하는 값과 대조한다.
 # 1: DOC_GAP 구조화 경로(undecided[].paths·gap paths)·legacy 위치 해석·WAITING_USER 수리 사전 검사(doc_gap_repair_preflight).
 # 2: 모델 기준 backend 라우팅(role_backend — claude_native / claude_cli / codex_cli)과 native Agent 인계(scripts/native-agent-bridge.sh, exit 42/43).
-FEATURE_RUNTIME_CONTRACT_VERSION=2
+# 3: Codex 모델의 backend 분기(role_backend — codex_app_server 추가, CODEX_BACKEND)와 Codex App Server 런타임(scripts/codex-app-server.sh · .mjs) 위임,
+#    세션 원장의 backend 표식(.session-<key>.codex.json 의 backend — 없으면 legacy_exec)·SESSION_BACKEND_MISMATCH.
+FEATURE_RUNTIME_CONTRACT_VERSION=3
 
 # --- 저장소 상대 경로 공용 규칙 (jq 정의) ---
 # feature-scope / implementation-units 의 scope 경로, 워커 undecided[].paths, DOC_GAP 체크포인트의 paths 가 전부 이 정의를 쓴다(두 번째 경로 검사기를 만들지 않는다).
@@ -376,7 +394,9 @@ snapshot_worktree_tree() {
 # 저장 형식(두 어댑터, 같은 key 공간):
 #   claude: $WORK_DIR/.session-<key>        평문 session UUID. 첫 호출 --session-id <새 UUID>(.new 스테이징), 이후 --resume.
 #   codex : $WORK_DIR/.session-<key>.codex.json  세션 원장 {version,key,role,cli,model,effort,contract_version,thread_id,...}.
-#           thread_id 는 최초 실행 이벤트 JSONL 의 thread.started 에서만 취득한다(--last·최근 세션·역할명 자동 검색 금지).
+#           legacy_exec(version 1, backend 필드 없음): thread_id 는 최초 실행 이벤트 JSONL 의 thread.started 에서만 취득한다(--last·최근 세션·역할명 자동 검색 금지).
+#           app_server (version 2, backend:"app_server"): thread_id 는 이 호출의 thread/start 응답에서만 취득한다. 호출별 기록은 .session-<key>.codex-turn.json
+#           (scripts/codex-app-server.sh). 두 형식은 같은 경로를 쓰되 서로의 원장을 잇지 않는다 — backend 가 다르면 SESSION_BACKEND_MISMATCH 로 멈춘다.
 # 확정 시점: 두 어댑터 모두 invocation 이 유효한 결과를 내면 스테이징(.new)까지만 하고, 호출자가 결과를 수용
 # (role_session_accept — 스키마·계약·일관성 게이트 통과 뒤)해야 확정된다. 수용되지 않은 세션은 다음 실행에서 잇지 않는다.
 # 새 피처 시작 시 $WORK_DIR/.session-* 를 지워야 이전 피처 문맥이 섞이지 않는다(원장·marker 도 같은 glob 에 걸린다).
@@ -470,6 +490,11 @@ codex_session_begin() { # ROLE key model effort
     echo "[FAIL] SESSION_CLI_MISMATCH: key '$key' 는 claude 세션($WORK_DIR/.session-$key 또는 native Agent 원장 .native.json)에 결속돼 있는데 지금은 codex 로 라우팅된다($role) — 자동 fresh 전환 없이 중단. 설정을 되돌리거나 새 attempt/단계(--new)로 시작." >&2
     return 1
   fi
+  # 같은 key 가 Codex App Server backend 의 세션·호출 기록에 결속돼 있으면 codex exec 로 잇지 않는다(반대 방향 검사는 scripts/codex-app-server.sh 의 codex_app_begin).
+  if [ -f "$WORK_DIR/.session-$key.codex-turn.json" ] || { [ -f "$ledger" ] && jq -e '.backend=="app_server"' "$ledger" >/dev/null 2>&1; }; then
+    echo "[FAIL] SESSION_BACKEND_MISMATCH: key '$key' 는 Codex App Server backend 의 세션(원장 $ledger 또는 호출 기록 $WORK_DIR/.session-$key.codex-turn.json)에 결속돼 있는데 지금은 codex exec(legacy_exec)로 라우팅된다($role) — 자동 전환 없이 중단. config.sh CODEX_BACKEND 를 되돌리거나 새 attempt/단계(--new)로 시작." >&2
+    return 1
+  fi
   # 이전 invocation 이 스테이징만 하고 수용되지 못한 원장(.new)은 이번 호출의 것이 아니다 — 이번 스테이징이 생략돼도(thread id 미확정)
   # 호출자의 accept 가 옛 .new 를 확정하는 일이 없도록 호출 시작 시 제거한다(스테이징은 invocation 전용).
   rm -f "$ledger.new"
@@ -532,6 +557,8 @@ role_session_accept() { # ROLE key [label]
   cli="$(role_cli "$role")" || return 1
   # native Agent: typed 원장(.session-<key>.native.json)의 .new 를 확정한다 — 검증 계약(게이트 통과 뒤에만 accept)은 세 backend 공통이다.
   if [ "$(role_backend "$role")" = claude_native ]; then native_session_accept "$role" "$key" "$label"; return $?; fi
+  # Codex App Server: 원장 .new 확정 + 호출 기록의 수용 표시(scripts/codex-app-server.sh). 불명 상태의 호출 기록은 수용으로도 풀리지 않는다 — 원장을 건드리지 않고 실패한다.
+  if [ "$(role_backend "$role")" = codex_app_server ]; then codex_app_session_accept "$role" "$key" "$label"; return $?; fi
   case "$cli" in
     claude) claude_session_commit "$key" ;;
     codex)
@@ -584,10 +611,18 @@ role_cli() { # ROLE(DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) → claude|codex
     || { echo "[FAIL] 모델 '$model'($role) 의 CLI 를 이름으로 정하지 못함 — config.sh 에 $override_var=claude|codex 를 지정" >&2; return 1; }
 }
 # 실행 backend: 모델(→ role_cli)과 CLAUDE_BACKEND 가 정한다. 역할 이름으로 분기하지 않는다.
-role_backend() { # ROLE → claude_native | claude_cli | codex_cli
+#   codex_cli        = `codex exec` / `codex exec resume` (CODEX_BACKEND=legacy_exec — 이 줄이 없는 예전 config.sh 포함)
+#   codex_app_server = 하네스가 직접 띄운 `codex app-server` JSON-RPC (CODEX_BACKEND=app_server)
+# role_cli 는 모델 계열(claude|codex)만 답한다 — 실행 수단은 반드시 이 함수로 가린다(codex 라는 이유로 exec 경로에 들어가지 않게).
+role_backend() { # ROLE → claude_native | claude_cli | codex_cli | codex_app_server
   local cli; cli="$(role_cli "$1")" || return 1
   case "$cli" in
-    codex) printf 'codex_cli' ;;
+    codex)
+      case "${CODEX_BACKEND:-legacy_exec}" in
+        app_server) printf 'codex_app_server' ;;
+        legacy_exec) printf 'codex_cli' ;;
+        *) echo "[FAIL] config.sh CODEX_BACKEND='${CODEX_BACKEND}' — app_server 또는 legacy_exec 만 허용" >&2; return 1 ;;
+      esac ;;
     claude)
       case "${CLAUDE_BACKEND:-legacy_cli}" in
         native) printf 'claude_native' ;;
@@ -597,13 +632,19 @@ role_backend() { # ROLE → claude_native | claude_cli | codex_cli
   esac
 }
 role_bin() { # ROLE → 실행 파일 (native Agent 는 실행 파일이 없다 — 빈 값)
-  case "$(role_backend "$1")" in claude_cli) printf '%s' "$CLAUDE_BIN" ;; codex_cli) printf '%s' "$CODEX_BIN" ;; claude_native) printf '' ;; *) return 1 ;; esac
+  case "$(role_backend "$1")" in claude_cli) printf '%s' "$CLAUDE_BIN" ;; codex_cli|codex_app_server) printf '%s' "$CODEX_BIN" ;; claude_native) printf '' ;; *) return 1 ;; esac
 }
 require_role_bins() { # ROLE... [+ 공용 도구...] : 설정된 역할이 실제로 쓰는 CLI 만 설치 확인
   local item bin
   for item in "$@"; do
     case "$item" in
-      DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER) bin="$(role_bin "$item")" || return 1 ;;
+      DESIGNER|VALIDATOR|WORKER|REVIEWER|FIXER)
+        bin="$(role_bin "$item")" || return 1
+        # Codex App Server backend 는 codex 바이너리에 더해 Node.js 런타임이 필요하다(프로토콜 지원 여부는 호출 직전의 사전 검사가 본다)
+        if [ "$(role_backend "$item")" = codex_app_server ]; then
+          command -v "${CODEX_APP_SERVER_NODE_BIN:-node}" >/dev/null 2>&1 \
+            || { echo "[FAIL] '${CODEX_APP_SERVER_NODE_BIN:-node}' 미설치 (${item} — Codex App Server backend 는 Node.js 18+ 가 필요하다. codex exec 로 대체하지 않는다)" >&2; return 1; }
+        fi ;;
       *) bin="$item" ;;
     esac
     [ -n "$bin" ] || continue   # native Agent 로 라우팅된 역할은 CLI 설치를 요구하지 않는다
@@ -628,6 +669,11 @@ run_readonly_json_role() { # ROLE session_name usage_label schema_file out_json 
     return 0
   fi
   native_pending_guard "$role" "$label"   # 다른 호출 지점의 native 요청이 남아 있으면 그 위에서 CLI 를 부르지 않는다(없으면 no-op)
+  # Codex App Server backend: 같은 인자·같은 $out·같은 종료 의미로 런타임에 위임한다(scripts/codex-app-server.sh). 아래 codex exec 분기는 legacy_exec 전용이다.
+  # 부산물은 $out.appserver.jsonl(서버 stdout 원문) · $out.appserver.sent.jsonl · $out.stderr.log — codex exec 의 $out.events.jsonl 과 형식이 달라 이름을 나눈다.
+  if [ "$(role_backend "$role")" = codex_app_server ]; then
+    codex_app_run_readonly "$role" "$session" "$label" "$schema" "$out" "$prompt" "$conv"; return $?
+  fi
   inv="$(new_invocation_id)"; RUN_READONLY_INVOCATION_ID="$inv"
   case "$cli" in
     codex)
@@ -742,6 +788,12 @@ run_edit_role() { # ROLE session_name usage_label raw_out prompt conventions sch
     return "$rc"
   fi
   native_pending_guard "$role" "$label"
+  # Codex App Server backend: 런타임에 위임한다. 워커의 하위 Agent 금지(agents.enabled=false)는 그 호출의 자식 프로세스 인자로만 들어가 다른 역할에 새지 않는다.
+  # 반환값: 0 완료 / 10 turn/start 전 실패(모델 0회) / 20 turn 실패 / 30 완료 여부 불명 / 1 호출 전 중단. claude 전용 추가 인자("$@")는 쓰지 않는다.
+  # 30(불명)은 '끝났지만 종료 코드만 비정상'이 아니다 — 호출자는 범위 안 변경이 있어도 다음 검증자·리뷰어로 넘기지 않는다(codex_app_stop_if_uncertain).
+  if [ "$(role_backend "$role")" = codex_app_server ]; then
+    codex_app_run_edit "$role" "$session" "$label" "$raw" "$prompt" "$conv" "$schema" "$out"; return $?
+  fi
   inv="$(new_invocation_id)"; RUN_EDIT_ROLE_INVOCATION_ID="$inv"   # CLI 실행 전 preflight 실패(위 return 1)는 invocation 이 아니다
   # [Added] 워커 전용 CLI 정책 — 배열로 조립(eval 없음). 다른 역할은 빈 배열.
   local policy_args=() policy_env=()
@@ -2583,7 +2635,7 @@ USAGE_SCHEMA_VERSION=4
 #   그 요청 전체에 적용, long 단가 = 입력·캐시 입력·캐시 쓰기 short×2 / 출력 short×1.5, 30분 캐시 쓰기 = 구간 입력 단가×1.25, 12시간 = ×2.5
 #   (캐시 쓰기는 입력 단가 위에 더하는 할증이 아니라 배타적 입력 토큰 분류). 정확한 모델 ID 만 매칭한다(gpt-6-sol ≠ gpt-6.1-sol).
 #   gpt-6.2-astra 는 2026-11-18 같은 페이지에서 추가 조회했다(같은 규칙을 따른다 — 캐시 입력만 입력의 5%).
-#   gpt-5.6-sol 단가는 2026-11-21 까지 최소 유지 예정인 프로모션 단가다 — 이 날짜 뒤에는 요금표 재확인이 필요하다(basis 의 날짜가 그 근거).
+#   gpt-5.6-sol 단가는 2026-11-30 까지 최소 유지 예정인 프로모션 단가다(2026-11-24 확인 — 종료일이 11-21 에서 연장됐고 단가는 그대로다) — 이 날짜 뒤에는 요금표 재확인이 필요하다.
 CODEX_PRICING_BASIS="openai-api-standard-2026-10-30"
 # Claude 모델 가격표 — native Agent(claude_native) 호출의 비용 추정에만 쓴다. claude -p 는 CLI 가 보고한 total_cost_usd(reported)를 그대로 쓴다.
 #   native subagent 는 비용을 보고하지 않고 전사에 토큰만 남긴다 → 토큰 × API 표준 요금으로 환산한다(estimated). 구독 사용량·실제 청구액이 아니다.
@@ -2974,6 +3026,7 @@ usage_summary() {
       by_label: grouped(.label // "legacy"),
       by_session: grouped(.session // "none"),
       by_cli: grouped(.cli // "legacy"),
+      by_source: grouped(.source // "legacy"),
       by_model: grouped(.model // "legacy")
     }' "$f"
 }
@@ -3002,12 +3055,36 @@ else
   native_session_accept() { native_role_call; }
 fi
 
+# Codex App Server backend(런타임 연결부)도 scripts/ 에 있다 — 런타임 계약 표식(3)으로 config.sh 본문과 묶여 있다. 파일이 없으면(혼합 설치)
+# 여기서 죽지 않고, Codex 역할을 App Server 로 부르는 시점에 명시적으로 실패시킨다(codex exec 로 대체하지 않는다).
+if [ -f "$FEATURE_SKILL_DIR/scripts/codex-app-server.sh" ]; then
+  source "$FEATURE_SKILL_DIR/scripts/codex-app-server.sh"
+else
+  codex_app_run_readonly() { echo "[FAIL] Codex App Server 런타임 없음: $FEATURE_SKILL_DIR/scripts/codex-app-server.sh — scripts/ 와 config.sh 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라(codex exec 로 대체하지 않는다)" >&2; return 1; }
+  codex_app_run_edit() { codex_app_run_readonly; }
+  codex_app_session_accept() { codex_app_run_readonly; }
+  codex_app_stop_if_uncertain() { return 0; }   # 런타임이 없으면 App Server 호출 기록을 판정할 수 없다 — 호출 자체가 위에서 명시적으로 실패한다
+fi
+
 # =============================================================
 # 가드: 설정이 틀리면 이 파일을 source 하는 스크립트를 즉시 중단
 # =============================================================
-case "$DESIGN_REVISION_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$TEST_CMD$LINT_CMD" in
+# 예외 하나: 프로젝트 명령(TEST_CMD/LINT_CMD)을 실행하지 않는 조회 전용 단독 명령(codex-app-server.sh 의 status·preflight·hooks)은
+# 그 두 값의 CHANGE_ME 를 넘어간다 — 설치 직후(또는 스킬 원본 저장소)에도 훅 판정·호출 기록을 볼 수 있어야 한다. 모델·effort 의 CHANGE_ME 와 빈 값은 그대로 거부한다.
+# 조건은 둘 다다: ① 이 프로세스가 실행한 스크립트(호출 스택의 맨 아래)가 이 스킬의 scripts/codex-app-server.sh 자신이고 ② 그 스크립트가 조회 명령일 때만 적는 표식이 자기 pid 다.
+# 표식만으로는 호출자를 증명하지 못한다 — 변수는 환경·BASH_ENV 로 어느 스크립트에나 심을 수 있다. 실행 스크립트의 경로(BASH_SOURCE)는 그렇게 바꿀 수 없으므로
+# 러너·하위 루프·config.sh 를 source 하는 다른 스크립트는 표식이 있어도 이 예외를 얻지 못한다. 경로는 절대 경로만 인정한다(단독 진입이 절대 경로로 다시 실행한다 —
+# 상대 경로는 그 진입의 cd 뒤에 다른 파일을 가리킬 수 있다).
+_config_guard_cmds="$TEST_CMD$LINT_CMD"
+if [ "${FEATURE_CONFIG_QUERY_ONLY_PID:-}" = "$$" ]; then
+  case "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" in
+    /*) [ ! "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" -ef "$FEATURE_SKILL_DIR/scripts/codex-app-server.sh" ] || _config_guard_cmds="" ;;
+  esac
+fi
+case "$DESIGN_REVISION_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$_config_guard_cmds" in
   *CHANGE_ME*) echo "[FAIL] config.sh 의 CHANGE_ME 항목을 먼저 채우세요." >&2; exit 1;;
 esac
+unset _config_guard_cmds
 for required_value in \
   "$DESIGN_REVISION_MODEL" "$DESIGNER_EFFORT" \
   "$VALIDATOR_MODEL" "$VALIDATOR_EFFORT" \

@@ -39,7 +39,7 @@ for cli in claude codex; do
   printf '%s\n' '#!/usr/bin/env bash' "echo \"$cli \$*\" >> \"$CLI_LOG\"; exit 9" > "$TMP/bin/$cli"; chmod +x "$TMP/bin/$cli"
 done
 printf '%s\n' '#!/usr/bin/env bash' "echo full-test >> \"$MOCK_LOG\"" > "$TMP/bin/full-test"; chmod +x "$TMP/bin/full-test"
-sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
+sed -i.bak "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
   s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"native\"|; s|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL=\"claude-fable-5-2\"|; s|^VALIDATOR_MODEL=.*|VALIDATOR_MODEL=\"claude-opus-5-5\"|; \
   s|^WORKER_MODEL=.*|WORKER_MODEL=\"claude-opus-5-5\"|; s|^REVIEWER_MODEL=.*|REVIEWER_MODEL=\"claude-sonnet-5-5\"|; s|^FIXER_MODEL=.*|FIXER_MODEL=\"claude-sonnet-5-5\"|; \
   s|^VALIDATOR_PROFILE=.*|VALIDATOR_PROFILE=\"none\"|; s|^FAST_CHECK_CMD=.*|FAST_CHECK_CMD=\"tools/check.sh\"|" "$CFG" && rm -f "$CFG.bak"

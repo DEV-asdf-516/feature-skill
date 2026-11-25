@@ -152,7 +152,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
   cp "$SRC_CONFIG" "$cfg"   # 실제 모델 설정 그대로
   { read -r claude_bin; read -r codex_bin; } < <(write_fakes "$target" "$case_dir" "$round")
   if [ "$round" = 2 ]; then max_rounds=1; else max_rounds=0; fi   # Round 1 사례는 리뷰 1회, 수정자 없음
-  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=$max_rounds/; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$claude_bin\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$codex_bin\"|" "$cfg"
+  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=$max_rounds/; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$claude_bin\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$codex_bin\"|" "$cfg"
   rm -f "$cfg.bak"
   cp -R "$case_dir/base/." "$target/"
   (cd "$target" && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture)

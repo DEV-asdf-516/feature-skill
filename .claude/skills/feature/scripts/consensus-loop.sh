@@ -190,6 +190,9 @@ next_step="VALIDATOR_PENDING"
 prev_fingerprint=""   # 직전 라운드 blocker 내용 지문 (교착 감지용)
 prev_review=""
 prev_snapshot=""
+# 디자이너의 Codex App Server 호출이 '완료 여부 불명'으로 남아 있으면 재개 판정 전에 멈춘다. 아래 재개 판정은 DESIGNER_PENDING + 문서 변경을
+# '디자이너가 일부 고친 뒤 죽음'으로 보고 디자이너 호출 없이 검증자로 넘어간다 — 그 경로는 run_edit_role 의 호출 전 게이트를 거치지 않는다.
+codex_app_stop_if_uncertain "designer-$TARGET" "$TARGET 재실행" || exit 1
 if [ -f "$RESUME_STATE" ]; then
   if ! jq -e --argjson cv "$CONSENSUS_CHECKPOINT_VERSION" '.version==$cv' "$RESUME_STATE" >/dev/null 2>&1; then
     # 포맷 버전이 다르면 지문의 의미가 다르다 — 비교하지 않고 처음부터 (건너뛰기 오판 방지)
@@ -410,6 +413,9 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
       '{phase:$t, status:"DESIGNER_SCOPE_VIOLATION", round:($r|tonumber), before_tree:$b, after_tree:$a, designer_exit_code:$rc}' > "$WORK_DIR/state.json"
     exit 2
   fi
+  # 완료 여부 불명(Codex App Server 호출 기록 UNKNOWN 등)은 '끝났지만 종료 코드만 비정상'이 아니다 — 문서가 바뀌었어도 검증자에게 넘기지 않고 멈춘다
+  # (체크포인트 DESIGNER_PENDING·변경 그대로, anomaly 기록 없음). turn 이 끝난 것이 확인된 실패는 아래 CLI_EXIT_STATUS_MISMATCH 경로 그대로다.
+  codex_app_stop_if_uncertain "designer-$TARGET" "$TARGET round $round" || exit 1
   if [ "$designer_rc" -ne 0 ]; then
     if [ "$(consensus_editable_fingerprint "$TARGET")" = "$designer_docs_before" ]; then
       # 문서·decisions 변경 없음 → 기존 실패. 같은 디자이너 재실행은 안전하다(체크포인트 DESIGNER_PENDING 그대로).

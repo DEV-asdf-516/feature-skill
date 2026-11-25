@@ -22,6 +22,7 @@ description: 복잡한 피처를 다중 에이전트 합의 파이프라인으�
 | exit 2 `NEED_USER`(모든 reason) · exit 1 · 사용자 답을 기록하거나 문서를 고쳐 재실행하기 전 | `references/exit-states-resume.md` — 제목에 그 reason 이 든 절(`### … <reason> …`) 전체. 두 reason 이 한 절을 같이 쓰는 경우가 있다(`DEADLOCK`/`MAX_ROUNDS`, `TEST_RETRIES_EXHAUSTED`/`APPROVAL_STALE_REPEATED`). `WORKER_SESSION_*` 는 그 절에 더해 `references/pipeline-contracts.md` 의 worker stage 절도 읽는다 |
 | exit 0 `DONE` · `--finalize` 실행 전과 결과 처리 · 커밋 요청 | `references/done-finalize.md` |
 | exit 42 `NATIVE_AGENT_REQUIRED` · `NATIVE_RESULT_REJECTED` · `NATIVE_*`/`SESSION_CLI_MISMATCH` 중단 | `references/native-agent.md` |
+| 로그에 `CODEX_TURN_*`·`CODEX_APP_SERVER_*` | `references/codex-app-server.md` |
 | worker 단계(unit·워커 세션), 역할 경계, `decisions.md` 태그·scope, 범위·변경 소유권, 계약 버전, 비용 보고, `WORKER_SESSION_*` | `references/pipeline-contracts.md` |
 
 - 러너는 멈출 때 `[SKILL REFERENCE]` 줄로 지금 읽을 파일의 절대 경로를 알려 준다(문서를 쓰는 반환에는 같은 줄의 `[CONVENTIONS]` 뒤에 worktree `conventions.md` 경로가 붙는다 — 그 파일이 없으면 붙지 않는다). 러너를 백그라운드 로그로 돌렸거나 출력을 `head`/`grep` 으로 줄여 읽었으면 이 줄을 반드시 찾아 그 파일들을 읽는다.

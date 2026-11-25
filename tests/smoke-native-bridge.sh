@@ -47,7 +47,7 @@ export CLI_LOG="$TMP/cli.log"; : > "$CLI_LOG"
 setcfg() { # sed-expr...  (config 사본 수정)
   local e; for e in "$@"; do sed -i.bak "$e" "$CFG" && rm -f "$CFG.bak" || fail "config 수정 실패: $e"; done
 }
-setcfg "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|" "s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" 's|^TEST_CMD="CHANGE_ME"|TEST_CMD="true"|' 's|^LINT_CMD="CHANGE_ME"|LINT_CMD="true"|' \
+setcfg "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|" "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|" 's|^TEST_CMD="CHANGE_ME"|TEST_CMD="true"|' 's|^LINT_CMD="CHANGE_ME"|LINT_CMD="true"|' \
   's|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND="native"|' 's|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL="claude-fable-5-2"|' 's|^VALIDATOR_MODEL=.*|VALIDATOR_MODEL="claude-opus-5-5"|' \
   's|^WORKER_MODEL=.*|WORKER_MODEL="claude-opus-5-5"|' 's|^REVIEWER_MODEL=.*|REVIEWER_MODEL="claude-sonnet-5-5"|' 's|^FIXER_MODEL=.*|FIXER_MODEL="claude-sonnet-5-5"|' \
   's|^VALIDATOR_PROFILE=.*|VALIDATOR_PROFILE="none"|'

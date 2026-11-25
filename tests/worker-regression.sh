@@ -119,7 +119,7 @@ chmod +x "$FAKE_PASS_CODEX"
 fake_impl_consensus_pass() { # target-root → 0 성공 / 1 실패(메시지 stderr)
   local root="$1" cfg="$1/.claude/skills/feature/config.sh"
   # sed 의 백업 파일이 곧 원본 보관본이다 — 합의 루프 뒤 그대로 되돌린다(워커 호출은 실제 CLI 래퍼로)
-  sed -i.fixture-keep "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|; s|^VALIDATOR_CLI=.*|VALIDATOR_CLI=\"codex\"|" "$cfg"
+  sed -i.fixture-keep "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|; s|^VALIDATOR_CLI=.*|VALIDATOR_CLI=\"codex\"|" "$cfg"
   if ! (cd "$root" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT_CFG" FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh impl) > "$root/consensus-setup.log" 2>&1; then
     mv "$cfg.fixture-keep" "$cfg"; echo "impl 합의 PASS 체크포인트 생성 실패 — $root/consensus-setup.log" >&2; return 1
   fi
@@ -184,7 +184,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
   bash "$SOURCE_ROOT/install.sh" "$target" >/dev/null
   cfg="$target/.claude/skills/feature/config.sh"
   cp "$SRC_CONFIG" "$cfg"   # 실제 워커 설정 그대로 — TEST_CMD/LINT_CMD 와 CLI 실행 파일(래퍼)만 바꾼다
-  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$SCRATCH/bin/real-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$SCRATCH/bin/real-codex\"|" "$cfg"
+  sed -i.bak "s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$SCRATCH/bin/real-claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$SCRATCH/bin/real-codex\"|" "$cfg"
   rm -f "$cfg.bak"
   cp -R "$case_dir/base/." "$target/"
   (cd "$target" && git add -A && git -c user.email=t@t -c user.name=t commit -qm fixture)

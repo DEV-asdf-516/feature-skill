@@ -103,7 +103,7 @@ ROOT="$(git rev-parse --show-toplevel)"
 # SKILL.md 는 압축 뒤에도 남는 짧은 진입 문서이고 상세 절차·계약 원문은 references/ 에 있다. 하나라도 없으면 오케스트레이터가 이전 세션 기억이나
 # 요약만으로 진행하게 되므로, 어떤 단계(부트스트랩·finalize 포함)도 시작하기 전에 거부한다. 목록은 install.sh 가 SKILL.md 에서 뽑아 검사하는 것과 같아야 한다
 # (tests/install-smoke.sh 가 SKILL.md 언급 = references/ 실제 파일 = 이 목록을 대조한다).
-SKILL_REFERENCE_FILES="phase0-design.md impl-docs.md exit-states-resume.md done-finalize.md pipeline-contracts.md native-agent.md"
+SKILL_REFERENCE_FILES="phase0-design.md impl-docs.md exit-states-resume.md done-finalize.md pipeline-contracts.md native-agent.md codex-app-server.md"
 missing_refs=""
 for ref_name in $SKILL_REFERENCE_FILES; do
   [ -s "$SKILL_DIR/references/$ref_name" ] || missing_refs="$missing_refs references/$ref_name"
@@ -123,8 +123,16 @@ skill_reference_for() { # status reason
     NEED_USER:NATIVE_*|NATIVE_AGENT_REQUIRED:*) echo "native-agent.md";;
     NEED_USER:*) echo exit-states-resume.md;;
     DONE:*|FINALIZE:*) echo done-finalize.md;;
-    ENV_ERROR:*) echo exit-states-resume.md;;
+    # Codex 역할이 App Server backend 로 도는 설정이면 그 중단 코드(CODEX_TURN_* · CODEX_APP_SERVER_* · SESSION_BACKEND_MISMATCH)의 절차 문서도 함께 안내한다 —
+    # 이 코드들은 하위 루프의 exit 1 로 올라와 ENV_ERROR 로 보인다. "원인 확인 후 재실행" 만으로는 불명 turn 의 확인·정리 절차를 알 수 없다.
+    ENV_ERROR:*) if codex_app_server_configured; then echo "exit-states-resume.md codex-app-server.md"; else echo exit-states-resume.md; fi;;
   esac
+}
+codex_app_server_configured() { # 어느 역할이든 Codex App Server backend 로 라우팅돼 있는가(config.sh 를 읽기 전이면 아니오)
+  local r
+  declare -F role_backend >/dev/null || return 1
+  for r in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do [ "$(role_backend "$r" 2>/dev/null)" != codex_app_server ] || return 0; done
+  return 1
 }
 skill_reference_hint() { # status reason — 한 줄 출력(없으면 무출력)
   local names name paths=""
@@ -505,7 +513,7 @@ require_units_contract_current() { # 다음-단계
 STAGE=preflight
 # 런타임 계약 표식: 이 스크립트가 전제하는 config.sh 본문(헬퍼) 세대. config.sh 는 사용자 편집 파일이라 설치가 덮어쓰지 않으므로, 옛 본문이 남은 혼합 설치를
 # 헬퍼 이름이 아니라 이 값으로 가려 모델 호출 전에 멈춘다(install.sh 도 설치 전에 같은 값을 대조한다). config.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION 과 함께 올린다.
-REQUIRED_RUNTIME_CONTRACT_VERSION=2
+REQUIRED_RUNTIME_CONTRACT_VERSION=3
 [ "${FEATURE_RUNTIME_CONTRACT_VERSION:-}" = "$REQUIRED_RUNTIME_CONTRACT_VERSION" ] \
   || env_error "config.sh 의 런타임 계약 표식(FEATURE_RUNTIME_CONTRACT_VERSION=${FEATURE_RUNTIME_CONTRACT_VERSION:-없음})이 이 스크립트가 요구하는 값($REQUIRED_RUNTIME_CONTRACT_VERSION)과 다르다 — scripts/·schemas/ 와 config.sh 본문이 서로 다른 버전이다(혼합 설치). 새 config.sh(설치 시 만들어진 config.sh.new)의 '헬퍼' 이하 본문을 병합하고 모델·명령 설정은 유지한 뒤 재실행"
 require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
@@ -518,6 +526,10 @@ done
 [ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 source "$SKILL_DIR/scripts/fast-check.sh"
 [ -f "$SKILL_DIR/scripts/native-agent-bridge.sh" ] || env_error "스크립트 없음: native-agent-bridge.sh (native Agent 인계) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+# Codex App Server backend 런타임(연결부 + Node 런타임). 한쪽만 있거나 없으면 혼합 설치다 — Codex 역할을 codex exec 로 조용히 돌리지 않고 여기서 멈춘다.
+for f in codex-app-server.sh codex-app-server.mjs; do
+  [ -f "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음: $f (Codex App Server backend) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+done
 # Unit 정적 검사·위험도별 검증은 같은 파일의 엔진을 쓴다. scripts/ 만 옛 버전이면(헬퍼 없음) 설정된 검사를 조용히 건너뛰게 되므로 혼합 설치로 멈춘다.
 declare -F unit_check_run risk_verify_run unit_check_policy_missing_paths check_plan_prepare check_digest_path >/dev/null \
   || env_error "scripts/fast-check.sh 에 unit_check_run/risk_verify_run/unit_check_policy_missing_paths/check_plan_prepare/check_digest_path 가 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"

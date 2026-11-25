@@ -198,6 +198,16 @@ done
 if ! grep -q '^CLAUDE_BACKEND=' "$TARGET_SKILL_DIR/config.sh"; then
   echo "[INFO] $TARGET_SKILL_DIR/config.sh 에 CLAUDE_BACKEND 줄이 없습니다 — 종전대로 claude 모델을 'claude -p' 로 실행합니다(legacy_cli). native Agent 로 바꾸려면 config.sh.new 의 'Claude 모델의 실행 backend' 블록을 옮겨 적으세요(진행 중인 피처가 없을 때)."
 fi
+# Codex 모델의 실행 backend: 보존된 기존 config.sh 에 CODEX_BACKEND 줄이 없으면 종전의 codex exec(legacy_exec)로 그대로 동작한다 — 설치가 backend 를 바꾸지 않는다.
+# 전환은 사용자가 그 줄을 직접 옮겨 적는 명시적 절차다(진행 중인 피처의 세션은 backend 를 바꿔도 옮겨 가지 않고 SESSION_BACKEND_MISMATCH 로 멈춘다).
+if ! grep -q '^CODEX_BACKEND=' "$TARGET_SKILL_DIR/config.sh"; then
+  echo "[INFO] $TARGET_SKILL_DIR/config.sh 에 CODEX_BACKEND 줄이 없습니다 — 종전대로 codex 모델을 'codex exec' 로 실행합니다(legacy_exec, 설정 변경 없음)."
+  echo "       Codex App Server backend 로 바꾸려면: ① 진행 중인 피처를 먼저 마치고 ② config.sh.new 의 'Codex 모델의 실행 backend' 블록(CODEX_BACKEND / CODEX_APP_SERVER_*)을"
+  echo "       사용자 설정 영역에 옮겨 적은 뒤 ③ 'bash $TARGET_SKILL_DIR/scripts/codex-app-server.sh preflight' 로 설치된 codex·Node.js(18+)의 호환성을 확인하세요(모델 호출 0회)."
+elif grep -q '^CODEX_BACKEND="\{0,1\}app_server' "$TARGET_SKILL_DIR/config.sh"; then
+  command -v node >/dev/null 2>&1 \
+    || echo "[WARN] CODEX_BACKEND=app_server 인데 PATH 에 node 가 없습니다 — Codex 역할 호출이 실행 전에 멈춥니다(codex exec 로 대체하지 않음). Node.js 18+ 를 설치하거나 config.sh 의 CODEX_APP_SERVER_NODE_BIN 을 지정하세요."
+fi
 
 # ---------- 4. Codex 훅 ----------
 TARGET_CODEX_DIR="$TARGET_ROOT/.codex"

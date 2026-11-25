@@ -134,7 +134,7 @@ for case_dir in "$CASES_DIR"/case-*/; do
   cp "$case_dir/input/"*.md "$target/.agent-work/"
   if [ "$round" = 2 ]; then
     write_fakes "$target" "$case_dir" "$CONFIGURED_CODEX_BIN"
-    sed -i.bak "s/^MAX_SPEC_ROUNDS=.*/MAX_SPEC_ROUNDS=1/; s|^CODEX_BIN=.*|CODEX_BIN=\"$target/fake-codex\"|; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$target/fake-claude\"|" "$cfg"
+    sed -i.bak "s/^MAX_SPEC_ROUNDS=.*/MAX_SPEC_ROUNDS=1/; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$target/fake-codex\"|; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$target/fake-claude\"|" "$cfg"
   else
     sed -i.bak 's/^MAX_SPEC_ROUNDS=.*/MAX_SPEC_ROUNDS=0/' "$cfg"   # 검증자 Round 1 만
   fi

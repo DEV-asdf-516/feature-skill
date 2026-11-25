@@ -30,7 +30,7 @@ fake_consensus_pass() { # target-root design|impl
   # impl 은 구현 단위 manifest 가 러너의 진입 조건이다 — 없으면 feature-scope.json 전체를 unit 하나로 두는 최소 manifest 를 만든다
   [ "$t" != impl ] || [ -f "$root/.agent-work/implementation-units.json" ] || fake_units "$root"
   cp "$cfg" "$cfg.fixture-keep"
-  sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$cfg" && rm -f "$cfg.sedbak"
+  sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$cfg" && rm -f "$cfg.sedbak"
   (cd "$root" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" FEATURE_LIVE_TEE=1 bash .claude/skills/feature/scripts/consensus-loop.sh "$t") >/dev/null 2>&1 \
     || { mv "$cfg.fixture-keep" "$cfg"; fail "픽스처: $t 합의 PASS 체크포인트 생성 실패 ($root)"; }
   mv "$cfg.fixture-keep" "$cfg"
@@ -506,7 +506,7 @@ LOG_SKILL="$LOG_TARGET/.claude/skills/feature"
 git init -q "$LOG_TARGET"
 bash "$SOURCE_ROOT/install.sh" "$LOG_TARGET" >/dev/null
 sed -i.sedbak 's|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND="legacy_cli"|; s/^CLAUDE_BIN=.*/CLAUDE_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
-sed -i.sedbak 's/^CODEX_BIN=.*/CODEX_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak 's/^CODEX_BACKEND=.*/CODEX_BACKEND="legacy_exec"/; s/^CODEX_BIN=.*/CODEX_BIN="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^TEST_CMD=.*/TEST_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 # 워커 픽스처가 전부 가짜 codex(CODEX_BIN 교체)이므로 모델 기본값과 무관하게 codex 로 고정한다
@@ -544,7 +544,7 @@ grep -q '이전 피처 로그' "$LOG_TARGET/.agent-work/live.log" \
 printf '# design\n' > "$LOG_TARGET/.agent-work/design.md"
 mkdir -p "$LOG_TARGET/.agent-work/reviews"
 # 설계 검증자는 PASS 를 실제 -o 경로에 쓰는 가짜 codex 로 돈다(미리 깔아 둔 리뷰 파일은 이번 invocation 의 결과로 인정되지 않는다)
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_PASS_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 set +e
 printf 'SMOKE-CONV-RULE-1: 러너 NEED_DOCS 주입 확인용\n' > "$LOG_TARGET/conventions.md"
 (cd "$LOG_TARGET" && FAKE_PASS_CONTRACT="$VALIDATOR_CONTRACT" bash "$LOG_SKILL/scripts/feature-run.sh") >"$LOG_TARGET/.need-docs-impl.out" 2>&1
@@ -614,7 +614,7 @@ printf '%s\n' \
   'printf '\''{"status":"UNDECIDED","undecided":[{"kind":"'"'"'"$FAKE_KIND"'"'"'","location":"test","paths":["src/x.txt"],"decision_needed":"test decision","options":[]}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}'\'' > "$output_file"' \
   > "$FAKE_CODEX"
 chmod +x "$FAKE_CODEX"
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' \
   > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"
@@ -666,9 +666,9 @@ cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature
 jq -c '.files += ["src/y.txt"]' "$LOG_TARGET/.agent-work/feature-scope.json.orig" > "$LOG_TARGET/.agent-work/feature-scope.json"
 # 원본 manifest 는 impl PASS 지문에 포함되므로 러너는 먼저 impl 재합의로 돌아간다(설계된 흐름). 사용자가 재합의를 마친 뒤
 # lock 을 지우지 않고 재실행한 상황을 만들기 위해 impl 체크포인트를 다시 만든다 (그동안만 CODEX_BIN=true).
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 fake_consensus_pass "$LOG_TARGET" impl
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$LOG_TARGET/.agent-work/run-state.json"
 : > "$LOG_TARGET/.agent-work/live.log"; : > "$FAKE_WORKER_COUNT"
 set +e
@@ -686,9 +686,9 @@ mkdir -p "$LOG_TARGET/src" && echo "existing" > "$LOG_TARGET/src/existing-under-
 (cd "$LOG_TARGET" && git add src/existing-under-root.txt && git -c user.email=smoke@test -c user.name=smoke commit -qm "existing under root")
 jq -c '.new_file_roots = ["src/"]' "$LOG_TARGET/.agent-work/feature-scope.json.orig" > "$LOG_TARGET/.agent-work/feature-scope.json"
 cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature-scope.lock.json"
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 fake_consensus_pass "$LOG_TARGET" impl
-sed -i.sedbak "s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 (cd "$LOG_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree > .agent-work/worker-baseline.tree')   # 기준선에 existing-under-root.txt 포함
 cp "$LOG_TARGET/.agent-work/worker-baseline.tree" "$LOG_TARGET/.agent-work/worker-baseline.tree.keep"
 # 이전 하위 사례의 unit 시도 산출물(UNDECIDED 결과 + 옛 tree)을 치운다 — 위에서 파일을 커밋해 작업 트리가 그 시도와 달라졌고,
@@ -811,7 +811,7 @@ printf '%s\n' \
   > "$REVIEW_SIDE/fake-claude"
 chmod +x "$REVIEW_SIDE/fake-claude"
 # 이 절의 가짜는 claude 형태뿐이다 — production config 의 REVIEWER/FIXER 모델이 codex 로 라우팅돼도 가짜 claude 가 쓰이도록 역할 CLI 를 고정한다((f) 라우팅 절만 해제)
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^FIXER_CLI=.*/FIXER_CLI=\"claude\"/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^FIXER_CLI=.*/FIXER_CLI=\"claude\"/" "$REVIEW_SKILL/config.sh" && rm -f "$REVIEW_SKILL/config.sh.sedbak"
 mkdir -p "$REVIEW_TARGET/src" "$REVIEW_TARGET/.agent-work/reviews"
 printf 'base\n' > "$REVIEW_TARGET/src/a.txt"
 printf 'base\n' > "$REVIEW_TARGET/src/b.txt"
@@ -902,7 +902,7 @@ printf '%s\n' \
 printf '%s\n' '#!/usr/bin/env bash' 'printf "claude\n" >> "$FAKE_COUNT.claude"; exit 9' > "$REVIEW_SIDE/fake-claude-never"
 chmod +x "$REVIEW_SIDE/fake-codex-reviewer" "$REVIEW_SIDE/fake-claude-never"
 cp "$REVIEW_SKILL/config.sh" "$REVIEW_SIDE/config.before-routing.sh"
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"\"/" "$REVIEW_SKILL/config.sh"
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude-never\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$REVIEW_SIDE/fake-codex-reviewer\"|; s/^REVIEWER_MODEL=.*/REVIEWER_MODEL=\"gpt-6-astra\"/; s/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT=\"low\"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"\"/" "$REVIEW_SKILL/config.sh"
 mv "$REVIEW_SKILL/config.sh.sedbak" "$REVIEW_SIDE/config.sedbak.routing"
 FAKE_COUNT="$REVIEW_SIDE/.routing-calls" run_review_loop "{\"schema_version\":$REVIEWER_CONTRACT,\"verdict\":\"APPROVE\",\"issues\":[]}" \
   || { tail -5 "$REVIEW_SIDE/run.log" >&2; fail "라우팅: REVIEWER_MODEL=gpt-* 인데 codex 리뷰어가 APPROVE 로 exit 0 이 아님"; }
@@ -992,7 +992,7 @@ printf 'base\n' > "$WIDX_TARGET/src/w.txt"
 (cd "$WIDX_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$WIDX_TARGET/.agent-work/$doc.md"; done
 printf '\n## all\n전체 계약\n' >> "$WIDX_TARGET/.agent-work/implementation.md"   # unit references(implementation.md#all)가 가리키는 절
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"
 fake_scope "$WIDX_TARGET" src/w.txt
 fake_consensus_pass "$WIDX_TARGET" design
 fake_consensus_pass "$WIDX_TARGET" impl
@@ -1004,7 +1004,7 @@ printf '%s\n' \
   'exit "${FAKE_WORKER_RC:-0}"' \
   > "$WIDX_SIDE/fake-codex"
 chmod +x "$WIDX_SIDE/fake-codex"
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$WIDX_SIDE/fake-codex\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"   # 워커 픽스처가 fake codex 이므로 모델 기본값과 무관하게 고정
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$WIDX_SIDE/fake-codex\"|; s/^TEST_CMD=.*/TEST_CMD=\"true\"/; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$WIDX_SKILL/config.sh" && rm -f "$WIDX_SKILL/config.sh.sedbak"   # 워커 픽스처가 fake codex 이므로 모델 기본값과 무관하게 고정
 for worker_rc_case in 0 7; do
   (cd "$WIDX_TARGET" && git restore --staged --worktree src/w.txt)
   printf '{"stage":"worker","test_retries":0,"stale_count":0,"history":[]}\n' > "$WIDX_TARGET/.agent-work/run-state.json"
@@ -1046,11 +1046,11 @@ printf '%s\n' \
   'printf '\''{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[]}'\'' > "$out"' \
   > "$VFIX_SIDE/fake-codex"
 chmod +x "$VFIX_SIDE/fake-codex"
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s|^TEST_CMD=.*|TEST_CMD=\"VFIX_COUNT=$VFIX_SIDE/test-calls VFIX_PASS_FLAG=$VFIX_SIDE/tests-pass bash $VFIX_SIDE/test.sh\"|; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"true\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|; s|^TEST_CMD=.*|TEST_CMD=\"VFIX_COUNT=$VFIX_SIDE/test-calls VFIX_PASS_FLAG=$VFIX_SIDE/tests-pass bash $VFIX_SIDE/test.sh\"|; s/^LINT_CMD=.*/LINT_CMD=\"true\"/; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=0/; s/^REVIEWER_CLI=.*/REVIEWER_CLI=\"claude\"/; s/^WORKER_CLI=.*/WORKER_CLI=\"codex\"/" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
 fake_scope "$VFIX_TARGET" src/w.txt
 fake_consensus_pass "$VFIX_TARGET" design
 fake_consensus_pass "$VFIX_TARGET" impl
-sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$VFIX_SIDE/fake-codex\"|" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
+sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$VFIX_SIDE/fake-codex\"|" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
 (cd "$VFIX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
 cp "$VFIX_TARGET/.agent-work/worker-baseline.tree" "$VFIX_SIDE/baseline.keep"
 cp "$VFIX_TARGET/.agent-work/feature-scope.json" "$VFIX_TARGET/.agent-work/feature-scope.lock.json"
