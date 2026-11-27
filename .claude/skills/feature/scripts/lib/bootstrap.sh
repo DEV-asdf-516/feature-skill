@@ -81,16 +81,19 @@ unset _feature_rt_rc
 # =============================================================
 # 가드: 설정이 틀리면 이 로더를 source 하는 스크립트를 즉시 중단
 # =============================================================
-# 예외 하나: 프로젝트 명령(TEST_CMD/LINT_CMD)을 실행하지 않는 조회 전용 단독 명령(codex-app-server.sh 의 status·preflight·hooks)은
-# 그 두 값의 CHANGE_ME 를 넘어간다 — 설치 직후(또는 스킬 원본 저장소)에도 훅 판정·호출 기록을 볼 수 있어야 한다. 모델·effort 의 CHANGE_ME 와 빈 값은 그대로 거부한다.
-# 조건은 둘 다다: ① 이 프로세스가 실행한 스크립트(호출 스택의 맨 아래)가 이 스킬의 scripts/codex-app-server.sh 자신이고 ② 그 스크립트가 조회 명령일 때만 적는 표식이 자기 pid 다.
+# 예외 하나: 프로젝트 명령(TEST_CMD/LINT_CMD)을 실행하지 않는 단독 명령 — codex-app-server.sh 의 조회 명령(status·preflight·hooks)과
+# native-agent-bridge.sh 의 prepare-agents(agent 정의 파일만 쓴다) — 은 그 두 값의 CHANGE_ME 를 넘어간다. 설치 직후(또는 스킬 원본 저장소)에도 훅 판정·호출 기록을 볼 수 있어야 하고,
+# agent 정의는 Claude Code 세션을 시작하기 전(설치 때)에 있어야 한다. 모델·effort 의 CHANGE_ME 와 빈 값은 그대로 거부한다.
+# 조건은 둘 다다: ① 이 프로세스가 실행한 스크립트(호출 스택의 맨 아래)가 이 스킬의 scripts/codex-app-server.sh 또는 scripts/native-agent-bridge.sh 자신이고
+# ② 그 스크립트가 위 명령일 때만 적는 표식이 자기 pid 다.
 # 표식만으로는 호출자를 증명하지 못한다 — 변수는 환경·BASH_ENV 로 어느 스크립트에나 심을 수 있다. 실행 스크립트의 경로(BASH_SOURCE)는 그렇게 바꿀 수 없으므로
 # 러너·하위 루프·config.sh 를 source 하는 다른 스크립트는 표식이 있어도 이 예외를 얻지 못한다. 경로는 절대 경로만 인정한다(단독 진입이 절대 경로로 다시 실행한다 —
 # 상대 경로는 그 진입의 cd 뒤에 다른 파일을 가리킬 수 있다).
 _config_guard_cmds="$TEST_CMD$LINT_CMD"
 if [ "${FEATURE_CONFIG_QUERY_ONLY_PID:-}" = "$$" ]; then
   case "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" in
-    /*) [ ! "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" -ef "$FEATURE_SKILL_DIR/scripts/codex-app-server.sh" ] || _config_guard_cmds="" ;;
+    /*) if [ "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" -ef "$FEATURE_SKILL_DIR/scripts/codex-app-server.sh" ] \
+           || [ "${BASH_SOURCE[${#BASH_SOURCE[@]}-1]}" -ef "$FEATURE_SKILL_DIR/scripts/native-agent-bridge.sh" ]; then _config_guard_cmds=""; fi ;;
   esac
 fi
 case "$DESIGN_REVISION_MODEL$DESIGNER_EFFORT$VALIDATOR_MODEL$VALIDATOR_EFFORT$WORKER_MODEL$WORKER_EFFORT$REVIEWER_MODEL$REVIEWER_EFFORT$FIXER_MODEL$FIXER_EFFORT$_config_guard_cmds" in

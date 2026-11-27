@@ -19,6 +19,8 @@ fail() { echo "[SMOKE FAIL] $*" >&2; exit 1; }
 pass() { echo "[SMOKE PASS] $*"; }
 trap 'rm -rf "$TMP"' EXIT
 unset CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_EFFORT_LEVEL NTFY_TOPIC
+# 메인 Claude Code 프로세스 pid — 이 세션 안에서 돌리면 물려받는다. 남겨 두면 방금 만든 임시 agent 정의가 그 프로세스보다 새것이라 러너의 등록 증거 게이트(NATIVE_AGENT_RESTART_REQUIRED)가 멈춘다. 그 게이트는 tests/smoke-native-agent-definitions.sh 가 본다
+unset CLAUDE_PID
 # 요청에 결속되기 전의 훅 흔적(예: TRANSCRIPT_UNREADABLE)은 $CLAUDE_PROJECT_DIR/.agent-work 로 간다 — Claude Code 세션 안에서 돌려도 실제 프로젝트에 남지 않게 임시 디렉터리로 돌린다.
 export CLAUDE_PROJECT_DIR="$TMP/claude-project-dir"
 HOOK="$PROJECT_SRC/.claude/hooks/feature_native_agent.sh"

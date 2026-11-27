@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================
 # Native Agent bridge — Shell ↔ 대화형 메인 Claude Code 세션의 네이티브 Agent 인계
-# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — 로더(scripts/lib/bootstrap.sh)가 읽는다. 단독 실행은 맨 아래 'redispatch'/'discard' 뿐이고, 그 진입은 프로세스당 한 번만 돈다)
+# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — 로더(scripts/lib/bootstrap.sh)가 읽는다. 단독 실행은 맨 아래 'prepare-agents'/'redispatch'/'discard' 뿐이고, 그 진입은 프로세스당 한 번만 돈다)
+#
+# agent 정의(.claude/agents/feature-<역할>.md)는 호출 직전이 아니라 미리 만든다: install.sh 와 'prepare-agents' 가 native 로 라우팅되는 역할 전부를 쓰고,
+# 러너는 피처 실행의 첫 모델 호출 전(native_definitions_preflight)·요청 발행 직전(native_definition_gate)·남은 PREPARED 요청을 다시 안내하기 직전(native_prepared_request_gate —
+# 합의·리뷰 루프 단독 실행 포함)에 다시 대조한다. 메인 Claude Code 프로세스가
+# 그 정의를 등록했다는 증거(정의 수정 시각 < CLAUDE_PID 프로세스 시작)가 없으면 요청을 만들지 않고 NATIVE_AGENT_RESTART_REQUIRED 로 멈춘다(아래 "agent 정의 사전 준비").
 #
 # Shell 은 현재 대화형 세션의 Agent 도구를 직접 부를 수 없다. 그래서 claude_native 로 라우팅된 역할 호출은 두 번에 나뉜다:
 #   1차 실행  PREPARE  : 요청(requests/<id>.json) + 완전히 렌더링한 payload(requests/<id>.prompt.txt) + pending.json 을 원자적으로 쓰고
@@ -144,6 +149,142 @@ native_definition_ensure() { # ROLE model effort
     echo "[native] agent 정의 생성: $NATIVE_DEF_PATH (model $2, effort $3)" >&2
   fi
   NATIVE_DEF_SHA="$(native_sha256_file "$NATIVE_DEF_PATH")"
+}
+
+# ---------- agent 정의 사전 준비 · 등록 증거 ----------
+# Claude Code 는 세션(프로세스)을 시작할 때 .claude/agents/ 의 정의를 읽는다. 세션 도중에 만들거나 고친 정의는 그 세션이 등록했다는 보장이 없다
+# (실측: 세션 시작 때 .claude/agents/ 가 없던 프로젝트에서 러너가 정의를 처음 쓴 11초 뒤의 dispatch 가 "Agent type '…' not found" 로 돌아왔다. 그 호출은
+#  PreToolUse 훅이 이미 DISPATCHING 으로 기록한 뒤라 실행 여부 불명으로 남고 discard 로만 정리된다. 디렉터리가 있던 세션에서 새 정의를 감지하는지는 미검증).
+# Shell 은 메인 세션의 Agent 등록 목록을 볼 수 없다. 그래서 대리 증거만 쓴다: 정의 파일의 수정 시각이 메인 Claude Code 프로세스(CLAUDE_PID — Claude Code 가
+# Bash 도구 환경에 넣는다)의 시작보다 앞서면 "그 프로세스가 시작할 때 이미 있었다" = 등록 증거로 본다. 그 밖(이번 실행이 썼음·프로세스보다 늦음·시각 불명)은 증거 없음이다.
+# 이 판정은 요청을 발행하기 '전'에만 쓴다 — 증거가 없으면 요청을 만들지 않고 멈춘다. dispatch 뒤의 판정(DISPATCHING 의 실행 여부 불명·중복 dispatch 차단)은 그대로다.
+# CLAUDE_PID 가 없거나 그 프로세스를 볼 수 없으면(터미널 단독 실행 등) 판정하지 않고 종전대로 진행한다 — 그 요청은 나중에 어느 세션이 dispatch 할지 모른다.
+native_file_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+native_epoch_fmt() { date -d "@$1" '+%F %T' 2>/dev/null || date -r "$1" '+%F %T' 2>/dev/null || printf '%s' "$1"; }
+native_claude_started_at() { # → 메인 Claude Code 프로세스의 시작 시각(epoch). CLAUDE_PID 가 없거나 그 프로세스를 볼 수 없으면 1
+  local pid="${CLAUDE_PID:-}" et d=0 h=0 m="" s="" a b c
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  # etime 은 BSD·procps 모두 [[dd-]hh:]mm:ss 다(etimes 는 BSD 에 없다)
+  et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')" || et=""
+  case "$et" in ''|*[!0-9:-]*) return 1;; esac
+  case "$et" in *-*) d="${et%%-*}"; et="${et#*-}";; esac
+  IFS=: read -r a b c <<< "$et"
+  if [ -n "${c:-}" ]; then h="$a"; m="$b"; s="$c"; else m="${a:-}"; s="${b:-}"; fi
+  [ -n "$m" ] && [ -n "$s" ] || return 1
+  case "$d$h$m$s" in *[!0-9]*) return 1;; esac
+  printf '%s' "$(( $(date +%s) - (10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s) ))"
+}
+NATIVE_REG_DETAIL=""
+native_definition_registered() { # def-path written(created|updated|빈 값) started-epoch → 0 등록 증거 있음 / 1 없음(사유는 NATIVE_REG_DETAIL)
+  local mt name; name="$(basename "$1")"; NATIVE_REG_DETAIL=""
+  if [ -n "$2" ]; then
+    NATIVE_REG_DETAIL="$name(이번 실행이 $([ "$2" = created ] && printf '새로 만듦' || printf '고쳐 씀'))"; return 1
+  fi
+  mt="$(native_file_mtime "$1")" || mt=""
+  case "$mt" in ''|*[!0-9]*) NATIVE_REG_DETAIL="$name(수정 시각을 읽지 못함)"; return 1;; esac
+  # 초 단위 두 시각(프로세스 시작은 경과 시간에서 역산)이라 2초 여유를 둔다 — 경계는 증거 없음 쪽으로 닫는다
+  [ $((mt + 2)) -le "$3" ] && return 0
+  NATIVE_REG_DETAIL="$name(수정 $(native_epoch_fmt "$mt"))"; return 1
+}
+# 증거가 없을 때의 중단. 요청 state 는 건드리지 않는다(요청이 없거나 PREPARED 그대로다). 하위 루프에서도 같은 43 경로로 최상위 러너까지 올라가
+# 러너가 NEED_USER NATIVE_AGENT_RESTART_REQUIRED 로 바꿔 돌려준다(feature-run.sh 의 native_on_rejected).
+native_restart_required() { # defs-detail started-epoch [request-note]
+  local note="${3:-native 요청은 발행하지 않았다(모델 호출 0회 — dispatch 할 것이 없다)}" detail
+  detail="native Agent 정의가 지금의 메인 Claude Code 프로세스(CLAUDE_PID ${CLAUDE_PID:-?}, 시작 $(native_epoch_fmt "$2"))보다 나중에 쓰였다: $1 — 이 세션이 그 정의를 등록했다는 증거가 없다(세션 도중 생긴 정의로 dispatch 하면 'Agent type … not found' 로 돌아올 수 있고, 그 호출은 실행 여부 불명으로 남아 discard 로만 정리된다). $note. Claude Code 세션을 다시 시작(같은 대화 재개 — CLI 는 claude --continue 또는 --resume)한 뒤 같은 feature-run 명령을 재실행한다. 정의는 이미 디스크에 있다 — 설정을 바꾸지 않았다면 다시 쓰지 않고 통과한다"
+  native_restart_stop "$detail"
+}
+native_restart_stop() { # detail — NATIVE_AGENT_RESTART_REQUIRED 중단의 공통 출구(요청 state 불변, exit 43)
+  local detail="$1"
+  echo "[STOP] NATIVE_AGENT_RESTART_REQUIRED: $detail" >&2
+  { mkdir -p "$(native_dir)" && printf '%s\n' "NATIVE_AGENT_RESTART_REQUIRED: $detail" > "$(native_dir)/last-rejection.txt"; } 2>/dev/null || true
+  ! declare -F native_on_rejected >/dev/null || native_on_rejected NATIVE_AGENT_RESTART_REQUIRED "$detail"
+  exit "$NATIVE_EXIT_REJECTED"
+}
+# 요청 발행 직전(native_prepare): 이번 요청이 쓸 정의 하나를 본다.
+native_definition_gate() { # def-path written
+  local started
+  if ! started="$(native_claude_started_at)"; then
+    [ -z "$2" ] || echo "[native] CLAUDE_PID 가 없어(또는 그 프로세스를 볼 수 없어) 방금 쓴 agent 정의($1)의 등록 여부를 확인하지 않았다 — 이 요청을 dispatch 할 Claude Code 세션은 이 정의가 쓰인 뒤에 시작해야 한다" >&2
+    return 0
+  fi
+  native_definition_registered "$1" "$2" "$started" || native_restart_required "$NATIVE_REG_DETAIL" "$started"
+}
+# native 로 라우팅되는 역할 전부의 정의를 지금의 config.sh 값으로 맞춰 쓴다(이미 같으면 그대로). native 가 아닌 역할의 예전 정의 파일은 지우지 않는다 —
+# 남아 있어도 feature 요청 없이는 dispatch 되지 않는다(PreToolUse 훅이 막는다). 결과: NATIVE_PREP_REPORT(사람이 읽는 줄), NATIVE_PREP_DEFS(정의 경로<TAB>written 줄),
+# NATIVE_PREP_NATIVE(native 역할 수), NATIVE_PREP_WROTE(이번에 쓴 수). 하나가 실패해도 나머지 역할은 계속 처리하고 1 을 돌려준다.
+NATIVE_PREP_REPORT=""; NATIVE_PREP_DEFS=""; NATIVE_PREP_NATIVE=0; NATIVE_PREP_WROTE=0
+native_definitions_ensure_all() {
+  local r be model effort rc=0
+  NATIVE_PREP_REPORT=""; NATIVE_PREP_DEFS=""; NATIVE_PREP_NATIVE=0; NATIVE_PREP_WROTE=0
+  for r in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do
+    model="$(role_model "$r")"; effort="$(role_effort "$r")"
+    if ! be="$(role_backend "$r")"; then
+      NATIVE_PREP_REPORT="$NATIVE_PREP_REPORT  $r $model: 실패 — backend 를 정하지 못함(위 [FAIL])"$'\n'; rc=1; continue
+    fi
+    if [ "$be" != claude_native ]; then
+      NATIVE_PREP_REPORT="$NATIVE_PREP_REPORT  $r $model → $be: native 가 아니다 — 정의를 쓰지 않는다"$'\n'; continue
+    fi
+    NATIVE_PREP_NATIVE=$((NATIVE_PREP_NATIVE + 1))
+    if ! native_definition_ensure "$r" "$model" "$effort"; then
+      NATIVE_PREP_REPORT="$NATIVE_PREP_REPORT  $r $model / effort $effort: 실패(위 [FAIL])"$'\n'; rc=1; continue
+    fi
+    [ -z "$NATIVE_DEF_WRITTEN" ] || NATIVE_PREP_WROTE=$((NATIVE_PREP_WROTE + 1))
+    NATIVE_PREP_REPORT="$NATIVE_PREP_REPORT  $r $model / effort $effort → $NATIVE_DEF_PATH: ${NATIVE_DEF_WRITTEN:-unchanged}"$'\n'
+    NATIVE_PREP_DEFS="$NATIVE_PREP_DEFS$NATIVE_DEF_PATH"$'\t'"$NATIVE_DEF_WRITTEN"$'\n'
+  done
+  return "$rc"
+}
+native_definitions_unregistered() { # started-epoch → NATIVE_PREP_DEFS 가운데 등록 증거가 없는 정의(쉼표로 이은 사유) 를 stdout
+  local path written out=""
+  while IFS=$'\t' read -r path written; do
+    [ -n "$path" ] || continue
+    native_definition_registered "$path" "$written" "$1" || out="$out${out:+, }$NATIVE_REG_DETAIL"
+  done <<< "$NATIVE_PREP_DEFS"
+  printf '%s' "$out"
+}
+# 처리되지 않은 요청이 PREPARED 일 때: 정의를 쓰지 않고 그 요청이 가리키는 정의만 본다(요청과 정의를 어긋나게 만들지 않는다).
+# 증거가 없으면 요청을 PREPARED 그대로 두고 43 으로 멈춘다. PREPARED 가 아니면(DISPATCHING 이후) 아무것도 하지 않는다 — 이미 dispatch 를 시도했거나
+# Agent 가 돌고 있을 수 있어 재시작을 요구하지 않는다(기존 판정 그대로).
+# 부르는 곳: 러너의 피처 시작 확인(native_definitions_preflight)과, 같은 호출 지점의 재실행이 PREPARED 요청의 dispatch 를 다시 안내하기 직전(native_role_call).
+# 뒤쪽은 합의·리뷰 루프를 단독으로 실행할 때(feature-run.sh 를 거치지 않아 preflight 가 없다)도 지난다 — 그 경로의 PREPARED 요청도 같은 게이트를 받는다.
+# 정의 파일이 없거나 내용이 요청 발행 때(agent_definition_sha256)와 다르면 CLAUDE_PID 와 무관하게 멈춘다. 없는 정의로 dispatch 하면 'Agent type … not found' →
+# DISPATCHING(실행 여부 불명)에 갇히고, 다른 정의로 dispatch 하면 Agent 가 다 돈 뒤 수용 단계(NATIVE_STALE_REQUEST)에서야 거부된다. 정의는 여기서 쓰지 않는다 —
+# 복구는 사용자가 요청 발행 때의 설정으로 prepare-agents 를 실행하는 것이다(같은 설정이면 같은 내용이 나온다). 복구한 정의는 새로 쓰인 것이라 재시작도 필요하다.
+native_prepared_request_gate() {
+  local started path want have rid prole how
+  [ "$(native_request_field '.state')" = PREPARED ] || return 0
+  path="$(native_request_field '.agent_definition_path')"; want="$(native_request_field '.agent_definition_sha256')"
+  rid="$(native_pending_field '.request_id')"; prole="$(native_pending_field '.role')"
+  how=""
+  if [ -z "$path" ] || [ -z "$want" ]; then how="요청에 agent 정의 경로·해시가 없다(손상된 요청)"
+  elif [ ! -f "$path" ]; then how="요청이 가리키는 agent 정의 파일이 없다: $path"
+  else
+    have="$(native_sha256_file "$path")"
+    [ "$have" = "$want" ] || how="agent 정의 파일($path)의 내용이 요청 발행 때와 다르다(요청 ${want:0:12}…, 지금 ${have:0:12}…) — 요청 발행 뒤 모델·effort·템플릿이 바뀌었다"
+  fi
+  if [ -n "$how" ]; then
+    native_restart_stop "처리되지 않은 native 요청 $rid($prole, $(native_request_field '.model') / effort $(native_request_field '.effort'))을 dispatch 할 수 없다 — $how. 그대로 dispatch 하면 없는 정의는 'Agent type … not found' 로 실행 여부 불명(DISPATCHING)에 갇히고, 다른 정의는 Agent 가 다 돈 뒤 수용 단계에서 거부된다. 요청은 PREPARED 그대로 두었다(모델 호출 0회). 복구(사용자 결정 뒤): config.sh 의 모델·effort 를 요청 발행 때 값으로 둔 채 'bash $(native_skill_dir)/scripts/native-agent-bridge.sh prepare-agents' 로 정의를 다시 쓰고, Claude Code 세션을 다시 시작(같은 대화 재개)한 뒤 같은 명령을 재실행한다 — 정의가 요청 발행 때와 같아야 통과한다. 설정 변경이 의도라면 $(native_recovery_cmd discard "$rid") 로 요청을 치운다(작업 트리가 호출 전 상태일 때만). 정의 파일을 손으로 고치거나 복사해 넣지 않는다"
+  fi
+  started="$(native_claude_started_at)" || return 0
+  native_definition_registered "$path" "" "$started" \
+    || native_restart_required "$NATIVE_REG_DETAIL" "$started" "처리되지 않은 native 요청 $(native_pending_field '.request_id')($(native_pending_field '.role'))은 PREPARED 그대로 둔다(dispatch 하지 않았다 — 재시작한 세션에서 그 dispatch 를 한 번 보낸다)"
+}
+# 러너: 피처 실행의 첫 모델 호출 전(재개 stage 를 정한 뒤). 정의를 일괄로 맞춰 쓰고, 하나라도 등록 증거가 없으면 유료 호출(Codex 검증자 포함) 전에 멈춘다.
+#   처리되지 않은 요청이 있으면 일괄로 쓰지 않고 native_prepared_request_gate 만 거친다.
+native_definitions_preflight() {
+  local started unreg
+  if native_pending_present; then
+    native_prepared_request_gate
+    return 0
+  fi
+  native_definitions_ensure_all || return 1
+  [ "$NATIVE_PREP_NATIVE" -gt 0 ] || return 0
+  if ! started="$(native_claude_started_at)"; then
+    [ "$NATIVE_PREP_WROTE" = 0 ] || echo "[native] agent 정의 ${NATIVE_PREP_WROTE}개를 썼지만 CLAUDE_PID 가 없어(또는 그 프로세스를 볼 수 없어) 등록 여부를 확인하지 않았다 — native 요청을 dispatch 할 Claude Code 세션은 지금 이후에 시작해야 한다" >&2
+    return 0
+  fi
+  unreg="$(native_definitions_unregistered "$started")"
+  [ -z "$unreg" ] || native_restart_required "$unreg" "$started"
 }
 
 # 런타임 모델·effort 를 바꾸는 전역 설정은 요청을 만들기 전에 막는다(관측 대조는 수용 단계에서 한 번 더).
@@ -306,6 +447,13 @@ native_print_dispatch() {
   local f; f="$(native_request_file)"
   # 하위 루프가 42 로 끝나 상위 러너가 다시 출력하는 경우에도 판정 근거가 비지 않게 한다.
   [ "$(jq -r '.state' "$f" 2>/dev/null)" != DISPATCHING ] || [ -n "${NATIVE_EVID:-}" ] || native_dispatch_evidence
+  # 요청을 발행한 실행이 CLAUDE_PID 를 보지 못해 [주의] 를 붙이는 PREPARED 요청: 지금 이 프로세스가 등록 증거를 확인할 수 있고 증거가 있으면 [주의] 를 뺀다
+  # (재시작한 세션에서의 재실행 — 증거가 없으면 이 출력 전에 native_prepared_request_gate 가 멈췄다). 출력하는 프로세스가 직접 본다(하위 루프·상위 러너 어느 쪽이든).
+  local def_checked="" def_path def_started
+  if [ "$(jq -r '.state' "$f" 2>/dev/null)" = PREPARED ] && [ -n "$(jq -r '.agent_definition_written // ""' "$f" 2>/dev/null)" ]; then
+    def_path="$(jq -r '.agent_definition_path // ""' "$f" 2>/dev/null)"
+    if [ -n "$def_path" ] && [ -f "$def_path" ] && def_started="$(native_claude_started_at)" && native_definition_registered "$def_path" "" "$def_started"; then def_checked=1; fi
+  fi
   jq -r '"[NATIVE_AGENT_REQUIRED] request \(.request_id) — \(.role) / \(.model) / effort \(.effort) / state \(.state)\n" +
     (if .state=="PREPARED" then
        (if .session_intent=="NEW"
@@ -315,18 +463,18 @@ native_print_dispatch() {
        + "  금지: model 인자·isolation 지정, 한 줄의 수정·요약, 다른 Agent 로의 대체, 같은 요청의 두 번째 호출. 프롬프트 본문은 PreToolUse 훅이 \(.prompt_path) 에서 넣는다.\n"
        + "  Agent 가 끝났다는 알림(또는 foreground 완료)을 받은 뒤 같은 feature-run 명령을 재실행한다. 결과를 직접 옮겨 적거나 요약해 넘기지 않는다."
        + "\n  도구 호출 자체가 오류·거부로 돌아오면(다른 훅의 거부 포함) 다시 보내지 않는다 — 바로 같은 feature-run 명령을 재실행해 러너의 판정(거부 확인 / 실행 여부 불명)을 받는다."
-       + (if .agent_definition_written != null then
-            "\n  [주의] agent 정의 파일(\(.agent_definition_path))을 이번 실행이 \(if .agent_definition_written=="created" then "새로 만들었다" else "고쳐 썼다" end). "
-            + "도구가 \"Agent type \(.agent_definition) not found\" 로 돌아오면(세션 시작 때 .claude/agents/ 가 없었던 경우 — Claude Code 2.1.330 실측) 다시 보내지 말고 같은 feature-run 명령을 재실행해 요청 state 를 확인한다. "
-            + "state 가 PREPARED 그대로일 때만(PreToolUse 훅이 그 호출을 기록하지 않았다) 사용자에게 Claude Code 세션 재시작(같은 대화 재개)을 요청한 뒤 이 dispatch 를 한 번 보낸다. "
-            + "state 가 DISPATCHING 이면 실행 여부 불명이다 — 세션을 재시작한 뒤에도 다시 보내지 않고 러너가 낸 판정 근거를 사용자에게 보고한다. 다른 Agent 종류로 대체하지 않는다."
+       + (if .agent_definition_written != null and $defchecked == "" then
+            "\n  [주의] agent 정의 파일(\(.agent_definition_path))을 이번 실행이 \(if .agent_definition_written=="created" then "새로 만들었다" else "고쳐 썼다" end) — 러너가 메인 Claude Code 프로세스(CLAUDE_PID)를 확인하지 못해 그 정의의 등록 여부를 보지 않았다. "
+            + "이 dispatch 를 보낼 세션이 이 정의가 쓰이기 전에 시작됐다면 보내지 말고 먼저 사용자에게 Claude Code 세션 재시작(같은 대화 재개)을 요청한다 — 요청은 PREPARED 그대로 남고, 재시작한 세션에서 이 dispatch 를 한 번 보낸다. "
+            + "그대로 보내 \"Agent type \(.agent_definition) not found\" 로 돌아오면 PreToolUse 훅이 이미 시도를 기록해(DISPATCHING) 실행 여부 불명으로 남는다 — 세션을 재시작한 뒤에도 다시 보내지 않고 같은 feature-run 명령을 재실행해 러너가 낸 판정 근거를 사용자에게 보고한다. 다른 Agent 종류로 대체하지 않는다."
           else "" end)
      elif .state=="DISPATCHING" then
        "  dispatch 를 시도했지만(\(.dispatch_attempt.tool // "?") tool_use_id \(.dispatch_attempt.tool_use_id // "?"), \(.dispatch_attempt.at // "?")) 실행 확인(PostToolUse)도 결과 캡처도 없다 — 실행 여부 불명.\n" +
        "  판정 근거: \($evid) — \($evdetail)\n" +
        (if $evreason=="AGENT_TYPE_NOT_FOUND" then
           "  [Agent 정의 미발견] 도구가 \(.agent_definition) 정의를 찾지 못했다고 답했다(정의 파일 \(.agent_definition_path) — 세션 시작 뒤에 생겼거나 바뀐 정의는 Claude Code 세션을 재시작해야 읽힌다). " +
-          "이 요청은 이미 DISPATCHING 이다: 세션을 재시작한 뒤에도 같은 dispatch 를 다시 보내지 않는다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 discard 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하고, 거부가 확인되지 않았다는 경고가 붙는다). redispatch 는 거부 증거가 없어 거절된다.\n"
+          "이 요청은 이미 DISPATCHING 이다: 세션을 재시작한 뒤에도 같은 dispatch 를 다시 보내지 않는다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 discard 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하고, 거부가 확인되지 않았다는 경고가 붙는다). redispatch 는 거부 증거가 없어 거절된다. " +
+          "discard 뒤 재실행하기 전에 Claude Code 세션을 다시 시작한다 — 정의는 이미 디스크에 있으므로 새 세션이 시작할 때 읽고, 러너는 요청을 만들기 전에 그 등록 증거를 확인한다(native-agent-bridge.sh prepare-agents 로 미리 준비할 수도 있다).\n"
         else "" end) +
        "  다시 호출하지 않는다(훅이 같은 요청의 두 번째 dispatch 를 거부한다). 방금 호출이 background 로 시작됐으면 완료 알림을 기다린 뒤 같은 명령을 재실행한다.\n" +
        "  도구 호출이 오류로 돌아왔거나 Agent 가 끝났는데도 이 상태면 그 사실과 위 근거를 사용자에게 보고한다(자동 재호출·자동 fresh 없음). 정리는 사용자 결정 뒤 discard 뿐이다."
@@ -334,7 +482,7 @@ native_print_dispatch() {
        "  실행이 확인됐고(\(.dispatched_at // "?"), agent \(.dispatched_agent_id // "?")) 결과가 아직 캡처되지 않았다 — 다시 호출하지 않는다. Agent 완료 알림을 기다린 뒤 같은 명령을 재실행한다.\n" +
        "  Agent 가 끝났는데도 이 상태면 SubagentStop 훅(.claude/hooks/feature_native_agent.sh)이 등록돼 있는지 확인하고 사용자에게 보고한다(자동 재호출·자동 fresh 없음)."
      else "  결과 캡처됨 — 같은 명령을 재실행하면 Shell 이 검증·수용한다." end) +
-    "\n  요청: \(.request_path)"' --arg evid "${NATIVE_EVID:-}" --arg evdetail "${NATIVE_EVID_DETAIL:-}" --arg evreason "${NATIVE_EVID_REASON:-}" "$f"
+    "\n  요청: \(.request_path)"' --arg evid "${NATIVE_EVID:-}" --arg evdetail "${NATIVE_EVID_DETAIL:-}" --arg evreason "${NATIVE_EVID_REASON:-}" --arg defchecked "$def_checked" "$f"
 }
 native_stop_required() {
   native_print_dispatch
@@ -398,6 +546,8 @@ native_prepare() { # mode ROLE session label prompt conv schema
   model="$(role_model "$role")"; effort="$(role_effort "$role")"
   native_env_precheck "$model" "$effort" || return 1
   native_definition_ensure "$role" "$model" "$effort" || return 1
+  # 이 세션이 그 정의를 등록했다는 증거가 없으면 요청을 만들지 않고 멈춘다(exit 43 → NEED_USER NATIVE_AGENT_RESTART_REQUIRED). 요청이 없으니 DISPATCHING 에 갇힐 호출도 없다.
+  native_definition_gate "$NATIVE_DEF_PATH" "$NATIVE_DEF_WRITTEN"
   native_session_begin "$role" "$session" "$model" "$effort" "$NATIVE_DEF_SHA" || return 1
   dir="$(native_dir)"; mkdir -p "$dir/requests" "$dir/results" || return 1
   id="native-$(new_invocation_id)"; req="$dir/requests/$id.json"; payload_file="$dir/requests/$id.prompt.txt"
@@ -549,7 +699,9 @@ native_role_call() { # mode ROLE session label prompt conv schema out raw
   fi
   state="$(native_request_field '.state')"
   case "$state" in
-    PREPARED|DISPATCHED) native_stop_required;;
+    # PREPARED 를 다시 안내하기 전에 그 정의의 등록 증거를 본다(합의·리뷰 루프 단독 실행 포함 — 요청 state 는 바꾸지 않는다).
+    PREPARED) native_prepared_request_gate; native_stop_required;;
+    DISPATCHED) native_stop_required;;
     DISPATCHING) native_dispatch_unconfirmed;;
     REJECTED) native_reject "$(native_request_field '.rejection.code')" "$(native_request_field '.rejection.detail') (이전 실행에서 이미 불수용 — 재검증하지 않는다)";;
     RESULT_READY) ;;
@@ -627,16 +779,53 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${NATIVE_BRIDGE_MAIN_PID:-}" != "$$" ]; 
   NATIVE_BRIDGE_MAIN_PID=$$
   set -euo pipefail
   NATIVE_BRIDGE_STANDALONE=1
-  _usage="사용법: bash $0 {redispatch|discard} <request_id>   (요청이 속한 프로젝트·피처 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)"
+  _usage="사용법: bash $0 prepare-agents   (agent 정의를 config.sh 값으로 미리 만든다 — Claude Code 세션을 시작하기 전에)
+       bash $0 {redispatch|discard} <request_id>   (요청이 속한 프로젝트·피처 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)"
   case "${1:-}" in redispatch|discard) [ -n "${2:-}" ] || { echo "$_usage" >&2; exit 1; };;
+    prepare-agents) [ "$#" -eq 1 ] || { echo "$_usage" >&2; exit 1; };;
     *) echo "$_usage" >&2; exit 1;; esac
   _skill_dir="$(cd "$(dirname "$0")/.." && pwd)"
+  # prepare-agents: native 로 라우팅되는 역할 전부의 agent 정의를 config.sh 의 모델·effort 로 맞춰 쓴다(native_definitions_ensure_all — 러너가 쓰는 것과 같은 함수).
+  #   요청·세션 원장·작업 트리를 보지도 바꾸지도 않는다(프로젝트 루트 판정·cd 없음). 정의 위치는 이 스킬이 설치된 프로젝트의 .claude/agents/ 다.
+  #   프로젝트 명령을 실행하지 않으므로 설정 가드가 TEST_CMD/LINT_CMD 의 CHANGE_ME 를 넘어가게 자기 pid 를 적는다(install.sh 가 설치 직후 부른다).
+  #   가드는 표식에 더해 실행 중인 스크립트가 이 파일(절대 경로)인지도 본다 — 상대 경로로 실행됐으면 같은 pid 로 한 번 절대 경로로 다시 실행한다.
+  #   종료: 0 = 성공(재시작이 필요하면 [ACTION] 줄로 알린다), 1 = 실패(관리 표식 없는 같은 이름의 파일·템플릿 누락 등 — 다른 역할은 계속 처리했다).
+  if [ "$1" = prepare-agents ]; then
+    _abs="$_skill_dir/scripts/native-agent-bridge.sh"
+    [ "$0" = "$_abs" ] || exec "${BASH:-bash}" "$_abs" "$@"
+    FEATURE_CONFIG_QUERY_ONLY_PID=$$
+    source "$_skill_dir/scripts/lib/bootstrap.sh"
+    FEATURE_CONFIG_QUERY_ONLY_PID=""
+    # 로더가 config.sh 를 읽은 뒤의 값(따옴표·export·환경 변수 표현식을 평가한 결과). install.sh 가 이 줄로 판정한다 — 형식을 바꾸지 않는다(빈 값 = 미설정 → legacy_cli).
+    printf '[native-agents] effective CLAUDE_BACKEND=%s\n' "${CLAUDE_BACKEND:-}"
+    _rc=0; native_definitions_ensure_all || _rc=1
+    echo "[native-agents] agent 정의 디렉터리: $(native_agents_dir) (CLAUDE_BACKEND=${CLAUDE_BACKEND:-legacy_cli})"
+    printf '%s' "$NATIVE_PREP_REPORT"
+    if [ "$NATIVE_PREP_NATIVE" = 0 ] && [ "$_rc" = 0 ]; then
+      echo "[native-agents] native 로 라우팅되는 역할이 없다 — 아무것도 쓰지 않았다"
+      exit 0
+    fi
+    echo "[native-agents] native 역할 ${NATIVE_PREP_NATIVE}개, 이번에 새로 쓰거나 고친 정의 ${NATIVE_PREP_WROTE}개"
+    if _started="$(native_claude_started_at)"; then
+      _unreg="$(native_definitions_unregistered "$_started")"
+      if [ -n "$_unreg" ]; then
+        echo "[ACTION] 이 명령을 실행한 Claude Code 세션(CLAUDE_PID $CLAUDE_PID, 시작 $(native_epoch_fmt "$_started"))은 다음 정의를 등록했다는 증거가 없다: $_unreg"
+        echo "         feature 를 실행하기 전에 Claude Code 세션을 다시 시작(같은 대화 재개)한다 — 러너는 그 전까지 native 요청을 만들지 않고 NATIVE_AGENT_RESTART_REQUIRED 로 멈춘다."
+      else
+        echo "[native-agents] 이 Claude Code 세션(CLAUDE_PID $CLAUDE_PID)은 모든 정의가 있을 때 시작됐다 — 재시작이 필요 없다"
+      fi
+    elif [ "$NATIVE_PREP_WROTE" != 0 ]; then
+      echo "[ACTION] 이 프로젝트에서 이미 열려 있는 Claude Code 세션은 방금 쓴 정의를 등록했다는 보장이 없다 — 그 세션은 다시 시작(같은 대화 재개)한 뒤 feature 를 실행한다. 아직 세션을 열지 않았다면 그대로 시작하면 된다."
+    fi
+    exit "$_rc"
+  fi
   native_standalone_project_root "$(cd "$_skill_dir/../../.." && pwd)" || exit 1
   # 스냅샷·세션 원장·산출물 경로($WORK_DIR 상대)는 현재 디렉터리 기준이다 — 정한 루트로 옮겨 PROJECT_ROOT 기준 경로와 같은 트리를 보게 한다.
   cd "$NATIVE_STANDALONE_ROOT" || { echo "[FAIL] 프로젝트 루트로 이동 실패: $NATIVE_STANDALONE_ROOT" >&2; exit 1; }
   # 설치 저장소 자신이면 로더의 기본값(종전 문자열)을 그대로 둔다. worktree 면 러너의 재바인딩과 같은 값(git toplevel)을 넘긴다. export 하지 않는다.
   # 명시한 FEATURE_PROJECT_ROOT 는 확정한 절대 경로로 바꿔 넘긴다(상대 경로는 cd 뒤에 뜻이 달라진다).
   if [ "$NATIVE_STANDALONE_ROOT_EXPLICIT" = 1 ] || [ "$(pwd -P)" != "$(cd "$_skill_dir/../../.." && pwd -P)" ]; then FEATURE_PROJECT_ROOT="$NATIVE_STANDALONE_ROOT"; fi
+  FEATURE_CONFIG_QUERY_ONLY_PID=""   # redispatch·discard 는 요청 상태를 바꾼다 — 설정 가드의 예외 대상이 아니다(환경·BASH_ENV 로 들어온 표식을 덮어쓴다)
   source "$_skill_dir/scripts/lib/bootstrap.sh"
   native_pending_present || { echo "[FAIL] pending native 요청이 없다: $(native_pending_file) (프로젝트 루트 $PROJECT_ROOT — 다른 worktree 의 요청이면 그 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)" >&2; exit 1; }
   [ "$(native_pending_field '.request_id')" = "$2" ] || { echo "[FAIL] 요청 ID 불일치: 프로젝트 루트 $PROJECT_ROOT 의 pending 요청은 $(native_pending_field '.request_id') 다 — '$2' 가 아니다(다른 worktree 의 요청을 찾아 처리하지 않는다)" >&2; exit 1; }

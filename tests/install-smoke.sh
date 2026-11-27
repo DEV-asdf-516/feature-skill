@@ -69,6 +69,18 @@ bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
 [ -f "$TARGET/.claude/hooks/core_rules.md" ] || fail "신규 설치: core_rules.md 누락"
 jq -e '.hooks.UserPromptSubmit and .hooks.PreToolUse' "$TARGET/.claude/settings.json" >/dev/null \
   || fail "신규 설치: settings.json hooks 누락"
+# native agent 정의: 템플릿이 CLAUDE_BACKEND="native" 면 claude* 모델 역할의 정의를 설치 때 만든다(세션을 열기 전에 있어야 그 세션이 등록한다).
+# TEST_CMD/LINT_CMD 가 CHANGE_ME 인 설치 직후에도 만든다. codex 모델 역할의 정의는 만들지 않는다.
+if grep -q '^CLAUDE_BACKEND="native"' "$SOURCE_ROOT/.claude/skills/feature/config.sh"; then
+  for agent_pair in DESIGN_REVISION_MODEL:designer VALIDATOR_MODEL:validator WORKER_MODEL:worker REVIEWER_MODEL:reviewer FIXER_MODEL:fixer; do
+    agent_model="$(sed -n "s/^${agent_pair%%:*}=\"\([^\"]*\)\".*/\1/p" "$SOURCE_ROOT/.claude/skills/feature/config.sh")"; agent_def="$TARGET/.claude/agents/feature-${agent_pair#*:}.md"
+    case "$agent_model" in
+      claude*) grep -q 'managed-by: feature-skill native-agent' "$agent_def" 2>/dev/null && grep -q "^model: $agent_model\$" "$agent_def" \
+                 || fail "신규 설치: native 역할 ${agent_pair#*:} 의 agent 정의를 만들지 않음($agent_def)";;
+      *) [ ! -e "$agent_def" ] || fail "신규 설치: claude 모델이 아닌 역할 ${agent_pair#*:}($agent_model) 의 agent 정의를 만들었다";;
+    esac
+  done
+fi
 # 참조 문서(references/): SKILL.md 가 분기 직전에 읽으라고 가리키는 파일이 전부 설치돼야 한다.
 # 목록의 세 출처(SKILL.md 언급 / 소스 references/ 실제 파일 / 러너의 SKILL_REFERENCE_FILES)가 서로 같아야 한다 — 하나만 고치면 여기서 실패한다.
 SRC_SKILL="$SOURCE_ROOT/.claude/skills/feature"
@@ -102,6 +114,58 @@ echo "[OK] 1b. 신규 설치 — 설정 전용 config·런타임 모듈 전부·
 rerun_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET")"
 grep -q WARN <<< "$rerun_output" && fail "재실행: 변경 없는데 WARN 발생"
 echo "[OK] 2. 재실행 멱등성"
+
+# ---------- 2b. native Agent 정의 — backend 는 로더가 읽은 값으로 판정(설정 표기 무관)·대상 루트에서 실행·호출 쪽 경로/세션 변수 격리 ----------
+# 설치기는 config.sh 의 문자열을 보지 않고 prepare-agents 를 부른다. 따옴표·export·환경 변수 표현식·주석이 붙은 줄도 같은 판정이어야 한다.
+# 설치기는 다른 프로젝트의 Claude Code 세션에서 실행되기도 한다 — 그 세션의 경로 변수·CLAUDE_PID 가 대상 프로젝트의 판정에 섞이면 안 된다.
+cp "$TARGET_SKILL/config.sh" "$SCRATCH/config.before-native-defs"
+native_defs_had_new=0; [ ! -f "$TARGET_SKILL/config.sh.new" ] || native_defs_had_new=1
+expected_native_defs="$(for m in DESIGN_REVISION_MODEL VALIDATOR_MODEL WORKER_MODEL REVIEWER_MODEL FIXER_MODEL; do sed -n "s/^$m=\"\([^\"]*\)\".*/\1/p" "$SRC_SKILL/config.sh"; done | grep -c '^claude' || true)"
+[ "$expected_native_defs" -gt 0 ] || fail "2b: 소스 템플릿에 claude 모델 역할이 없어 검사할 수 없음"
+native_defs_count() { find "$1" -maxdepth 1 -name 'feature-*.md' 2>/dev/null | wc -l | tr -d ' '; }
+NATIVE_DEFS_LOG="$SCRATCH/native-defs.log"
+NATIVE_DEFS_CWD="$SCRATCH"   # 설치기는 대상 밖에서 부른다 — 대상 루트에서 실행하는지를 cwd 에 기대는 설정으로 본다
+install_with_backend_line() { # line(빈 값 = 줄 없음)
+  if [ -n "$1" ]; then awk -v l="$1" '/^CLAUDE_BACKEND=/{print l; next} {print}' "$SRC_SKILL/config.sh" > "$TARGET_SKILL/config.sh"
+  else grep -v '^CLAUDE_BACKEND=' "$SRC_SKILL/config.sh" > "$TARGET_SKILL/config.sh"; fi
+  rm -rf "$TARGET/.claude/agents"
+  (cd "$NATIVE_DEFS_CWD" && env -u SMOKE_NATIVE_BACKEND bash "$SOURCE_ROOT/install.sh" "$TARGET") > "$NATIVE_DEFS_LOG" 2>&1 || fail "2b: 설치 실패 [$1]: $(cat "$NATIVE_DEFS_LOG")"
+  ! grep -q 'effective CLAUDE_BACKEND' "$NATIVE_DEFS_LOG" || fail "2b: [$1] 판정용 줄을 사용자 출력에 그대로 옮김"
+}
+for backend_line in "CLAUDE_BACKEND='native'" 'CLAUDE_BACKEND="${SMOKE_NATIVE_BACKEND:-native}"' 'export CLAUDE_BACKEND=native' 'CLAUDE_BACKEND=native   # 주석'; do
+  install_with_backend_line "$backend_line"
+  [ "$(native_defs_count "$TARGET/.claude/agents")" = "$expected_native_defs" ] || fail "2b: [$backend_line] 에서 native Agent 정의 ${expected_native_defs}개를 만들지 않음: $(cat "$NATIVE_DEFS_LOG")"
+  ! grep -q 'CLAUDE_BACKEND 가 설정되지 않았습니다' "$NATIVE_DEFS_LOG" || fail "2b: [$backend_line] 인데 CLAUDE_BACKEND 미설정(legacy_cli) 안내를 냄"
+  ! grep -q '^\[WARN\] native Agent' "$NATIVE_DEFS_LOG" || fail "2b: [$backend_line] 에서 정의 대조 경고: $(cat "$NATIVE_DEFS_LOG")"
+done
+# 설정이 cwd 상대 경로를 읽으면 대상 루트에서 실행해야 같은 값이 나온다(러너는 대상 루트에서 돈다)
+printf 'native\n' > "$TARGET/.smoke-native-backend"
+install_with_backend_line 'CLAUDE_BACKEND="$(cat .smoke-native-backend 2>/dev/null || echo legacy_cli)"'
+[ "$(native_defs_count "$TARGET/.claude/agents")" = "$expected_native_defs" ] || fail "2b: prepare-agents 를 대상 루트가 아닌 곳에서 실행함(cwd 상대 설정이 legacy 로 읽힘): $(cat "$NATIVE_DEFS_LOG")"
+rm -f "$TARGET/.smoke-native-backend"
+# native 가 아닌 설정: 정의를 쓰지 않고, legacy_cli 를 적었으면 '미설정' 안내를 내지 않는다. 줄이 없으면 종전 의미(legacy_cli) 안내를 낸다
+install_with_backend_line 'CLAUDE_BACKEND="legacy_cli"'
+[ "$(native_defs_count "$TARGET/.claude/agents")" = 0 ] && grep -q 'native 로 라우팅되는 역할이 없다 — 아무것도 쓰지 않았다' "$NATIVE_DEFS_LOG" \
+  || fail "2b: legacy_cli 에서 정의를 썼거나 판정 결과를 알리지 않음: $(cat "$NATIVE_DEFS_LOG")"
+! grep -q 'CLAUDE_BACKEND 가 설정되지 않았습니다' "$NATIVE_DEFS_LOG" && ! grep -q '^\[WARN\] native Agent' "$NATIVE_DEFS_LOG" \
+  || fail "2b: legacy_cli 를 적었는데 미설정 안내·정의 대조 경고를 냄: $(cat "$NATIVE_DEFS_LOG")"
+install_with_backend_line ''
+[ "$(native_defs_count "$TARGET/.claude/agents")" = 0 ] && grep -q 'CLAUDE_BACKEND 가 설정되지 않았습니다 — 종전대로' "$NATIVE_DEFS_LOG" \
+  || fail "2b: CLAUDE_BACKEND 줄이 없는 설정에서 정의를 썼거나 legacy_cli 안내가 없음: $(cat "$NATIVE_DEFS_LOG")"
+# 호출 쪽 변수 격리: 다른 프로젝트(미끼)를 가리키는 경로 변수·살아 있는 CLAUDE_PID 를 둔 채, 미끼 프로젝트 안에서 설치기를 부른다
+cp "$SCRATCH/config.before-native-defs" "$TARGET_SKILL/config.sh"
+rm -rf "$TARGET/.claude/agents"
+NATIVE_DECOY="$SCRATCH/decoy-project"; git init -q "$NATIVE_DECOY"; mkdir -p "$NATIVE_DECOY/.claude/agents"
+(cd "$NATIVE_DECOY" && FEATURE_PROJECT_ROOT="$NATIVE_DECOY" FEATURE_ORIGIN_ROOT="$NATIVE_DECOY" FEATURE_NATIVE_AGENTS_DIR="$NATIVE_DECOY/.claude/agents" \
+  CLAUDE_PID="$$" CLAUDE_PROJECT_DIR="$NATIVE_DECOY" bash "$SOURCE_ROOT/install.sh" "$TARGET") > "$NATIVE_DEFS_LOG" 2>&1 || fail "2b: 미끼 환경 설치 실패: $(cat "$NATIVE_DEFS_LOG")"
+[ "$(native_defs_count "$TARGET/.claude/agents")" = "$expected_native_defs" ] && [ "$(native_defs_count "$NATIVE_DECOY/.claude/agents")" = 0 ] \
+  || fail "2b: 호출 쪽 경로 변수를 따라 다른 프로젝트에 정의를 썼거나 대상에 쓰지 않음: $(cat "$NATIVE_DEFS_LOG")"
+! grep -q '이 명령을 실행한 Claude Code 세션' "$NATIVE_DEFS_LOG" && ! grep -q '재시작이 필요 없다' "$NATIVE_DEFS_LOG" \
+  || fail "2b: 설치기를 부른 다른 세션(CLAUDE_PID)의 재시작 판정이 섞임: $(cat "$NATIVE_DEFS_LOG")"
+grep -q '\[ACTION\] 이 프로젝트에서 이미 열려 있는 Claude Code 세션은' "$NATIVE_DEFS_LOG" || fail "2b: 정의를 새로 썼는데 대상 프로젝트 세션의 재시작 안내가 없음: $(cat "$NATIVE_DEFS_LOG")"
+cp "$SCRATCH/config.before-native-defs" "$TARGET_SKILL/config.sh"
+[ "$native_defs_had_new" = 1 ] || rm -f "$TARGET_SKILL/config.sh.new"
+echo "[OK] 2b. native Agent 정의 — 설정 표기 4종·cwd 상대 설정은 같은 판정, legacy_cli/줄 없음은 무기록, 호출 쪽 경로 변수·CLAUDE_PID 격리"
 
 # ---------- 3. 사용자 수정 보존 (+ .new 생성) ----------
 sed -i.sedbak 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"

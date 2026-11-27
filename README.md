@@ -20,6 +20,7 @@ Claude Code용 다중 에이전트 합의 파이프라인 스킬.
 - 현재 상태(2026-11-23): 다섯 역할 모두 native 인계가 연결돼 있고 mock 스모크 세 개를 통과한다 — `tests/smoke-native-bridge.sh`(브리지·훅 계약), `tests/smoke-native-worker.sh`(워커: unit 직렬·test-fix·verify worker-fix·세대 교체·결과 불확실), `tests/smoke-native-pipeline.sh`(설정은 다섯 역할 전부 native 지만 이 종단 시나리오가 실제로 호출하는 역할은 검증자·워커·리뷰어·수정자 넷이다 — 검증자가 PASS 하므로 디자이너 호출이 없다: 합의 → 워커 → check-fix → 리뷰어 → 수정자 → 종결 리뷰 → DONE, 리뷰 출력 계약 위반, 리뷰어 DOC_GAP → review-gap 워커, 수정자 실행 중 계약 문서·리뷰 JSON 변경과 `decisions.md` 기존 내용 변경·권한 밖 기록 추가의 불수용. native 디자이너는 `smoke-native-bridge.sh` 의 합의 루프 사례(BLOCK → 디자이너 → PASS)가 검증한다 — 다섯 역할을 한 번에 도는 단일 종단 사례는 없다). 기본값은 `native` 다(2026-11-23 전환). `claude -p` 어댑터를 검증하는 기존 스모크는 `CLAUDE_BACKEND="legacy_cli"` 를 명시해 고정한다. 이미 설치된 프로젝트의 `config.sh` 는 install 이 덮어쓰지 않으므로 그쪽 값이 그대로 유지된다(`CLAUDE_BACKEND` 줄이 없으면 `legacy_cli`).
 - **실모델 검증 범위**(Claude Code 2.1.330, 2026-11-23): 디자이너·워커·리뷰어·수정자의 신규 `Agent` 호출과 `SendMessage` 재개가 Shell 수용까지 확인됐다 — PreToolUse `updatedInput` 적용(프롬프트 해시 일치), agent 정의의 full model ID·effort 적용, 같은 agent id·대화 문맥 유지, 세션 cwd 밖 worktree 읽기·쓰기, SubagentStop 캡처. 검증자·리뷰어를 codex 로 둔 혼합 구성의 작은 피처 종단(DONE)도 확인됐다. 실모델 미검증: 검증자 native, 워커의 test-fix·check-fix·review-gap·verify worker-fix 호출 지점, 세대 교체, `--feature` worktree 모드, 다섯 역할 전부 Claude 인 종단, 그리고 PostToolUse 실행 확인(`DISPATCHING → DISPATCHED`)의 실제 페이로드(mock 과 기존 전사 대조만 했다). 관측된 주의점: `.claude/agents/` 디렉터리가 세션 시작 때 없었으면 세션 재시작이 필요하고, SubagentStop 이 보고 레코드가 전사에 쓰이기 전에 발화할 수 있어 훅이 잠깐 기다리며 다시 읽는다(끝까지 없으면 `NO_REPORT` — 성공으로 받지 않는다).
 - dispatch 상태는 `PREPARED → DISPATCHING → DISPATCHED → RESULT_READY → CONSUMED` 다. PreToolUse 는 시도만 기록하고(`DISPATCHING`), 같은 `tool_use_id` 의 PostToolUse 가 실행 성공을 확인해야 `DISPATCHED` 가 된다. 다른 PreToolUse 훅이 호출을 거부하면 러너가 메인 전사에서 거부를 확인해 `NATIVE_DISPATCH_DENIED`(NEED_USER)로 올린다 — 재시도는 사용자 결정 뒤 `native-agent-bridge.sh redispatch <request_id>`(같은 요청), 정리는 `discard`. 실행 여부가 불명인 요청은 자동으로 다시 보내지 않는다.
+- agent 정의(`.claude/agents/feature-<역할>.md`)는 역할을 처음 부를 때가 아니라 미리 만든다. `install.sh` 가 설치 때 native 로 라우팅되는 역할 전부의 정의를 쓴다. `config.sh` 의 모델·effort 를 바꿨으면 Claude Code 세션을 열기 전에 `bash .claude/skills/feature/scripts/native-agent-bridge.sh prepare-agents` 를 실행한다. 러너는 피처 시작(유료 호출 전)과 요청 발행 직전에 정의를 다시 대조한다. 정의가 메인 Claude Code 프로세스(`CLAUDE_PID`)보다 나중에 쓰였으면 요청을 만들지 않고 `NEED_USER` `NATIVE_AGENT_RESTART_REQUIRED` 로 멈춘다. 그때는 세션을 다시 시작(같은 대화 재개)한 뒤 같은 명령을 재실행한다. 세션 도중 만든 정의로 dispatch 하면 `Agent type … not found` 로 돌아오고, 그 요청은 `DISPATCHING`(실행 여부 불명, `discard` 로만 정리)에 갇힌다. 이 판정은 수정 시각을 대조하는 대리 증거이고, Claude Code 의 등록 동작 자체는 검증하지 않았다.
 - 진행 중인 피처의 세션은 backend 를 바꿔도 자동으로 옮겨 가지 않는다(`SESSION_CLI_MISMATCH`). 절차와 중단 코드는 `.claude/skills/feature/references/native-agent.md`.
 
 **Codex 모델의 실행 backend (`config.sh` `CODEX_BACKEND`).** `gpt-*`/`o*`/`codex*` 모델을 무엇으로 실행할지도 역할이 아니라 이 설정 하나가 정한다.
@@ -300,6 +301,9 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    RISK_VERIFY_CMD=""                     # (선택) 리뷰 승인 뒤 TEST_CMD 앞에서 도는 위험도별 추가 검증 명령 — 아래 "검증 게이트"
    CHECK_GUIDE_FILE=""                    # (선택) 프로젝트가 쓴 검사 규칙 안내 문서의 worktree 상대 경로 — 아래 "검사 계획 사전 전달"
    ```
+   `CLAUDE_BACKEND="native"` 면 `install.sh` 가 이 값으로 `.claude/agents/feature-<역할>.md` 를 이미 만들어 둔다(`[OK] native Agent 정의 준비`). 모델·effort 를 바꿨으면
+   이 프로젝트에서 Claude Code 세션을 열기 전에 `bash .claude/skills/feature/scripts/native-agent-bridge.sh prepare-agents` 로 정의를 다시 맞춘다. 이미 열려 있는 세션은 재시작한다.
+   이 순서를 건너뛰면 러너가 첫 모델 호출 전에 `NATIVE_AGENT_RESTART_REQUIRED` 로 멈추고 재시작을 요구한다.
    `config.sh` 는 사용자 설정 전용이다 — 런타임(헬퍼·계약/포맷 버전 상수·경로 초기화·설정 가드)은 `scripts/lib/` 에 있고 `scripts/lib/bootstrap.sh` 가 이 파일을 읽는다.
    그래서 런타임·버전 상수만 바뀐 업데이트는 `config.sh` 병합이 필요 없다. 기존 `config.sh` 는 보존되고, 소스 템플릿과 다르면 `config.sh.new` 가 새 선택 설정의 설명·기본값 참고용으로 놓인다(`[INFO]`, 수동 단계 아님).
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
@@ -612,6 +616,7 @@ bash tests/smoke-worker-regression.sh     # worker-regression 하네스: 가짜 
 bash tests/smoke-fast-check.sh            # 프로젝트 빠른 검사 연결: 미설정 생략·첫 검사/수정자 뒤 위반 시 리뷰어 0회·수정→재검사→리뷰→TEST→LINT·한도 소진·실행 오류·타임아웃·읽기 전용 위반·worktree 실행·승인 오용 방지·혼합 설치·한글 경로·TERM 무시 자식 정리·수정 턴 중단 뒤 재실행·미결정 복구·확정 멱등. LLM 호출 없음
 bash tests/smoke-verification-gates.sh    # 검증 게이트: Unit 정적 검사·위험도별 추가 검증·DONE 사후 분석 보고서, mock LLM 호출 수 비교 출력. LLM 호출 없음
 bash tests/smoke-check-plan.sh            # 검사 계획 사전 전달·검사 진단 요약: 미설정 무변화, 워커 첫 턴 전 안내, 안내 문서 경로 검증, 10,000줄 로그 요약, 판정은 종료 코드. LLM 호출 없음
+bash tests/smoke-native-agent-definitions.sh # native agent 정의 사전 준비(prepare-agents·설치)·등록 증거 게이트(NATIVE_AGENT_RESTART_REQUIRED — 요청 발행 전·유료 호출 전, PREPARED 만 확인(합의 루프 단독 실행 포함)·DISPATCHING 이후 불간섭). LLM 호출 없음
 bash tests/smoke-cli-exit-mismatch.sh     # 편집 역할이 변경을 만든 뒤 non-zero 로 끝나도 같은 편집을 반복하지 않음(WORKER_OUTCOME_UNCERTAIN·검증자/리뷰어 게이트). LLM 호출 없음
 bash tests/smoke-ntfy-notify.sh           # DONE 완료 ntfy 푸시 알림: 발송 1회·본문·타임아웃·미설정/HTTP 실패 무해·중복 방지·토큰 미노출·OS 분기 없음. LLM/실제 HTTP 호출 없음
 bash tests/smoke-codex-app-server.sh      # Codex App Server backend: 가짜 App Server 프로세스로 핸드셰이크·신규/재개·스키마·역할 정책(agents.enabled 누출 없음)·크래시 재개(추가 turn 0회)·완료 분기·backend 변경·격리·설치·사용량(누적값 차이·unknown). LLM 호출 없음

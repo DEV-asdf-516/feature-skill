@@ -377,7 +377,12 @@ stop_native_required() {
 }
 # 브리지가 이 프로세스 안에서 요청을 발행·거부했을 때 부르는 콜백(하위 루프에는 정의되지 않는다 — 그쪽은 종료 코드로 올라온다).
 native_on_required() { NATIVE_DISPATCH_PRINTED=1; stop_native_required; }
-native_on_rejected() { stop_need_user NATIVE_RESULT_REJECTED "native Agent 결과 불수용 — $1: $2. 자동 재호출·자동 원복·자동 fresh 없음. 요청·캡처: $WORK_DIR/native-agent/ (pending.json, requests/, results/). 그대로 재실행하면 모델 호출 0회로 같은 사유로 멈춘다"; }
+# NATIVE_AGENT_RESTART_REQUIRED 는 결과 불수용이 아니다 — 요청을 만들기 전(또는 PREPARED 요청을 dispatch 하기 전)에 agent 정의의 등록 증거가 없어 멈춘 것이다.
+# 같은 43 경로로 올라오지만 사유 코드를 그대로 NEED_USER 의 reason 으로 쓴다(세션 재시작 뒤 같은 명령을 재실행하면 진행한다).
+native_on_rejected() {
+  [ "$1" != NATIVE_AGENT_RESTART_REQUIRED ] || stop_need_user NATIVE_AGENT_RESTART_REQUIRED "$2"
+  stop_need_user NATIVE_RESULT_REJECTED "native Agent 결과 불수용 — $1: $2. 자동 재호출·자동 원복·자동 fresh 없음. 요청·캡처: $WORK_DIR/native-agent/ (pending.json, requests/, results/). 그대로 재실행하면 모델 호출 0회로 같은 사유로 멈춘다"
+}
 # 하위 루프의 종료 코드 42/43 을 그대로 올린다(모든 stage 의 case 가 먼저 부른다).
 native_propagate_rc() { # rc
   case "$1" in
@@ -526,6 +531,9 @@ done
 [ -f "$SKILL_DIR/scripts/fast-check.sh" ] || env_error "스크립트 없음: fast-check.sh (프로젝트 빠른 검사 연결) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 source "$SKILL_DIR/scripts/fast-check.sh"
 [ -f "$SKILL_DIR/scripts/native-agent-bridge.sh" ] || env_error "스크립트 없음: native-agent-bridge.sh (native Agent 인계) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
+# agent 정의 일괄 준비·등록 증거 게이트(아래 재개 지점 결정 뒤에 부른다). 옛 브리지면 정의 충돌로 오인되는 실패가 아니라 혼합 설치로 멈춘다.
+declare -F native_definitions_preflight native_definition_gate >/dev/null \
+  || env_error "scripts/native-agent-bridge.sh 에 native_definitions_preflight/native_definition_gate 가 없다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
 # Codex App Server backend 런타임(연결부 + Node 런타임). 한쪽만 있거나 없으면 혼합 설치다 — Codex 역할을 codex exec 로 조용히 돌리지 않고 여기서 멈춘다.
 for f in codex-app-server.sh codex-app-server.mjs; do
   [ -f "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음: $f (Codex App Server backend) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라"
@@ -820,6 +828,13 @@ if [ "$STAGE" = verify ] && fast_check_configured; then
   log "프로젝트 빠른 검사 설정됨 — verify 로 바로 가지 않고 review 를 지난다(승인 재사용 전 검사 재실행, 승인이 유효하면 리뷰어 호출 없음)"; STAGE=review
 fi
 log "시작 stage: $STAGE (test_retries=$TEST_RETRIES, fast_check_retries=$FAST_CHECK_RETRIES)"
+
+# ---------- native Agent 정의 사전 준비 (첫 모델 호출 전) ----------
+# 역할을 처음 부르는 순간에 정의를 만들면, 세션 시작 때 없던 정의로 dispatch 해 'Agent type … not found' → DISPATCHING(실행 여부 불명)에 갇힌다.
+# 그래서 native 로 라우팅되는 역할 전부의 정의를 여기서 한 번에 맞춰 쓰고, 이 Claude Code 프로세스(CLAUDE_PID)가 등록했다는 증거가 없으면
+# Codex 검증자 같은 유료 호출보다 먼저 NEED_USER NATIVE_AGENT_RESTART_REQUIRED 로 멈춘다(scripts/native-agent-bridge.sh 의 native_definitions_preflight).
+# 처리되지 않은 native 요청이 DISPATCHING 이후 상태면 건드리지 않는다. 요청 발행 직전의 같은 확인(native_definition_gate)은 그대로 남는다.
+native_definitions_preflight || env_error "native Agent 정의를 준비하지 못했다(위 [FAIL] — 관리 표식 없는 같은 이름의 파일·템플릿 누락 등). 모델 호출 0회"
 
 # ---------- 워커 호출 ----------
 # run_worker 는 scripts/worker-invoke.sh 에 있다(본문 그대로 분리 — tests/worker-regression.sh 가 같은 경로로 production 워커 1회를 호출한다).

@@ -24,6 +24,8 @@ trap 'rm -rf "$TMP"' EXIT
 command -v node >/dev/null 2>&1 || fail "node 가 없다 — Codex App Server backend 스모크는 Node.js 18+ 가 필요하다"
 unset CODEX_APP_GUARD_REVIEWED_SHA256   # 사용자 환경에 등록된 가드 지문이 사례(배포본 지문 하나만 통과)를 흐리지 않게 한다
 unset CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_EFFORT_LEVEL NTFY_TOPIC WORKER_SESSION_ROTATE_INPUT_TOKENS FAKE_SCENARIO FAKE_APP_EDIT_CMD
+# 메인 Claude Code 프로세스 pid — 이 세션 안에서 돌리면 물려받는다. 남겨 두면 방금 만든 임시 agent 정의가 그 프로세스보다 새것이라 러너의 등록 증거 게이트(NATIVE_AGENT_RESTART_REQUIRED)가 멈춘다. 그 게이트는 tests/smoke-native-agent-definitions.sh 가 본다
+unset CLAUDE_PID
 export CLAUDE_CODE_SESSION_ID="sess-main" FEATURE_LIVE_TEE=1
 
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"

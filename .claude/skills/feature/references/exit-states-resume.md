@@ -281,11 +281,18 @@ WAITING_USER 동안은 모델을 부르지 않으며, 프로세스가 워커 직
 러너도 verify 로 바로 들어가기 전에 같은 조건(`impl_approval_current`: 체크포인트 APPROVE + 계약·포맷 버전 + 트리 지문 + `approved.fingerprint` 일치 + 실제 APPROVE 리뷰)을 확인하고, 아니면 review 부터 다시 간다. `DEADLOCK`/`MAX_ROUNDS`/`DOC_GAP` 종료 시 체크포인트는 초기화되어 다음 재진입은 새 attempt 의 Round 1 이다(리뷰어 DOC_GAP 은 `doc-gap-resume.json`
 에 리뷰 경로·attempt/round·source tree 를 따로 남긴다).
 
+### `NATIVE_AGENT_RESTART_REQUIRED` — agent 정의를 이 세션이 등록했다는 증거가 없다
+
+`CLAUDE_BACKEND=native` 에서 러너가 native 역할의 agent 정의(`.claude/agents/feature-<역할>.md`)를 이번 실행에 썼거나, 그 정의가 메인 Claude Code 프로세스(`CLAUDE_PID`)보다 나중에 쓰였다. 러너는 요청을 만들지 않고 멈췄다. 피처 시작 때의 확인은 Codex 검증자 같은 유료 호출보다 먼저 한다. 모델 호출은 0회이고, dispatch 할 것도 없다. `PREPARED` 요청이 남아 있으면 그 요청은 그대로 둔다. 합의·리뷰 루프를 단독으로 실행했을 때는 같은 사유가 `NEED_USER` 가 아니라 exit 43 과 `[STOP] NATIVE_AGENT_RESTART_REQUIRED` 줄로 온다. 대응은 같다. detail 이 "정의 파일이 없다" 또는 "내용이 요청 발행 때와 다르다" 면 재시작 전에 정의 복구가 먼저다. 사용자 결정 뒤 요청 발행 때 설정으로 `prepare-agents` 를 실행하거나, 설정 변경이 의도였다면 `discard` 한다(`references/native-agent.md`).
+
+- detail 의 정의 목록을 사용자에게 보여 주고 **Claude Code 세션 재시작(같은 대화 재개)** 을 요청한다. 재시작한 세션에서 같은 명령을 재실행한다. 재시작 없이 다시 돌리면 같은 사유로 멈춘다.
+- 정의 파일을 손으로 고치거나 수정 시각을 바꾸지 않는다. 다른 Agent·`claude -p`·backend 변경으로 대체하지도 않는다. 예방과 판정 근거는 `references/native-agent.md` 의 "agent 정의 사전 준비" 가 기준이다.
+
 ### `NATIVE_RESULT_REJECTED` — native Agent 결과 불수용
 
 `CLAUDE_BACKEND=native` 에서 캡처된 Agent 결과(또는 남아 있는 pending 요청)가 현재 요청과 결속되지 않았다. 러너는 결과를 수용하지 않았고 자동 재호출·자동 원복·자동 fresh 도 하지 않았다 — 그대로 재실행하면 모델 호출 0회로 같은 사유가 나온다.
 
 - detail 의 코드(`NATIVE_MODEL_MISMATCH`·`NATIVE_PROMPT_HASH_MISMATCH`·`NATIVE_STALE_REQUEST`·`NATIVE_READONLY_VIOLATION`·`NATIVE_WORKTREE_CONFUSION`·`NATIVE_PENDING_MISMATCH` 등)를 그대로 사용자에게 보고하고 멈춘다. 코드별 의미와 복구(`native-agent-bridge.sh discard <request_id>` — 사용자 승인 뒤, 작업 트리가 호출 전 상태일 때만)는 `references/native-agent.md` 가 기준이다.
 - `NATIVE_DISPATCH_DENIED` 는 결과가 아니라 **dispatch 자체가 실행 전에 거부된** 경우다(다른 PreToolUse 훅·권한 규칙·사용자 거절 — Agent 미실행, 요청 state 는 `DISPATCHING` 그대로). 거부 사유를 그대로 보고하고 멈춘다. 거부한 훅을 끄거나 모델·Agent 를 바꿔 다시 보내지 않는다. 사용자가 원인을 해소한 뒤에만 `native-agent-bridge.sh redispatch <request_id>` 로 같은 요청을 되돌리고, 아니면 `discard` 한다.
-- `Agent type '…' not found`(Agent 정의 미발견)로 돌아온 dispatch 는 `NATIVE_DISPATCH_DENIED` 가 아니다. 요청이 `DISPATCHING` 이면 러너는 거부 종류가 함께 있어도 실행 여부 불명(`UNKNOWN`)으로 보고 exit 42 로 대기한다 — 세션을 재시작한 뒤에도 다시 dispatch 하지 않고, `redispatch` 는 거절된다. 사용자와 실행 여부를 확인한 뒤 `discard` 로만 정리한다. 요청이 `PREPARED` 그대로면 세션 재시작 뒤 그 dispatch 를 한 번 보낸다(`references/native-agent.md`).
+- `Agent type '…' not found`(Agent 정의 미발견)로 돌아온 dispatch 는 `NATIVE_DISPATCH_DENIED` 가 아니다. 요청이 `DISPATCHING` 이면 러너는 거부 종류가 함께 있어도 실행 여부 불명(`UNKNOWN`)으로 보고 exit 42 로 대기한다 — 세션을 재시작한 뒤에도 다시 dispatch 하지 않고, `redispatch` 는 거절된다. 사용자와 실행 여부를 확인한 뒤 `discard` 로만 정리하고, 세션을 다시 시작한 다음 재실행한다. 요청이 `PREPARED` 그대로면 세션 재시작 뒤 그 dispatch 를 한 번 보낸다(`references/native-agent.md`). `CLAUDE_PID` 를 볼 수 있는 러너는 등록 증거가 없는 정의로 요청을 만들지 않는다(위 `NATIVE_AGENT_RESTART_REQUIRED`).
 - 결과를 직접 다시 쓰거나, 요청·캡처·세션 원장(`.agent-work/native-agent/`, `.session-*.native.json`)을 손으로 고쳐 진행시키지 않는다. exit 42 `NATIVE_AGENT_REQUIRED` 는 이 절이 아니라 `references/native-agent.md` 의 반복 절차를 따른다.

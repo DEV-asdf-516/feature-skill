@@ -21,6 +21,8 @@ fail() { echo "[SMOKE FAIL] $*" >&2; exit 1; }
 pass() { echo "[SMOKE PASS] $*"; }
 trap 'rm -rf "$TMP"' EXIT
 unset CLAUDE_CODE_SUBAGENT_MODEL_FORCE CLAUDE_CODE_EFFORT_LEVEL NTFY_TOPIC
+# 메인 Claude Code 프로세스 pid — 이 세션 안에서 돌리면 물려받는다. 남겨 두면 방금 만든 임시 agent 정의가 그 프로세스보다 새것이라 러너의 등록 증거 게이트(NATIVE_AGENT_RESTART_REQUIRED)가 멈춘다. 그 게이트는 tests/smoke-native-agent-definitions.sh 가 본다
+unset CLAUDE_PID
 export CLAUDE_CODE_SESSION_ID="sess-main"
 
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
@@ -847,8 +849,10 @@ reset_native; : > "$CLI_LOG"; : > "$MAIN_TR"
 mv .claude/agents/feature-validator.md "$TMP/s3.def.moved" || fail "S3: 정의 파일 준비 실패"   # 이번 요청이 정의를 새로 쓰게 한다
 role_ro VALIDATOR "validator-design-23-a" "design-validator-round-23" "$TMP/s3.json"; [ "$RC" = 42 ] || fail "S3: 요청 발행 실패"
 ids3="$(req_get '.request_id')"
-# PREPARED 안내: 정의를 이번 실행이 새로 썼다 — 무조건 재전송 문장이 없고 state 별 안내가 있다
-grep -q 'agent 정의 파일' "$TMP/last.log" && grep -q 'state 가 PREPARED 그대로일 때만' "$TMP/last.log" && grep -q 'state 가 DISPATCHING 이면 실행 여부 불명' "$TMP/last.log" \
+# PREPARED 안내: 정의를 이번 실행이 새로 썼다(CLAUDE_PID 없음 — 등록 증거 게이트가 판정하지 않은 경로) — 무조건 재전송 문장이 없고 state 별 안내가 있다:
+# dispatch 전이면 재시작 뒤 그 요청을 한 번(PREPARED 유지), not found 로 이미 돌아왔으면 DISPATCHING(실행 여부 불명) — 다시 보내지 않는다
+grep -q 'agent 정의 파일' "$TMP/last.log" && grep -q '러너가 메인 Claude Code 프로세스(CLAUDE_PID)를 확인하지 못해' "$TMP/last.log" \
+  && grep -q '요청은 PREPARED 그대로 남고, 재시작한 세션에서 이 dispatch 를 한 번 보낸다' "$TMP/last.log" && grep -q '(DISPATCHING) 실행 여부 불명으로 남는다 — 세션을 재시작한 뒤에도 다시 보내지 않고' "$TMP/last.log" \
   || { cat "$TMP/last.log"; fail "S3: PREPARED 안내에 state 별 not found 복구 안내가 없음"; }
 grep -q '같은 dispatch 를 다시 보낸다' "$TMP/last.log" && fail "S3: 런타임 출력에 무조건 재전송 안내가 남아 있음"
 grep -q '같은 dispatch 를 다시 보낸다' .claude/skills/feature/references/native-agent.md && fail "S3: references/native-agent.md 에 무조건 재전송 안내가 남아 있음"

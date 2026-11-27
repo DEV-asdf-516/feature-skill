@@ -218,8 +218,11 @@ else
 fi
 
 # ---------- 3.5 native Agent 정의 (.claude/agents/feature-<역할>.md) ----------
-# 정의 파일은 설치 때 만들지 않는다 — model·effort 가 config.sh 값이어야 하므로 러너가 매 요청 직전에 렌더링·대조해 쓴다(관리 표식이 있는 파일만 갱신).
-# 같은 이름의 사용자 파일(관리 표식 없음)이 이미 있으면 러너가 덮어쓰지 않고 멈추므로 여기서 미리 알린다.
+# 정의 파일은 설치 때 config.sh 의 model·effort 로 미리 만든다(native 로 라우팅되는 역할 전부 — 관리 표식이 있는 파일만 갱신).
+# Claude Code 는 세션을 시작할 때 .claude/agents/ 를 읽는다. 역할을 처음 부르는 순간에 만든 정의는 이미 떠 있는 세션이 등록하지 못해
+# 'Agent type … not found' 로 돌아올 수 있고, 그 dispatch 는 실행 여부 불명(DISPATCHING)으로 남는다. 러너는 피처 실행 시작·요청 발행 직전에 같은 함수로
+# 다시 대조하고, 메인 세션이 그 정의를 등록했다는 증거가 없으면 요청을 만들지 않고 NATIVE_AGENT_RESTART_REQUIRED 로 멈춘다.
+# 같은 이름의 사용자 파일(관리 표식 없음)이 이미 있으면 덮어쓰지 않는다(러너도 멈춘다) — 여기서 미리 알린다.
 for agent_template in "$TARGET_SKILL_DIR"/agents/feature-*.md; do
   agent_target="$TARGET_ROOT/.claude/agents/$(basename "$agent_template")"
   if [ -f "$agent_target" ] && ! grep -q 'managed-by: feature-skill native-agent' "$agent_target"; then
@@ -227,8 +230,30 @@ for agent_template in "$TARGET_SKILL_DIR"/agents/feature-*.md; do
     manual_steps=1
   fi
 done
-if ! grep -q '^CLAUDE_BACKEND=' "$TARGET_SKILL_DIR/config.sh"; then
-  echo "[INFO] $TARGET_SKILL_DIR/config.sh 에 CLAUDE_BACKEND 줄이 없습니다 — 종전대로 claude 모델을 'claude -p' 로 실행합니다(legacy_cli). native Agent 로 바꾸려면 config.sh.new 의 'Claude 모델의 실행 backend' 블록을 옮겨 적으세요(진행 중인 피처가 없을 때)."
+# backend 는 설치기가 config.sh 의 문자열로 판정하지 않는다. 항상 prepare-agents 를 부르고, 그 명령이 로더로 config.sh 를 읽은 실제 값(따옴표·export·
+# 환경 변수 표현식을 평가한 결과)으로 역할마다 판정한다 — native 로 라우팅되는 역할이 없으면(legacy_cli 등) 아무것도 쓰지 않는다.
+# TEST_CMD/LINT_CMD 의 CHANGE_ME 는 막지 않는다(이 명령은 프로젝트 명령을 실행하지 않는다).
+# 대상 프로젝트 루트에서 실행하고, 이 설치기를 부른 쪽(다른 프로젝트의 Claude Code 세션 등)의 변수는 넘기지 않는다:
+#   FEATURE_PROJECT_ROOT·FEATURE_ORIGIN_ROOT·FEATURE_NATIVE_AGENTS_DIR(프로젝트 루트·정의 위치 재지정), FEATURE_CONFIG_QUERY_ONLY_PID(설정 가드 예외 표식 — prepare-agents 가 스스로 적는다),
+#   CLAUDE_PID·CLAUDE_PROJECT_DIR(다른 세션 — 그 세션 기준의 재시작 판정이 섞인다), BASH_ENV·ENV(비대화형 bash 의 시작 파일).
+# 실패해도 설치는 계속한다 — 원인을 고친 뒤 Claude Code 세션을 시작하기 전에 같은 명령을 직접 실행하면 된다.
+prepare_agents_cmd="cd $TARGET_ROOT && bash .claude/skills/feature/scripts/native-agent-bridge.sh prepare-agents"
+prepare_agents_ok=1
+prepare_agents_out="$(cd "$TARGET_ROOT" && env -u FEATURE_PROJECT_ROOT -u FEATURE_ORIGIN_ROOT -u FEATURE_NATIVE_AGENTS_DIR -u FEATURE_CONFIG_QUERY_ONLY_PID \
+  -u CLAUDE_PID -u CLAUDE_PROJECT_DIR -u BASH_ENV -u ENV bash "$TARGET_SKILL_DIR/scripts/native-agent-bridge.sh" prepare-agents 2>&1)" || prepare_agents_ok=0
+# prepare-agents 가 config.sh 를 읽은 뒤 적는 한 줄(빈 값 = 미설정 → legacy_cli). 이 줄이 없으면 config.sh 를 읽기 전에 실패한 것이다 — 값을 추측하지 않는다.
+effective_claude_backend_line="$(printf '%s\n' "$prepare_agents_out" | sed -n 's/^\[native-agents\] effective CLAUDE_BACKEND=/=/p')"
+prepare_agents_relay="$(printf '%s\n' "$prepare_agents_out" | grep -v -e '^\[native\] ' -e '^\[native-agents\] effective ' || true)"
+if [ "$prepare_agents_ok" = 1 ]; then
+  echo "[OK] native Agent 정의 대조(config.sh 를 로더로 읽은 값 기준): $TARGET_ROOT/.claude/agents/"
+  printf '%s\n' "$prepare_agents_relay" | sed 's/^/     /'
+else
+  echo "[WARN] native Agent 정의를 대조하지 못했습니다(config.sh 읽기·역할별 backend 판정 포함) — 아래 원인을 고친 뒤, 이 프로젝트에서 Claude Code 세션을 시작하기 전에 실행하세요: $prepare_agents_cmd"
+  printf '%s\n' "$prepare_agents_relay" | sed 's/^/       /'
+  manual_steps=1
+fi
+if [ "$effective_claude_backend_line" = "=" ]; then
+  echo "[INFO] $TARGET_SKILL_DIR/config.sh 를 읽은 결과 CLAUDE_BACKEND 가 설정되지 않았습니다 — 종전대로 claude 모델을 'claude -p' 로 실행합니다(legacy_cli). native Agent 로 바꾸려면 config.sh.new 의 'Claude 모델의 실행 backend' 블록을 옮겨 적으세요(진행 중인 피처가 없을 때)."
 fi
 # Codex 모델의 실행 backend: 보존된 기존 config.sh 에 CODEX_BACKEND 줄이 없으면 종전의 codex exec(legacy_exec)로 그대로 동작한다 — 설치가 backend 를 바꾸지 않는다.
 # 전환은 사용자가 그 줄을 직접 옮겨 적는 명시적 절차다(진행 중인 피처의 세션은 backend 를 바꿔도 옮겨 가지 않고 SESSION_BACKEND_MISMATCH 로 멈춘다).

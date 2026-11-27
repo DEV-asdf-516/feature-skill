@@ -4,6 +4,22 @@
 
 구현: `scripts/native-agent-bridge.sh`(요청·검증·수용), `.claude/hooks/feature_native_agent.sh`(dispatch 검증·프롬프트 주입·실행 확인·원문 캡처), `agents/feature-<역할>.md`(정의 템플릿).
 
+## agent 정의 사전 준비 — exit 2 `NEED_USER` `NATIVE_AGENT_RESTART_REQUIRED`
+
+Claude Code 는 세션을 시작할 때 `.claude/agents/` 의 정의를 읽는다. 세션 도중에 만들거나 고친 정의는 그 세션이 등록했다는 보장이 없다. 세션 시작 때 `.claude/agents/` 가 없던 프로젝트에서 러너가 정의를 처음 쓴 직후 dispatch 했더니 `Agent type 'feature-…' not found` 로 돌아온 사례가 있다. 그 호출은 PreToolUse 훅이 이미 `DISPATCHING` 으로 기록한 뒤라 실행 여부 불명으로 남고 `discard` 로만 정리된다. 디렉터리가 이미 있던 세션에서 새 정의를 감지하는지는 검증하지 않았다. 그래서 정의는 역할을 처음 부르는 순간이 아니라 미리 만든다.
+
+- **설치 때**: `install.sh` 가 `config.sh` 의 모델·effort 로 native 로 라우팅되는 역할 전부의 정의를 쓴다. 설치기는 `config.sh` 의 문자열로 backend 를 판정하지 않는다. 항상 `prepare-agents` 를 부르고, 그 명령이 로더로 읽은 실제 값(따옴표·`export`·환경 변수 표현식을 평가한 결과)으로 역할마다 판정한다. native 로 라우팅되는 역할이 없으면 아무것도 쓰지 않는다. 이 명령은 대상 프로젝트 루트에서 실행되고, 설치기를 부른 쪽의 `FEATURE_PROJECT_ROOT`·`FEATURE_ORIGIN_ROOT`·`FEATURE_NATIVE_AGENTS_DIR`·`CLAUDE_PID`·`CLAUDE_PROJECT_DIR`·`BASH_ENV` 는 넘겨받지 않는다(다른 프로젝트의 Claude Code 세션에서 설치해도 그 세션의 경로·재시작 판정이 섞이지 않는다). 관리 표식이 없는 같은 이름의 파일은 덮어쓰지 않는다.
+- **설정을 바꾼 뒤·세션을 열기 전에**: `bash .claude/skills/feature/scripts/native-agent-bridge.sh prepare-agents`. 이 명령은 정의 파일만 쓰고 요청·세션 원장·작업 트리는 건드리지 않는다. `TEST_CMD`/`LINT_CMD` 가 `CHANGE_ME` 여도 돈다. 이 명령을 Claude Code 세션 안에서 실행했는데 새로 쓴 정의가 있으면 `[ACTION]` 줄로 그 세션의 재시작을 알린다.
+- **러너의 확인**: 러너는 피처 실행의 첫 모델 호출 전(재개 stage 를 정한 뒤, Codex 검증자 같은 유료 호출보다 먼저)과 요청을 발행하기 직전에 같은 함수로 정의를 맞춰 쓰고 등록 증거를 본다. 증거는 대리 증거다. 정의 파일의 수정 시각이 메인 Claude Code 프로세스(`CLAUDE_PID`)의 시작보다 앞서야 한다. Shell 은 Agent 등록 목록을 볼 수 없다. 이번 실행이 정의를 썼거나, 정의가 그 프로세스보다 나중에 쓰였으면 **요청을 만들지 않고** `NATIVE_AGENT_RESTART_REQUIRED` 로 멈춘다. 처리되지 않은 요청이 `PREPARED` 면 그 요청의 정의만 보고, 요청은 `PREPARED` 그대로 둔다. 같은 호출 지점의 재실행이 `PREPARED` 요청의 dispatch 를 다시 안내하기 직전에도 같은 확인을 한다. 그래서 합의·리뷰 루프를 `feature-run.sh` 없이 단독으로 실행해도 게이트를 받는다(그때는 러너가 `NEED_USER` 로 바꾸지 않으므로 exit 43 과 `[STOP] NATIVE_AGENT_RESTART_REQUIRED` 줄로 끝난다). `DISPATCHING` 이후 상태면 이 확인을 하지 않는다. 그 Agent 가 돌고 있을 수 있어서다. `CLAUDE_PID` 가 없거나 그 프로세스를 볼 수 없으면(터미널 단독 실행) 판정하지 않고 종전대로 진행한다.
+- **PREPARED 요청의 정의가 없거나 다를 때**: `PREPARED` 요청이 가리키는 정의 파일이 없거나 내용이 요청 발행 때(`agent_definition_sha256`)와 다르면, `CLAUDE_PID` 와 상관없이 같은 사유로 멈춘다. 없는 정의로 dispatch 하면 `DISPATCHING` 에 갇히고, 다른 정의로 dispatch 하면 Agent 가 다 돈 뒤 수용 단계에서 거부되기 때문이다. 러너는 이때 정의를 쓰지 않고, 요청은 `PREPARED` 그대로 둔다. 복구는 사용자 결정 뒤에 한다. `config.sh` 의 모델·effort 를 요청 발행 때 값으로 둔 채 `prepare-agents` 를 실행하면 같은 정의가 나온다. 그다음 세션을 재시작하고 재실행한다. 설정 변경이 의도였다면 `discard` 한다.
+- **대리 증거의 한계**: 정의는 러너·`prepare-agents`·`install.sh` 만 쓴다는 전제다. 세션 시작 뒤에 정의 파일을 수정 시각을 보존한 채 옮기거나 복원하면(`mv`·`cp -p`·백업 복원) 게이트를 통과한다. 정의 파일은 손으로 옮기거나 복원하지 않는다.
+
+`NATIVE_AGENT_RESTART_REQUIRED` 를 받으면 detail 의 정의 목록을 사용자에게 보여 주고 **Claude Code 세션을 다시 시작(같은 대화 재개 — CLI 는 `claude --continue`/`--resume`)해 달라고 요청**한다. 재시작한 세션에서 같은 `feature-run.sh` 명령을 재실행한다. 정의는 이미 디스크에 있으므로 설정을 바꾸지 않았다면 다시 쓰지 않고 통과한다. 다음은 하지 않는다.
+- 재시작 없이 같은 명령을 다시 돌리지 않는다. 같은 사유로 다시 멈출 뿐이다.
+- 정의 파일의 수정 시각이나 내용을 손으로 고치지 않는다.
+- 다른 Agent 종류·`claude -p`·`CLAUDE_BACKEND` 변경으로 대체하지 않는다.
+- 이 중단에서는 모델 호출이 0회이고 dispatch 할 요청도 없다. `PREPARED` 요청이 남은 경우에는 재시작한 세션에서 그 요청의 dispatch 를 한 번 보낸다.
+
 ## 반복 절차 (exit 42 를 받을 때마다)
 
 1. 러너 출력의 `[NATIVE_AGENT_REQUIRED]` 블록(같은 내용이 worktree 의 `.agent-work/native-agent/pending.json` → `request_path` 파일에 있다)을 읽는다.
@@ -74,9 +90,9 @@
 - `NATIVE_PARENT_SESSION_LOST`: 재개할 Agent 가 다른 메인 세션에 결속돼 있다(`/clear`·새 세션). 원래 세션을 재개(`claude --resume`)해 재실행하거나 사용자가 재시작 방식을 정한다. 새 Agent 를 조용히 만들지 않는다.
 - `NATIVE_MODEL_OVERRIDE` / `NATIVE_EFFORT_OVERRIDE`: `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`·`CLAUDE_CODE_EFFORT_LEVEL` 이 정의의 모델·effort 를 덮는다. 해제하고 메인 세션을 다시 시작한다.
 - `NATIVE_AGENT_DEFINITION_CONFLICT`: `.claude/agents/feature-<역할>.md` 가 사용자 파일이다(관리 표식 없음). 러너는 덮어쓰지 않는다.
-- Agent 종류를 찾지 못함(`Agent type 'feature-…' not found`): `.claude/agents/feature-<역할>.md` 는 러너가 요청 직전에 쓰지만, 세션 시작 때 `.claude/agents/` 디렉터리가 없었으면 이 세션은 그 정의를 읽지 못한다. 이 오류가 돌아오면 다시 보내지 말고 같은 러너 명령을 재실행해 요청 state 를 확인한다. 안내는 state 에 따라 다르다.
+- Agent 종류를 찾지 못함(`Agent type 'feature-…' not found`): 세션이 시작할 때 없던 정의다. 예방은 위 "agent 정의 사전 준비"가 맡는다. `CLAUDE_PID` 를 볼 수 있는 러너는 등록 증거가 없는 정의로 요청을 만들지 않는다. 그래서 이 오류는 주로 터미널 단독 실행이 발행한 요청이나 이 기능 이전에 발행된 요청에서 난다. 이 오류가 돌아오면 다시 보내지 말고 같은 러너 명령을 재실행해 요청 state 를 확인한다. 안내는 state 에 따라 다르다. 우리 PreToolUse 훅이 정상 등록돼 있으면 시도가 먼저 기록되므로 보통 `DISPATCHING` 쪽이다.
   - `PREPARED` 그대로(PreToolUse 훅이 그 호출을 기록하지 않았다): Claude Code 세션을 재시작(같은 대화 재개)한 뒤 그 dispatch 를 한 번 보낸다(기존 1회 dispatch 계약 그대로).
-  - `DISPATCHING`(훅이 시도를 기록했다): 실행 전 거부가 증명되지 않는다. 러너는 이 오류를 알려진 거부 종류(`toolDenialKind`)가 함께 있어도 `UNKNOWN` 으로 판정하고 exit 42 로 대기한다(`NATIVE_DISPATCH_DENIED` 가 아니다). 세션을 재시작한 뒤에도 그 요청을 다시 dispatch 하지 않고, `redispatch` 는 거부 증거가 없어 거절된다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 `discard` 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하며 "거부가 확인되지 않았다" 경고가 붙는다). 자동 재호출·자동 fresh·CLI 대체는 없다.
+  - `DISPATCHING`(훅이 시도를 기록했다): 실행 전 거부가 증명되지 않는다. 러너는 이 오류를 알려진 거부 종류(`toolDenialKind`)가 함께 있어도 `UNKNOWN` 으로 판정하고 exit 42 로 대기한다(`NATIVE_DISPATCH_DENIED` 가 아니다). 세션을 재시작한 뒤에도 그 요청을 다시 dispatch 하지 않고, `redispatch` 는 거부 증거가 없어 거절된다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 `discard` 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하며 "거부가 확인되지 않았다" 경고가 붙는다). 자동 재호출·자동 fresh·CLI 대체는 없다. `discard` 뒤에는 Claude Code 세션을 다시 시작한 다음 재실행한다. 정의는 이미 디스크에 있으므로 새 세션이 시작할 때 읽는다.
 - `hook-trace.jsonl` 의 `STOP_BACKGROUND_PENDING`·`STOP_BACKGROUND_REPORT_PENDING`(과 `detail` 의 task id)은 진단 정보다. 백그라운드 명령은 오래 걸릴 수 있으므로 기다리는 것이 정상이다. 오래도록 종결 알림이나 새 보고가 오지 않으면 요청 state·사유·task id 를 사용자에게 보고하고 멈춘다 — 자동으로 다시 dispatch 하거나 요청을 버리지 않는다. 사용자가 버리기로 정했더라도 먼저 그 Agent 와 백그라운드 명령이 실제로 멈췄는지 확인한다(실행 중인 작업 위에서 원복·`discard` 하지 않는다). `discard` 의 작업 트리·요청 결속 검사는 그대로다.
 - `DISPATCHING`·`DISPATCHED` 에서 Agent 가 끝났는데도 결과가 캡처되지 않으면 훅 등록(`.claude/settings.json` 의 PreToolUse·PostToolUse·SubagentStop)과 `.agent-work/native-agent/hook-trace.jsonl` 을 확인하고 사용자에게 보고한다. Agent 가 실행됐을 수 있으므로 다시 dispatch 하지 않는다.
 

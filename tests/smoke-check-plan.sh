@@ -19,6 +19,8 @@
 # =============================================================
 set -u
 unset NTFY_TOPIC NTFY_TOKEN FEATURE_PROJECT_ROOT FEATURE_ORIGIN_ROOT
+# 메인 Claude Code 프로세스 pid — 이 세션 안에서 돌리면 물려받는다. 남겨 두면 방금 만든 임시 agent 정의가 그 프로세스보다 새것이라 러너의 등록 증거 게이트(NATIVE_AGENT_RESTART_REQUIRED)가 멈춘다. 그 게이트는 tests/smoke-native-agent-definitions.sh 가 본다
+unset CLAUDE_PID
 PROJECT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SKILL_SRC="$PROJECT_SRC/.claude/skills/feature"
 TMP="${TMPDIR:-/tmp}/feature-smoke-check-plan-$$"
