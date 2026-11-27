@@ -9,9 +9,10 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 fail() { echo "[FAIL] $1" >&2; exit 1; }
-# 계약 버전은 config.sh 에서 읽는다 — 프롬프트 계약이 바뀌어 버전이 오를 때 픽스처가 같이 따라가야 한다
-VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEWER_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$SOURCE_ROOT/.claude/skills/feature/config.sh" | cut -d= -f2 | cut -d' ' -f1)"
+# 계약 버전은 scripts/lib/runtime.sh 에서 읽는다 — 프롬프트 계약이 바뀌어 버전이 오를 때 픽스처가 같이 따라가야 한다
+SOURCE_RUNTIME_LIB="$SOURCE_ROOT/.claude/skills/feature/scripts/lib/runtime.sh"
+VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SOURCE_RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEWER_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$SOURCE_RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 # 합의 PASS 픽스처: 러너의 stage 결정은 파일명이 아니라 consensus-<target>.json 체크포인트(+입력 지문·리뷰 내용)를 본다.
 # 가짜 검증자(codex)가 PASS 리뷰를 실제 -o 경로에 쓰게 해 합의 루프를 한 번 돌려 체크포인트를 만든다.
 # (read-only 헬퍼는 invocation 전용 임시 -o 만 이번 결과로 인정하므로 미리 깔아 둔 파일·no-op codex 로는 PASS 가 만들어지지 않는다.)
@@ -48,7 +49,15 @@ fake_units() { # target-root
 
 TARGET="$SCRATCH/target"
 TARGET_SKILL="$TARGET/.claude/skills/feature"
+TARGET_LOADER="$TARGET_SKILL/scripts/lib/bootstrap.sh"
 git init -q "$TARGET"
+# 로더는 항상 <스킬>/config.sh 를 읽는다 — 가드(CHANGE_ME)를 지나려면 스킬 디렉터리 사본의 config.sh 를 채우고 그 사본의 로더를 source 한다.
+# 대상 config.sh 는 건드리지 않는다. 대상 프로젝트를 봐야 하면 호출 쪽이 FEATURE_PROJECT_ROOT=<대상 루트> 를 준다.
+filled_skill_copy() { # skill-dir copy-dir(없는 경로) → stdout: 사본 로더 경로
+  mkdir -p "$(dirname "$2")" && cp -R "$1" "$2"
+  sed -i.sedbak 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$2/config.sh" && rm -f "$2/config.sh.sedbak"
+  printf '%s' "$2/scripts/lib/bootstrap.sh"
+}
 
 # ---------- 1. 신규 설치 ----------
 bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null
@@ -74,13 +83,20 @@ done
 [ -x "$TARGET/.claude/hooks/compact_recovery.sh" ] || fail "신규 설치: 압축 복구 훅(compact_recovery.sh) 누락/실행권한 없음"
 jq -e '[.hooks.SessionStart[]? | select(.matcher == "compact") | .hooks[]? | select(.type == "command" and (.command | endswith("/.claude/hooks/compact_recovery.sh")))] | length == 1' \
   "$TARGET/.claude/settings.json" >/dev/null || fail "신규 설치: settings.json 에 SessionStart(compact) → compact_recovery.sh 미등록"
-# config.sh 의 CHANGE_ME 가드를 지나려면 값을 채운 사본으로 source 한다 (대상 config.sh 는 건드리지 않는다)
-# 사본은 대상 config.sh 옆에 둔다 — PROJECT_ROOT 가 파일 위치 기준이라 다른 곳에서 source 하면 대상 프로젝트를 못 찾는다
-sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" > "$TARGET_SKILL/.config.smoke.sh"
-worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/.config.smoke.sh")" || fail "신규 설치: load_worker_rules 실패"
-rm -f "$TARGET_SKILL/.config.smoke.sh"
+# CHANGE_ME 가드를 지나려면 값을 채운 스킬 사본의 로더를 쓴다 (대상 설정 파일은 건드리지 않는다)
+NEW_COPY_LOADER="$(filled_skill_copy "$TARGET_SKILL" "$SCRATCH/new-install-copy/feature")"
+worker_rules="$(FEATURE_PROJECT_ROOT="$TARGET" bash -c 'source "$1"; load_worker_rules' _ "$NEW_COPY_LOADER")" || fail "신규 설치: load_worker_rules 실패"
 grep -q '\[WORKER SKILL:' <<< "$worker_rules" && fail "신규 설치: 기본 설정에서 워커 스킬이 주입됨 (WORKER_SKILLS 는 비어 있어야 함)"
 echo "[OK] 1. 신규 설치"
+
+# ---------- 1b. 신규 설치 = 설정 전용 config.sh + 런타임 모듈 전부 + 기본 backend native/app_server ----------
+cmp -s "$SRC_SKILL/config.sh" "$TARGET_SKILL/config.sh" || fail "신규 설치: 대상 config.sh 가 소스 템플릿과 다름"
+( source "$SRC_SKILL/scripts/lib/config-layout.sh"; feature_config_runtime_lines "$TARGET_SKILL/config.sh" >/dev/null ) \
+  || fail "신규 설치: 대상 config.sh 가 설정 전용 판정(반환 0)을 통과하지 못함"
+diff -r "$SRC_SKILL/scripts/lib" "$TARGET_SKILL/scripts/lib" >/dev/null || fail "신규 설치: 소스 scripts/lib/ 와 대상 scripts/lib/ 가 파일 단위로 다름"
+new_backends="$(FEATURE_PROJECT_ROOT="$TARGET" bash -c 'source "$1"; printf "%s|%s" "$(role_backend WORKER)" "$(role_backend VALIDATOR)"' _ "$NEW_COPY_LOADER")"
+[ "$new_backends" = "claude_native|codex_app_server" ] || fail "신규 설치: 기본 backend 가 native/app_server 가 아님 ($new_backends)"
+echo "[OK] 1b. 신규 설치 — 설정 전용 config·런타임 모듈 전부·기본 backend native/app_server"
 
 # ---------- 2. 재실행 멱등성 ----------
 rerun_output="$(bash "$SOURCE_ROOT/install.sh" "$TARGET")"
@@ -126,19 +142,19 @@ sed -i.sedbak 's/^LINT_CMD=.*/LINT_CMD="true"/' "$TARGET_SKILL/config.sh" && rm 
 sed -i.sedbak 's/^WORKER_EFFORT=.*/WORKER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^REVIEWER_EFFORT=.*/REVIEWER_EFFORT="low"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
 sed -i.sedbak 's/^FIXER_EFFORT=.*/FIXER_EFFORT="high"/' "$TARGET_SKILL/config.sh" && rm -f "$TARGET_SKILL/config.sh.sedbak"
-role_efforts="$(bash -c 'source "$1"; printf "%s|%s|%s|%s|%s" "$DESIGNER_EFFORT" "$VALIDATOR_EFFORT" "$WORKER_EFFORT" "$REVIEWER_EFFORT" "$FIXER_EFFORT"' _ "$TARGET_SKILL/config.sh")"
+role_efforts="$(bash -c 'source "$1"; printf "%s|%s|%s|%s|%s" "$DESIGNER_EFFORT" "$VALIDATOR_EFFORT" "$WORKER_EFFORT" "$REVIEWER_EFFORT" "$FIXER_EFFORT"' _ "$TARGET_LOADER")"
 # 디자이너·검증자 effort 는 소스 config.sh 값을 그대로 기대한다(프로젝트별로 바꾸는 값이라 고정 문자열로 두지 않는다)
 src_designer_effort="$(sed -n 's/^DESIGNER_EFFORT="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
 src_validator_effort="$(sed -n 's/^VALIDATOR_EFFORT="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
 [ "$role_efforts" = "$src_designer_effort|$src_validator_effort|high|low|high" ] || fail "역할별 effort: config 값이 독립적으로 적용되지 않음 ($role_efforts, 기대 $src_designer_effort|$src_validator_effort|high|low|high)"
-conventions_without_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
+conventions_without_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_LOADER")"
 [ -z "$conventions_without_file" ] || fail "규칙 병합: conventions.md가 없는데 내용이 생성됨"
-worker_rules_without_conventions="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_SKILL/config.sh")"
+worker_rules_without_conventions="$(bash -c 'source "$1"; load_worker_rules' _ "$TARGET_LOADER")"
 grep -q '커스텀 규칙' <<< "$worker_rules_without_conventions" || fail "워커 규칙: core_rules.md 누락"
 grep -q '\[PROJECT CONVENTIONS\]' <<< "$worker_rules_without_conventions" \
   && fail "워커 규칙: conventions.md가 없는데 구획이 생성됨"
 printf '# 프로젝트 컨벤션\n' > "$TARGET/conventions.md"
-conventions_with_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_SKILL/config.sh")"
+conventions_with_file="$(bash -c 'source "$1"; load_project_conventions' _ "$TARGET_LOADER")"
 grep -q '\[PROJECT CONVENTIONS\]' <<< "$conventions_with_file" || fail "규칙 병합: conventions 구획 누락"
 grep -q '프로젝트 컨벤션' <<< "$conventions_with_file" || fail "규칙 병합: conventions.md 내용 누락"
 grep -q '커스텀 규칙' <<< "$conventions_with_file" && fail "규칙 분리: core_rules.md가 비워커 규칙에 포함됨"
@@ -217,7 +233,7 @@ grep -q 'PROJECT CONVENTIONS\|conventions:' <<< "$noconv_out" && fail "압축 �
 [ -z "$(printf '%s' '{"session_id":"x"}' | CLAUDE_PROJECT_DIR="$NOCONV_TARGET" TMPDIR="$HOOK_TMP" bash "$NOCONV_TARGET/.claude/hooks/inject_conventions.sh")" ] \
   || fail "conventions 훅: conventions.md 부재인데 출력함"
 # run_*_role 의 claude 호출은 FEATURE_ROLE_CHILD=1 을 붙인다 (두 헬퍼 모두)
-[ "$(grep -c 'FEATURE_ROLE_CHILD=1 "\$CLAUDE_BIN" -p' "$TARGET_SKILL/config.sh")" = 2 ] || fail "child 중복 주입: run_readonly_json_role/run_edit_role 의 claude 호출에 FEATURE_ROLE_CHILD=1 누락"
+[ "$(grep -c 'FEATURE_ROLE_CHILD=1 "\$CLAUDE_BIN" -p' "$TARGET_SKILL/scripts/lib/backend/router.sh")" = 2 ] || fail "child 중복 주입: run_readonly_json_role/run_edit_role 의 claude 호출에 FEATURE_ROLE_CHILD=1 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit.md" || fail "규칙 전달: unit 워커 프롬프트 누락"
 grep -Fq '${WORKER_RULES}' "$TARGET_SKILL/prompts/worker-unit-fix.md" || fail "규칙 전달: unit 수정 프롬프트 누락"
 grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-design.md" || fail "규칙 전달: 검증자 conventions 누락"
@@ -226,24 +242,24 @@ grep -Fq '${PROJECT_CONVENTIONS}' "$TARGET_SKILL/prompts/validator-review-impl.m
 for ov in compact guided conservative; do
   [ -f "$TARGET_SKILL/prompts/validator-overlays/$ov.md" ] || fail "검증자 오버레이 미설치: $ov.md"
 done
-overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=""; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+overlay_sol="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=""; load_validator_overlay' _ "$TARGET_LOADER")"
 grep -q '^\[VALIDATOR PROFILE: compact\]$' <<< "$overlay_sol" || fail "검증자 프로필: sol 기본값이 compact 가 아님"
 # 모델별 기본 매핑: gpt-6-astra 는 guided 여야 한다(매핑 누락으로 conservative 로 떨어지던 문제), 매핑에 없는 모델만 conservative
-[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
-[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = guided ] || fail "검증자 프로필: gpt-6.2-astra 기본값이 guided 가 아님"
-[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=some-unknown-model VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh")" = conservative ] || fail "검증자 프로필: 매핑에 없는 모델의 기본값이 conservative 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_LOADER")" = guided ] || fail "검증자 프로필: gpt-6-astra 기본값이 guided 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_LOADER")" = guided ] || fail "검증자 프로필: gpt-6.2-astra 기본값이 guided 가 아님"
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL=some-unknown-model VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_LOADER")" = conservative ] || fail "검증자 프로필: 매핑에 없는 모델의 기본값이 conservative 가 아님"
 # 배포 기본값: 명시 프로필 guided · effort medium, 그리고 명시 프로필과 그 모델의 매핑 기본값이 서로 모순되지 않는다
 src_validator_profile="$(sed -n 's/^VALIDATOR_PROFILE="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
 [ "$src_validator_effort" = medium ] || fail "검증자 설정: 배포 VALIDATOR_EFFORT 가 medium 이 아님 ($src_validator_effort)"
 [ "$src_validator_profile" = guided ] || fail "검증자 설정: 배포 VALIDATOR_PROFILE 이 guided 가 아님 ($src_validator_profile)"
 src_validator_model="$(sed -n 's/^VALIDATOR_MODEL="\([^"]*\)".*/\1/p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
-[ "$(bash -c 'source "$1"; VALIDATOR_MODEL="$2" VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_SKILL/config.sh" "$src_validator_model")" = "$src_validator_profile" ] \
+[ "$(bash -c 'source "$1"; VALIDATOR_MODEL="$2" VALIDATOR_PROFILE=""; validator_profile' _ "$TARGET_LOADER" "$src_validator_model")" = "$src_validator_profile" ] \
   || fail "검증자 설정: 배포 VALIDATOR_MODEL($src_validator_model)의 매핑 기본값이 명시 VALIDATOR_PROFILE($src_validator_profile)과 다름"
-overlay_explicit="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=guided; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+overlay_explicit="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-5.6-sol VALIDATOR_PROFILE=guided; load_validator_overlay' _ "$TARGET_LOADER")"
 grep -q '^\[VALIDATOR PROFILE: guided\]$' <<< "$overlay_explicit" || fail "검증자 프로필: 명시 VALIDATOR_PROFILE 이 모델 기본값을 덮지 않음"
-overlay_none="$(bash -c 'source "$1"; VALIDATOR_PROFILE=none; load_validator_overlay' _ "$TARGET_SKILL/config.sh")"
+overlay_none="$(bash -c 'source "$1"; VALIDATOR_PROFILE=none; load_validator_overlay' _ "$TARGET_LOADER")"
 [ -z "$overlay_none" ] || fail "검증자 프로필: none 인데 오버레이가 출력됨"
-bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay' _ "$TARGET_SKILL/config.sh" >/dev/null 2>&1 \
+bash -c 'source "$1"; VALIDATOR_PROFILE=no-such-profile; load_validator_overlay' _ "$TARGET_LOADER" >/dev/null 2>&1 \
   && fail "검증자 프로필: 없는 프로필이 조용히 생략됨"
 grep -Fq 'VALIDATOR_OVERLAY="$(load_validator_overlay)" || exit 1' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: consensus-loop 오버레이 로딩 누락"
 grep -Fq '"$VALIDATOR_OVERLAY"' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "검증자 프로필: 오버레이가 검증자 프롬프트에 붙지 않음"
@@ -254,7 +270,7 @@ grep -Fq 'run_readonly_json_role REVIEWER "reviewer-a$attempt_tag"' "$TARGET_SKI
   && grep -Eq 'run_edit_role FIXER .*"\$PROJECT_CONVENTIONS"' "$TARGET_SKILL/scripts/impl-review-loop.sh" \
   && grep -Fq 'run_readonly_json_role VALIDATOR "validator-$TARGET-round-$tag-$(new_invocation_id)"' "$TARGET_SKILL/scripts/consensus-loop.sh" \
   && grep -Fq 'run_edit_role DESIGNER "designer-$TARGET"' "$TARGET_SKILL/scripts/consensus-loop.sh" \
-  && grep -Fq -- '--append-system-prompt "$conv"' "$TARGET_SKILL/config.sh" \
+  && grep -Fq -- '--append-system-prompt "$conv"' "$TARGET_SKILL/scripts/lib/backend/router.sh" \
   || fail "규칙 전달: 리뷰어/수정자 conventions 전달 누락 또는 세션 이름이 stage/attempt 단위(합의 검증자는 호출별 fresh)가 아님"
 # 컨벤션 파일 경로는 본문과 별개로 리뷰어·수정자 프롬프트에 치환된다(basis_refs 인용용). 본문은 여전히 PROJECT_CONVENTIONS 한 번만.
 grep -Fq '${CONVENTIONS_FILE}' "$TARGET_SKILL/prompts/reviewer.md" || fail "컨벤션 경로: reviewer.md 에 \${CONVENTIONS_FILE} 없음"
@@ -272,7 +288,7 @@ routing="$(bash -c 'source "$1"
   d=$(WORKER_MODEL=mystery-1 WORKER_CLI=claude role_cli WORKER)
   e=$(WORKER_MODEL=mystery-1 WORKER_CLI="" role_cli WORKER 2>/dev/null || echo FAIL)
   f=$(WORKER_MODEL=gpt-5.6-luna WORKER_CLI=gemini role_cli WORKER 2>/dev/null || echo FAIL)
-  printf "%s|%s|%s|%s|%s|%s" "$a" "$b" "$c" "$d" "$e" "$f"' _ "$TARGET_SKILL/config.sh")"
+  printf "%s|%s|%s|%s|%s|%s" "$a" "$b" "$c" "$d" "$e" "$f"' _ "$TARGET_LOADER")"
 [ "$routing" = "codex|claude|codex|claude|FAIL|FAIL" ] || fail "역할 → CLI 라우팅 오류: $routing"
 grep -Fq 'require_role_bins REVIEWER FIXER' "$TARGET_SKILL/scripts/impl-review-loop.sh" || fail "설치 확인이 설정된 역할의 CLI 를 따르지 않음(impl-review-loop)"
 grep -Fq 'require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER' "$TARGET_SKILL/scripts/feature-run.sh" || fail "설치 확인이 설정된 역할의 CLI 를 따르지 않음(feature-run)"
@@ -280,8 +296,8 @@ grep -Fq '.blocking_issues[]?' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail
 grep -q 'decisions_lines_before' "$TARGET_SKILL/scripts/consensus-loop.sh" || fail "관찰성: 신규 결정 출력 누락"
 echo "[OK] 3b. 역할별 모델/effort + 역할→CLI 라우팅 + 선택 conventions + 합의 로그"
 
-# ---------- 4. 비호환 구버전 config → 활성 코드 교체 전 중단 ----------
-printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"
+# ---------- 4. 비호환 구버전 config(구 헬퍼 본문이 섞임) → 활성 코드 교체 전 중단 ----------
+printf 'TEST_CMD="npm test"\nLINT_CMD="true"\nrender_prompt() { :; }\n' > "$TARGET_SKILL/config.sh"
 printf 'sentinel\n' > "$TARGET_SKILL/scripts/.pre-update-sentinel"
 if bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null 2>&1; then
   fail "비호환 config: 중단 없이 성공함"
@@ -290,10 +306,10 @@ fi
 ls "$TARGET_SKILL"/.install-stage-* >/dev/null 2>&1 && fail "비호환 config: 스테이징 잔여물 남음"
 echo "[OK] 4. 비호환 config 사전 중단 (활성 코드 무손상)"
 
-# ---------- 4a. 헬퍼 이름은 전부 있지만 본문이 옛 버전인 config → 혼합 설치 차단, 사용자 모델 설정 보존 ----------
-# (a) 런타임 계약 표식이 없는 옛 본문 (b) 계약 버전 상수가 옛 값 — 둘 다 활성 코드 교체 전에 중단하고 config.sh.new 를 준다
-for stale_edit in '/^FEATURE_RUNTIME_CONTRACT_VERSION=/d' "s/^VALIDATOR_CONTRACT_VERSION=.*/VALIDATOR_CONTRACT_VERSION=$((VALIDATOR_CONTRACT - 1))/"; do
-  sed -e "$stale_edit" -e 's/^WORKER_MODEL=.*/WORKER_MODEL="my-custom-worker-model"/' -e 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$SOURCE_ROOT/.claude/skills/feature/config.sh" > "$TARGET_SKILL/config.sh"
+# ---------- 4a. 사용자 설정 + 구 설정 요소 하나가 남은 config → 혼합 설치 차단, 사용자 모델 설정 보존 ----------
+# (a) 함수 정의 (b) 런타임 계약 표식 (c) 옛 계약 버전 상수 (d) 경로 초기화 — 넷 다 활성 코드 교체 전에 중단하고 config.sh.new 를 준다
+for stale_edit in 'render_prompt() { :; }' 'FEATURE_RUNTIME_CONTRACT_VERSION=3' "VALIDATOR_CONTRACT_VERSION=$((VALIDATOR_CONTRACT - 1))" 'PROJECT_ROOT="$(cd "$FEATURE_SKILL_DIR/../../.." && pwd)"'; do
+  { sed -e 's/^WORKER_MODEL=.*/WORKER_MODEL="my-custom-worker-model"/' -e 's/^TEST_CMD=.*/TEST_CMD="npm test"/' "$SRC_SKILL/config.sh"; printf '%s\n' "$stale_edit"; } > "$TARGET_SKILL/config.sh"
   rm -f "$TARGET_SKILL/config.sh.new"
   printf 'sentinel\n' > "$TARGET_SKILL/scripts/.pre-update-sentinel"
   if bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/mixed.log" 2>&1; then fail "혼합 버전($stale_edit): 옛 본문 config 인데 중단 없이 설치됨"; fi
@@ -309,10 +325,85 @@ bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/mixed.log" 2>&1 || fail "�
 [ ! -f "$TARGET_SKILL/scripts/.pre-update-sentinel" ] && grep -q '^WORKER_MODEL="my-custom-worker-model"' "$TARGET_SKILL/config.sh" || fail "혼합 버전: 병합 뒤 스킬 코드가 갱신되지 않았거나 사용자 설정이 바뀜"
 # 러너도 같은 표식을 대조한다(설치를 거치지 않고 스크립트만 복사한 혼합 상태)
 grep -q 'REQUIRED_RUNTIME_CONTRACT_VERSION=' "$TARGET_SKILL/scripts/feature-run.sh" \
-  && [ "$(sed -n 's/^REQUIRED_RUNTIME_CONTRACT_VERSION=//p' "$TARGET_SKILL/scripts/feature-run.sh")" = "$(sed -n 's/^FEATURE_RUNTIME_CONTRACT_VERSION=//p' "$SOURCE_ROOT/.claude/skills/feature/config.sh")" ] \
-  || fail "혼합 버전: feature-run.sh 가 요구하는 런타임 계약 표식이 config.sh 와 다름"
-printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"   # 뒤 사례(4b)의 전제: 비호환 config 상태로 되돌린다
-echo "[OK] 4a. 옛 본문 config(표식 없음·계약 버전 불일치) → 혼합 설치 차단 + 사용자 설정 보존"
+  && [ "$(sed -n 's/^REQUIRED_RUNTIME_CONTRACT_VERSION=//p' "$TARGET_SKILL/scripts/feature-run.sh")" = "$(sed -n 's/^FEATURE_RUNTIME_CONTRACT_VERSION=//p' "$SOURCE_RUNTIME_LIB")" ] \
+  || fail "혼합 버전: feature-run.sh 가 요구하는 런타임 계약 표식이 scripts/lib/runtime.sh 와 다름"
+echo "[OK] 4a. 구 설정 요소(함수 정의·런타임 계약 표식·옛 계약 버전·경로 초기화) 남은 config → 혼합 설치 차단 + 사용자 설정 보존"
+cp "$TARGET_SKILL/config.sh" "$SCRATCH/config.settings-only"   # 뒤 추가 사례(4a-2·4d·4e)가 되돌아올 설정 전용 상태(사용자 값 포함)
+
+# ---------- 4a-2. backend 줄이 없는 구 설정 → 거부 + .new 에 legacy backend / 방법 (ii) 이관 뒤 설치·종전 의미 유지 ----------
+{ grep -v '^CLAUDE_BACKEND=\|^CODEX_BACKEND=' "$SRC_SKILL/config.sh" \
+    | sed -e 's/^TEST_CMD=.*/TEST_CMD="${SMOKE_TEST_CMD:-npm test}"/' -e 's/^LINT_CMD=.*/LINT_CMD="true"/' -e 's/^WORKER_MODEL=.*/WORKER_MODEL="claude-sonnet-5-5"/'
+  printf '%s\n' 'render_prompt() { :; }'; } > "$TARGET_SKILL/config.sh"
+cp "$TARGET_SKILL/config.sh" "$SCRATCH/config.no-backend-old"
+rm -f "$TARGET_SKILL/config.sh.new"
+printf 'sentinel\n' > "$TARGET_SKILL/scripts/.pre-update-sentinel"
+if bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/nobackend.log" 2>&1; then fail "backend 줄 없는 구 설정: 중단 없이 설치됨"; fi
+[ -f "$TARGET_SKILL/scripts/.pre-update-sentinel" ] || fail "backend 줄 없는 구 설정: 중단 전에 활성 코드가 교체됨"
+ls "$TARGET_SKILL"/.install-stage-* >/dev/null 2>&1 && fail "backend 줄 없는 구 설정: 스테이징 잔여물 남음"
+cmp -s "$TARGET_SKILL/config.sh" "$SCRATCH/config.no-backend-old" || fail "backend 줄 없는 구 설정: 거부했는데 config.sh 가 바뀜"
+grep -q '^CLAUDE_BACKEND="legacy_cli"' "$TARGET_SKILL/config.sh.new" && grep -q '^CODEX_BACKEND="legacy_exec"' "$TARGET_SKILL/config.sh.new" \
+  || fail "backend 줄 없는 구 설정: config.sh.new 의 backend 줄이 legacy 값이 아님"
+( source "$SRC_SKILL/scripts/lib/config-layout.sh"; feature_config_runtime_lines "$TARGET_SKILL/config.sh.new" >/dev/null ) \
+  || fail "backend 줄 없는 구 설정: config.sh.new 가 설정 전용 판정을 통과하지 못함"
+grep -q 'legacy_cli' "$SCRATCH/nobackend.log" && grep -q 'legacy_exec' "$SCRATCH/nobackend.log" && grep -qF "$TARGET_SKILL/config.sh.pre-runtime-split" "$SCRATCH/nobackend.log" \
+  || fail "backend 줄 없는 구 설정: 안내에 두 backend 의 legacy 의미·백업 명령이 없음: $(cat "$SCRATCH/nobackend.log")"
+# 방법 (ii): 위반 줄(함수 정의)만 지운다 — backend 줄은 새로 넣지 않는다
+grep -vxF 'render_prompt() { :; }' "$SCRATCH/config.no-backend-old" > "$SCRATCH/config.no-backend-migrated"
+cp "$SCRATCH/config.no-backend-migrated" "$TARGET_SKILL/config.sh"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/nobackend2.log" 2>&1 || fail "backend 줄 없는 구 설정: 이관 뒤 설치 실패: $(cat "$SCRATCH/nobackend2.log")"
+cmp -s "$TARGET_SKILL/config.sh" "$SCRATCH/config.no-backend-migrated" || fail "backend 줄 없는 구 설정: 이관 뒤 설치가 config.sh 를 바꿈"
+migrated_load="$(env -u SMOKE_TEST_CMD bash -c 'source "$1"; printf "%s|%s|%s" "$(role_backend WORKER)" "$(role_backend REVIEWER)" "$TEST_CMD"' _ "$TARGET_LOADER")"
+[ "$migrated_load" = "claude_cli|codex_cli|npm test" ] || fail "backend 줄 없는 구 설정: 이관 뒤 종전 의미(legacy)·환경 변수 표현식이 유지되지 않음 ($migrated_load)"
+migrated_custom="$(SMOKE_TEST_CMD=custom bash -c 'source "$1"; printf "%s" "$TEST_CMD"' _ "$TARGET_LOADER")"
+[ "$migrated_custom" = custom ] || fail "backend 줄 없는 구 설정: 이관 뒤 TEST_CMD 의 환경 변수 표현식이 평가되지 않음 ($migrated_custom)"
+cp "$SCRATCH/config.settings-only" "$TARGET_SKILL/config.sh"
+echo "[OK] 4a-2. backend 줄 없는 구 설정 → 거부·.new 에 legacy backend·안내 / 방법 (ii) 이관 뒤 설치·claude_cli/codex_cli·환경 변수 표현식 유지"
+
+# ---------- 4d. 분리 이후 업데이트 — 런타임·버전 상수만 바뀐 소스는 config.sh 병합 없이 런타임만 갱신 ----------
+UPDATE_SOURCE="$SCRATCH/update-source"
+cp -R "$SOURCE_ROOT" "$UPDATE_SOURCE"
+printf '\n# UPDATE-MODULE-SENTINEL\n' >> "$UPDATE_SOURCE/.claude/skills/feature/scripts/lib/telemetry.sh"
+sed -i.sedbak "s/^REVIEWER_CONTRACT_VERSION=$REVIEWER_CONTRACT/REVIEWER_CONTRACT_VERSION=$((REVIEWER_CONTRACT + 1))/" "$UPDATE_SOURCE/.claude/skills/feature/scripts/lib/runtime.sh" \
+  && rm -f "$UPDATE_SOURCE/.claude/skills/feature/scripts/lib/runtime.sh.sedbak"
+grep -q "^REVIEWER_CONTRACT_VERSION=$((REVIEWER_CONTRACT + 1))" "$UPDATE_SOURCE/.claude/skills/feature/scripts/lib/runtime.sh" || fail "분리 이후 업데이트: 픽스처(계약 버전 +1) 준비 실패"
+bash "$UPDATE_SOURCE/install.sh" "$TARGET" > "$SCRATCH/update.log" 2>&1 || fail "분리 이후 업데이트: 설치 실패: $(cat "$SCRATCH/update.log")"
+grep -q 'UPDATE-MODULE-SENTINEL' "$TARGET_SKILL/scripts/lib/telemetry.sh" && grep -q "^REVIEWER_CONTRACT_VERSION=$((REVIEWER_CONTRACT + 1))" "$TARGET_SKILL/scripts/lib/runtime.sh" \
+  || fail "분리 이후 업데이트: 대상 런타임 모듈이 갱신되지 않음"
+cmp -s "$TARGET_SKILL/config.sh" "$SCRATCH/config.settings-only" || fail "분리 이후 업데이트: config.sh 가 바뀜"
+grep -qF "[WARN] 기존 파일 보존: $TARGET_SKILL/config.sh" "$SCRATCH/update.log" && fail "분리 이후 업데이트: config.sh 에 대해 병합 경고(WARN)를 냄"
+grep -qF "[INFO] 기존 설정 보존: $TARGET_SKILL/config.sh" "$SCRATCH/update.log" || fail "분리 이후 업데이트: config.sh 보존 안내(INFO)가 없음"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" >/dev/null 2>&1 || fail "분리 이후 업데이트: 원래 소스로 재설치 실패"
+grep -q 'UPDATE-MODULE-SENTINEL' "$TARGET_SKILL/scripts/lib/telemetry.sh" && fail "분리 이후 업데이트: 원래 소스로 되돌리지 못함"
+echo "[OK] 4d. 분리 이후 업데이트 — 런타임 모듈 갱신·config.sh 바이트 보존·병합 경고 없음(INFO)"
+
+# ---------- 4e. 설정이 덜 채워진 설정 전용 config → 설치는 성공, 로더의 종전 가드가 사용 시점에 거부 ----------
+printf 'TEST_CMD="npm test"\nLINT_CMD="true"\n' > "$TARGET_SKILL/config.sh"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/partial-config.log" 2>&1 || fail "덜 채운 설정 전용 config: 설치 실패: $(cat "$SCRATCH/partial-config.log")"
+set +e
+bash -c 'source "$1"' _ "$TARGET_LOADER" > "$SCRATCH/partial-load.log" 2>&1
+partial_rc=$?
+set -e
+[ "$partial_rc" = 1 ] && grep -q '비워둘 수 없습니다' "$SCRATCH/partial-load.log" || fail "덜 채운 설정 전용 config: 로더가 가드로 거부하지 않음 (rc $partial_rc): $(cat "$SCRATCH/partial-load.log")"
+# 같은 입력을 set -u 진입점(러너)처럼 source 해도 셸의 unbound variable 이 아니라 로더의 [FAIL] 이어야 한다
+set +e
+bash -c 'set -euo pipefail; source "$1"' _ "$TARGET_LOADER" > "$SCRATCH/partial-load-nounset.log" 2>&1
+partial_rc=$?
+set -e
+[ "$partial_rc" = 1 ] && grep -q '비워둘 수 없습니다' "$SCRATCH/partial-load-nounset.log" && ! grep -q 'unbound variable' "$SCRATCH/partial-load-nounset.log" || fail "덜 채운 설정 전용 config(set -u): 로더가 가드로 거부하지 않음 (rc $partial_rc): $(cat "$SCRATCH/partial-load-nounset.log")"
+echo "[OK] 4e. 덜 채운 설정 전용 config — 설치 성공·로더 가드 거부"
+
+# ---------- 4f. 여러 줄 설정 문자열 안의 함수 모양 줄·사용자 함수 → 설정 전용으로 판정, 업데이트 성공·값 보존 ----------
+{ grep -v '^TEST_CMD=\|^LINT_CMD=' "$SRC_SKILL/config.sh"
+  printf "TEST_CMD='\nrun_checks() {\n    ./gradlew test\n}\nrun_checks\n'\nLINT_CMD=\"true\"\nmy_project_helper() { :; }\n"; } > "$TARGET_SKILL/config.sh"
+cp "$TARGET_SKILL/config.sh" "$SCRATCH/config.multiline"
+bash "$SOURCE_ROOT/install.sh" "$TARGET" > "$SCRATCH/multiline.log" 2>&1 || fail "여러 줄 설정 문자열 config: 업데이트가 거부됨: $(cat "$SCRATCH/multiline.log")"
+cmp -s "$TARGET_SKILL/config.sh" "$SCRATCH/config.multiline" || fail "여러 줄 설정 문자열 config: 업데이트가 config.sh 를 바꿈"
+grep -qF "[INFO] 기존 설정 보존: $TARGET_SKILL/config.sh" "$SCRATCH/multiline.log" || fail "여러 줄 설정 문자열 config: 보존 안내(INFO)가 없음"
+multiline_got="$(bash -c 'source "$1"; printf "%s|%s" "$TEST_CMD" "$(declare -F my_project_helper)"' _ "$TARGET_LOADER" 2>&1)" || fail "여러 줄 설정 문자열 config: 로더가 거부함: $multiline_got"
+[ "$multiline_got" = "$(printf '\nrun_checks() {\n    ./gradlew test\n}\nrun_checks\n|my_project_helper')" ] || fail "여러 줄 설정 문자열 config: 로드 뒤 TEST_CMD·사용자 함수가 그대로가 아님: [$multiline_got]"
+echo "[OK] 4f. 여러 줄 설정 문자열 안의 함수 모양 줄·사용자 함수 — 업데이트 성공·config 바이트 보존·로드 뒤 값 보존"
+
+printf 'TEST_CMD="npm test"\nLINT_CMD="true"\nrender_prompt() { :; }\n' > "$TARGET_SKILL/config.sh"   # 뒤 사례(4b)의 전제: 비호환 config 상태로 되돌린다
 
 # ---------- 4b. 세 번째 항목(schemas) 복사 실패 → 앞 항목도 기존 상태 유지 ----------
 BROKEN_SOURCE="$SCRATCH/broken-source"
@@ -689,7 +780,7 @@ cp "$LOG_TARGET/.agent-work/feature-scope.json" "$LOG_TARGET/.agent-work/feature
 sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"true\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
 fake_consensus_pass "$LOG_TARGET" impl
 sed -i.sedbak "s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$FAKE_CODEX\"|" "$LOG_SKILL/config.sh" && rm -f "$LOG_SKILL/config.sh.sedbak"
-(cd "$LOG_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree > .agent-work/worker-baseline.tree')   # 기준선에 existing-under-root.txt 포함
+(cd "$LOG_TARGET" && bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; snapshot_worktree_tree > .agent-work/worker-baseline.tree')   # 기준선에 existing-under-root.txt 포함
 cp "$LOG_TARGET/.agent-work/worker-baseline.tree" "$LOG_TARGET/.agent-work/worker-baseline.tree.keep"
 # 이전 하위 사례의 unit 시도 산출물(UNDECIDED 결과 + 옛 tree)을 치운다 — 위에서 파일을 커밋해 작업 트리가 그 시도와 달라졌고,
 # 러너의 재개 판정은 그런 드리프트를 WORKER_OUTCOME_UNCERTAIN 으로 막는다(생산 동작). 이 하위 사례는 워커 진입 직후 시나리오를 새로 구성한다.
@@ -818,7 +909,7 @@ printf 'base\n' > "$REVIEW_TARGET/src/b.txt"
 (cd "$REVIEW_TARGET" && git add -A && git -c user.email=t@t -c user.name=t commit -qm base)
 # 피처 이전부터 있던 사용자의 미커밋 변경(b.txt) → 워커 진입 기준선에 포함돼 리뷰 diff 에 나오면 안 된다
 printf 'user edit before feature\n' > "$REVIEW_TARGET/src/b.txt"
-(cd "$REVIEW_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
+(cd "$REVIEW_TARGET" && bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
 printf 'changed\n' > "$REVIEW_TARGET/src/a.txt"
 printf 'new\n' > "$REVIEW_TARGET/src/new.txt"
 for doc in design implementation approach; do printf '# %s\n' "$doc" > "$REVIEW_TARGET/.agent-work/$doc.md"; done
@@ -869,8 +960,8 @@ expect_review_invalid "required_outcome 없는 FIX_CODE" SCHEMA_INVALID "$(print
 expect_review_invalid "user_question/options 없는 DOC_GAP" ACTION_FIELDS "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {action:"DOC_GAP"}]}')"
 expect_review_invalid "user_question/options 가 있는 FIX_CODE" ACTION_FIELDS "$(printf '%s' "$review_issue" | jq -c --argjson v "$REVIEWER_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[. + {user_question:"q?",options:["A","B"]}]}')"
 # fix_ref 정의는 한 문장이다 — config.sh(REVIEW_FIX_REF_RULE) · 리뷰어 프롬프트 · 스키마 설명이 글자 그대로 같아야 한다
-fix_ref_rule="$(sed -n "s/^REVIEW_FIX_REF_RULE='\(.*\)'\$/\1/p" "$SOURCE_ROOT/.claude/skills/feature/config.sh")"
-[ -n "$fix_ref_rule" ] || fail "fix_ref 계약: config.sh 에 REVIEW_FIX_REF_RULE 이 없음"
+fix_ref_rule="$(sed -n "s/^REVIEW_FIX_REF_RULE='\(.*\)'\$/\1/p" "$SOURCE_ROOT/.claude/skills/feature/scripts/lib/contract/review.sh")"
+[ -n "$fix_ref_rule" ] || fail "fix_ref 계약: scripts/lib/contract/review.sh 에 REVIEW_FIX_REF_RULE 이 없음"
 grep -qF -- "$fix_ref_rule" "$SOURCE_ROOT/.claude/skills/feature/prompts/reviewer.md" || fail "fix_ref 계약: reviewer.md 의 문장이 REVIEW_FIX_REF_RULE 과 다름"
 [ "$(jq -r '.properties.issues.items.properties.fix_ref.description' "$SOURCE_ROOT/.claude/skills/feature/schemas/impl-review.schema.json" | grep -cF -- "$fix_ref_rule")" = 1 ] || fail "fix_ref 계약: 스키마 설명의 문장이 REVIEW_FIX_REF_RULE 과 다름"
 grep -qF '$REVIEW_FIX_REF_RULE' "$SOURCE_ROOT/.claude/skills/feature/scripts/impl-review-loop.sh" || fail "fix_ref 계약: 리뷰 루프가 REVIEW_FIX_REF_RULE 을 쓰지 않음"
@@ -1018,9 +1109,9 @@ for worker_rc_case in 0 7; do
   [ "$(cd "$WIDX_TARGET" && git status --porcelain=v1 -- src/w.txt)" = "M  src/w.txt" ] || fail "index 검사(워커, codex exit $worker_rc_case): index 를 임의로 복구함"
 done
 # assume-unchanged 플래그 변경도 지문에 잡힌다
-idx_a="$(cd "$WIDX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; compute_index_fingerprint')"
+idx_a="$(cd "$WIDX_TARGET" && bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; compute_index_fingerprint')"
 (cd "$WIDX_TARGET" && git update-index --assume-unchanged src/w.txt)
-idx_b="$(cd "$WIDX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; compute_index_fingerprint')"
+idx_b="$(cd "$WIDX_TARGET" && bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; compute_index_fingerprint')"
 (cd "$WIDX_TARGET" && git update-index --no-assume-unchanged src/w.txt)
 [ "$idx_a" != "$idx_b" ] || fail "index 지문: assume-unchanged 플래그 변경이 지문에 반영되지 않음"
 echo "[OK] 11c. index 변경 + CLI 실패 → index 변경 우선 보고 (수정자·워커), assume-unchanged 감지"
@@ -1051,7 +1142,7 @@ fake_scope "$VFIX_TARGET" src/w.txt
 fake_consensus_pass "$VFIX_TARGET" design
 fake_consensus_pass "$VFIX_TARGET" impl
 sed -i.sedbak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$REVIEW_SIDE/fake-claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$VFIX_SIDE/fake-codex\"|" "$VFIX_SKILL/config.sh" && rm -f "$VFIX_SKILL/config.sh.sedbak"
-(cd "$VFIX_TARGET" && bash -c 'source .claude/skills/feature/config.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
+(cd "$VFIX_TARGET" && bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; snapshot_worktree_tree' > .agent-work/worker-baseline.tree)
 cp "$VFIX_TARGET/.agent-work/worker-baseline.tree" "$VFIX_SIDE/baseline.keep"
 cp "$VFIX_TARGET/.agent-work/feature-scope.json" "$VFIX_TARGET/.agent-work/feature-scope.lock.json"
 printf 'worker change\n' >> "$VFIX_TARGET/src/w.txt"
@@ -1115,10 +1206,9 @@ echo "[OK] 12. 유료 회귀 승인 게이트 (차단 / 1회용 소모)"
 # ---------- 13. usage telemetry recorder — 픽스처만으로 함수 검사 (실제 LLM 호출 없음) ----------
 # 한 행 = invocation 한 번. session 누적 delta 없음, label 은 unique key 아님, null 은 관측 불가(0 으로 위조 금지).
 # 임시 config 는 소스 트리가 아니라 $SCRATCH 의 가짜 프로젝트에 둔다 — 중간 실패·병렬 실행에도 trap 이 정리한다
-USAGE_DIR="$SCRATCH/usage-fixture"; mkdir -p "$USAGE_DIR/.agent-work" "$USAGE_DIR/.claude/skills/feature" "$USAGE_DIR/.claude/hooks"
+USAGE_DIR="$SCRATCH/usage-fixture"; mkdir -p "$USAGE_DIR/.agent-work" "$USAGE_DIR/.claude/hooks"
 printf '# smoke\n' > "$USAGE_DIR/.claude/hooks/core_rules.md"
-USAGE_CFG="$USAGE_DIR/.claude/skills/feature/config.sh"
-sed 's/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$SOURCE_ROOT/.claude/skills/feature/config.sh" > "$USAGE_CFG"
+USAGE_LOADER="$(filled_skill_copy "$SRC_SKILL" "$USAGE_DIR/.claude/skills/feature")"
 cat > "$USAGE_DIR/claude-a.json" <<'EOF'
 {"session_id":"session-a","total_cost_usd":1.25,"num_turns":7,"duration_ms":12000,"duration_api_ms":10000,
  "usage":{"input_tokens":40,"output_tokens":500,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}
@@ -1140,7 +1230,7 @@ printf '%s\n' '{"type":"thread.started","thread_id":"t"}' '{"type":"turn.complet
 printf '%s\n' '{"type":"thread.started"}' 'tokens used' '12,345' > "$USAGE_DIR/codex-none.jsonl"
 printf '%s\n' '{"type":"thread.started","thread_id":"t"}' 'not json at all' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500}}' > "$USAGE_DIR/codex-corrupt.jsonl"
 printf '%s\n' '{"type":"thread.started","thread_id":"t"}' '{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500}}' '{"type":"turn.completed","usage":{}}' > "$USAGE_DIR/codex-emptyusage.jsonl"
-usage_run() { (cd "$USAGE_DIR" && source "$USAGE_CFG" && "$@"); }
+usage_run() { (cd "$USAGE_DIR" && source "$USAGE_LOADER" && "$@"); }
 usage_last() { tail -1 "$USAGE_DIR/.agent-work/usage.jsonl" | jq -r "$1"; }
 usage_rows() { wc -l < "$USAGE_DIR/.agent-work/usage.jsonl" | tr -d ' '; }
 # A. 정상 result — 모든 필드 그대로, input_effective 파생

@@ -50,6 +50,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 cd "$TMP/repo" || exit 1
 git init -q
@@ -62,8 +64,8 @@ printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 c
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt","src/u02.txt","src/u03.txt","src/shared.txt"],"new_file_roots":["src/gen/"]}\n' > .agent-work/feature-scope.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT"
 mkdir -p "$MOCK_STATE"
 
@@ -405,12 +407,12 @@ pass "I: targeted test 실패 → fix → 재테스트(리뷰어 0회) / 재시�
 
 # ===== 사례 K: implementation-units.json 변경 시 impl consensus PASS 무효 =====
 reset_tree
-( source "$CFG"; consensus_pass_current impl ) || fail "K: 전제 — 현재 impl PASS 가 유효하지 않음"
+( source "$LOADER"; consensus_pass_current impl ) || fail "K: 전제 — 현재 impl PASS 가 유효하지 않음"
 cp .agent-work/implementation-units.json "$TMP/units.keep"
 jq '.units[0].goal="edited"' "$TMP/units.keep" > .agent-work/implementation-units.json
-( source "$CFG"; consensus_pass_current impl ) && fail "K: units manifest 가 바뀌었는데 impl PASS 가 유효함"
+( source "$LOADER"; consensus_pass_current impl ) && fail "K: units manifest 가 바뀌었는데 impl PASS 가 유효함"
 cp "$TMP/units.keep" .agent-work/implementation-units.json
-( source "$CFG"; consensus_pass_current impl ) || fail "K: 되돌렸는데 impl PASS 가 복구되지 않음"
+( source "$LOADER"; consensus_pass_current impl ) || fail "K: 되돌렸는데 impl PASS 가 복구되지 않음"
 # 러너도 impl 부터 다시 간다 (units 없으면 IMPL_DOCS_MISSING)
 mv .agent-work/implementation-units.json "$TMP/units.moved"
 rc="$(run_runner)"
@@ -419,7 +421,7 @@ mv "$TMP/units.moved" .agent-work/implementation-units.json
 pass "K: units manifest 변경 → impl PASS 무효 / 부재 → IMPL_DOCS_MISSING"
 
 # ===== 사례 S: manifest 검증 — 스키마 위반·중복 id·순번·부분집합 =====
-units_ok() { ( source "$CFG"; units_manifest_valid_file .agent-work/implementation-units.json ); }
+units_ok() { ( source "$LOADER"; units_manifest_valid_file .agent-work/implementation-units.json ); }
 units_ok || fail "S: 정상 manifest 가 무효로 판정됨"
 bad_cases=(
   '.version=2'
@@ -485,7 +487,7 @@ sid="$(cat .agent-work/.session-feature-worker)"
 echo "worker 02-drop" >> src/u02.txt; echo "shared by 02-drop" >> src/shared.txt; mkdir -p src/gen; echo "gen by 02" > src/gen/new.txt
 printf '%s\n' '{"status":"DONE","undecided":[],"delegated_choices":[{"location":"src/u02.txt","technique":"t","basis":"b"}],"tests":[{"name":"u02","result":"PASS"}],"context_updates":{"upsert":[{"kind":"REUSE","subject":"TicketStatus.isAssignable","note":"02-note"},{"kind":"INVARIANT","subject":"ticket version check","note":"vl"}],"remove":[{"kind":"ENTRY_POINT","subject":"TicketService.assignInitialAgent"}]}}' \
   > .agent-work/units/02-drop/worker-result.json
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/units/02-drop/worker-after.tree || fail "U: after-tree 조작 실패"
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/units/02-drop/worker-after.tree || fail "U: after-tree 조작 실패"
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] || { tail -20 "$TMP/run.log"; fail "U: 재실행 exit 0 기대, 실제 $rc"; }
 grep -q '^worker 02-drop' "$MOCK_LOG" && fail "U: 유효 결과가 있는데 02 워커가 재호출됨"

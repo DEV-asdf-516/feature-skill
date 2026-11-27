@@ -47,6 +47,7 @@ cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$SRC/.claude/hooks/" 2>/dev/null 
 printf '{"hooks":{}}\n' > "$SRC/.claude/settings.json"
 mkdir -p "$SRC/.codex/hooks" && printf '#!/bin/sh\nexit 0\n' > "$SRC/.codex/hooks/worker_guard.sh"
 CFG="$SRC/.claude/skills/feature/config.sh"
+LOADER="$SRC/.claude/skills/feature/scripts/lib/bootstrap.sh"
 sed -i.bak 's|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND="legacy_cli"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN="true"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND="legacy_exec"|; s|^CODEX_BIN=.*|CODEX_BIN="true"|; s/^TEST_CMD="CHANGE_ME"/TEST_CMD="true"/; s/^LINT_CMD="CHANGE_ME"/LINT_CMD="true"/' "$CFG" && rm -f "$CFG.bak"
 RUN="$SRC/.claude/skills/feature/scripts/feature-run.sh"
 GIT="git -c user.email=smoke@test -c user.name=smoke"
@@ -61,8 +62,8 @@ git add -A && $GIT commit -qm baseline
 HEAD0="$(git rev-parse HEAD)"
 
 index_hash() { git ls-files --stage -v | shasum -a 256 | awk '{print $1}'; }
-src_fp() { (cd "$SRC" && source "$CFG" && compute_worktree_fingerprint); }
-wt_tree() { (cd "$1" && source "$CFG" && snapshot_worktree_tree); }
+src_fp() { (cd "$SRC" && source "$LOADER" && compute_worktree_fingerprint); }
+wt_tree() { (cd "$1" && source "$LOADER" && snapshot_worktree_tree); }
 run_feature() { # id [extra args...] → 러너 exit, 로그 $TMP/run-<id>.log
   local id="$1"; shift
   (cd "$SRC" && bash "$RUN" --feature "$id" "$@") > "$TMP/run-$id.log" 2>&1; echo $?
@@ -216,7 +217,7 @@ rc="$(run_feature h)"
 WT_H="$WORK/proj-feature-h"
 grep -q "프로젝트 경로 재바인딩: $WT_H" "$TMP/run-h.log" || fail "사례9b: 러너가 PROJECT_ROOT 를 worktree 로 재바인딩하지 않음"
 echo "CONV-CHANGED" > conventions.md     # 부트스트랩 뒤 원본 변경 — worktree 실행에 새어 들면 안 된다
-conv="$(cd "$WT_H" && FEATURE_PROJECT_ROOT="$WT_H" bash -c 'source "$1"; load_project_conventions; echo "$CORE_RULES_FILE"' _ "$CFG")"
+conv="$(cd "$WT_H" && FEATURE_PROJECT_ROOT="$WT_H" bash -c 'source "$1"; load_project_conventions; echo "$CORE_RULES_FILE"' _ "$LOADER")"
 echo "$conv" | grep -q CONV-ORIGINAL || fail "사례9b: config.sh 가 FEATURE_PROJECT_ROOT 의 conventions.md 를 읽지 않음"
 echo "$conv" | grep -q CONV-CHANGED && fail "사례9b: 원본의 이후 변경이 worktree 실행에 보임"
 echo "$conv" | grep -q "^$WT_H/.claude/hooks/core_rules.md$" || fail "사례9b: CORE_RULES_FILE 이 worktree 를 가리키지 않음"
@@ -303,7 +304,7 @@ pass "사례11: 잘못된 식별자·ref 부적합 이름 거부"
 # =============================================================
 mark_done() { # worktree — LLM 없이 DONE 의 파일 수준 의미를 만든다: run-state DONE + 현재 트리에 유효한 approved.fingerprint
   local wt="$1"
-  (cd "$wt" && source "$CFG" && compute_approval_fingerprint > "$WORK_DIR/approved.fingerprint") || fail "mark_done: 승인 지문 계산 실패 ($wt)"
+  (cd "$wt" && source "$LOADER" && compute_approval_fingerprint > "$WORK_DIR/approved.fingerprint") || fail "mark_done: 승인 지문 계산 실패 ($wt)"
   jq -n '{version:1, stage:"done", status:"DONE", reason:null, detail:"smoke", test_retries:0, stale_count:0, updated_at:"", history:[]}' \
     > "$wt/.agent-work/run-state.json"
 }

@@ -27,6 +27,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 # 두 CLI 모두 mock 이다(역할 → CLI 매핑과 무관하게 실제 모델은 호출되지 않는다)
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 set_max_rounds() { sed -i.bak "s/^MAX_SPEC_ROUNDS=.*/MAX_SPEC_ROUNDS=$1/" "$CFG" && rm -f "$CFG.bak"; }
@@ -37,8 +39,8 @@ mkdir -p src && echo "base 01" > src/u01.txt
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 RUN=".claude/skills/feature/scripts/feature-run.sh"
 LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 
@@ -134,7 +136,7 @@ status() { jq -r '.status' .agent-work/run-state.json; }
 calls() { paste -sd'|' "$MOCK_LOG"; }
 count() { grep -c "^$1" "$MOCK_LOG" 2>/dev/null || true; }
 esc() { jq -r "$2" ".agent-work/user-escalation-resume-$1.json"; } # target filter
-cfg() { ( source "$CFG"; "$@" ); }
+cfg() { ( source "$LOADER"; "$@" ); }
 answer() { printf -- '- [USER-QUESTION][scope=%s][escalation=%s] %s → %s\n' "$1" "$2" "$3" "$4" >> .agent-work/decisions.md; } # scope id question answer
 no_models() { [ ! -s "$MOCK_LOG" ] || fail "$1: 모델/테스트가 호출됨: $(calls)"; }
 DONE_TAIL="worker 01-intake|test-01|reviewer|full-test|full-lint"
@@ -284,8 +286,8 @@ answer design B-01 "어느 정책?" a; echo "정책 a (사용자 결정 B-01)" >
 rc="$(run_loop design)"; [ "$rc" -eq 0 ] && [ "$(esc design .next_step)" = USER_RESOLVED ] || fail "7-e: 전제(USER_RESOLVED) 실패"
 cfg consensus_stage_accepted design || fail "7-e: 전제 — 수리 직후 design 진입 권한이 없음"
 # 7-f 계약 버전이 바뀌면 수리 상태는 적용되지 않는다 / 7-g 리뷰 JSON 변조
-( source "$CFG"; VALIDATOR_CONTRACT_VERSION=$((VALIDATOR_CONTRACT_VERSION + 1)); user_escalation_resolved_current design ) && fail "7-f: 검증 계약 버전이 바뀌었는데 수리 상태가 유효함"
-( source "$CFG"; CONSENSUS_CHECKPOINT_VERSION=$((CONSENSUS_CHECKPOINT_VERSION + 1)); user_escalation_resolved_current design ) && fail "7-f: 체크포인트 버전이 바뀌었는데 수리 상태가 유효함"
+( source "$LOADER"; VALIDATOR_CONTRACT_VERSION=$((VALIDATOR_CONTRACT_VERSION + 1)); user_escalation_resolved_current design ) && fail "7-f: 검증 계약 버전이 바뀌었는데 수리 상태가 유효함"
+( source "$LOADER"; CONSENSUS_CHECKPOINT_VERSION=$((CONSENSUS_CHECKPOINT_VERSION + 1)); user_escalation_resolved_current design ) && fail "7-f: 체크포인트 버전이 바뀌었는데 수리 상태가 유효함"
 review="$(esc design .review)"; cp "$review" "$TMP/review.keep"
 jq '.verdict="PASS" | .blocking_issues=[]' "$TMP/review.keep" > "$review"
 cfg user_escalation_resolved_current design && fail "7-g: 리뷰 JSON 이 변조됐는데 수리 상태가 유효함"

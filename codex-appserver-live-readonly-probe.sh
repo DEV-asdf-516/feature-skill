@@ -24,7 +24,7 @@ mkdir -p "$(dirname "$skill_copy")" && cp -R .claude/skills/feature "$skill_copy
 sed 's|^TEST_CMD="CHANGE_ME"|TEST_CMD="true"|; s|^LINT_CMD="CHANGE_ME"|LINT_CMD="true"|' .claude/skills/feature/config.sh > "$skill_copy/config.sh" || exit 1
 export FEATURE_PROJECT_ROOT="$root"
 # shellcheck source=/dev/null
-source "$skill_copy/config.sh"
+source "$skill_copy/scripts/lib/bootstrap.sh"
 [ "$WORK_DIR" = "$work_dir" ] || { echo "[FAIL] WORK_DIR($WORK_DIR)이 $work_dir 가 아니다." >&2; exit 1; }
 [ "$(role_backend REVIEWER)" = codex_app_server ] || { echo '[FAIL] REVIEWER가 Codex App Server backend가 아니다.' >&2; exit 1; }
 command -v "$CODEX_BIN" >/dev/null 2>&1 || { echo '[FAIL] codex 바이너리가 없다.' >&2; exit 1; }

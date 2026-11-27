@@ -155,7 +155,7 @@ def main():
     assert (r27 / 'changed/src/TaskService.java').read_bytes() == (r29 / 'changed/src/TaskService.java').read_bytes()   # 27↔29: 코드 같고 문서만 다르다
     assert (r27 / 'changed/src/TaskService.java').read_bytes() != (r28 / 'changed/src/TaskService.java').read_bytes()
     review_schema = json.loads((ROOT / '.claude/skills/feature/schemas/impl-review.schema.json').read_text())
-    config = (ROOT / '.claude/skills/feature/config.sh').read_text()
+    config = (ROOT / '.claude/skills/feature/scripts/lib/runtime.sh').read_text()
     assert review_schema['properties']['schema_version']['enum'] == [int(re.search(r'^REVIEWER_CONTRACT_VERSION=(\d+)', config, re.M).group(1))]
     for case in sorted(RCASES.glob('case-*')):
         if (case / 'prev-review.json').is_file():
@@ -164,7 +164,7 @@ def main():
     assert '기존 계산·판단 결과의 재사용 규칙' in reviewer and '사용자 에스컬레이션' in reviewer and '문서 작성자가 해소한다' not in reviewer
     harness = (ROOT / 'tests/validator-regression.sh').read_text()
     assert 'cp "$case_dir/conventions.md" "$target/conventions.md"' in harness  # 하니스가 conventions 를 검증자에게 전달
-    assert schema['properties']['schema_version']['enum'] == [int(re.search(r'^VALIDATOR_CONTRACT_VERSION=(\d+)', (ROOT / '.claude/skills/feature/config.sh').read_text(), re.M).group(1))]
+    assert schema['properties']['schema_version']['enum'] == [int(re.search(r'^VALIDATOR_CONTRACT_VERSION=(\d+)', (ROOT / '.claude/skills/feature/scripts/lib/runtime.sh').read_text(), re.M).group(1))]
     for prompt in ('validator-review-impl.md', 'validator-review-design.md'):
         text = (ROOT / '.claude/skills/feature/prompts' / prompt).read_text()
         assert '문서 주장의 교차 검증' in text and '${PROJECT_CONVENTIONS}' in text, prompt

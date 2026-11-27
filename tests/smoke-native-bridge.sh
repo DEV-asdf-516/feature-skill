@@ -30,6 +30,8 @@ HOOK="$TMP/repo/.claude/hooks/feature_native_agent.sh"
 # Claude Code 는 훅을 경로로 직접 실행한다(bash <file> 이 아니다) — 실행 비트가 없으면 훅이 조용히 돌지 않아 dispatch 검증·캡처가 통째로 빠진다(2026-11-23 실모델 POC 에서 관측).
 [ -x "$PROJECT_SRC/.claude/hooks/feature_native_agent.sh" ] || fail "훅에 실행 비트가 없음: .claude/hooks/feature_native_agent.sh"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 # 어떤 CLI 도 불리면 안 되는 구간이 있으므로 두 CLI 모두 호출을 기록하는 mock 으로 둔다.
 cat > "$TMP/bin/claude" <<'EOS'
 #!/usr/bin/env bash
@@ -51,7 +53,7 @@ setcfg "s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|" "s|^CODEX_BACKEND=.*|C
   's|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND="native"|' 's|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL="claude-fable-5-2"|' 's|^VALIDATOR_MODEL=.*|VALIDATOR_MODEL="claude-opus-5-5"|' \
   's|^WORKER_MODEL=.*|WORKER_MODEL="claude-opus-5-5"|' 's|^REVIEWER_MODEL=.*|REVIEWER_MODEL="claude-sonnet-5-5"|' 's|^FIXER_MODEL=.*|FIXER_MODEL="claude-sonnet-5-5"|' \
   's|^VALIDATOR_PROFILE=.*|VALIDATOR_PROFILE="none"|'
-export MOCK_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+export MOCK_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 
 cd "$TMP/repo" || exit 1
 git init -q
@@ -69,9 +71,9 @@ BLOCK_JSON="{\"schema_version\":$MOCK_CONTRACT,\"verdict\":\"BLOCK\",\"blocking_
 # 역할 호출을 서브셸에서: 종료 코드(0/1/42/43)를 그대로 본다.
 RC=0
 role_ro() { # ROLE key label out  [env 는 호출자가 앞에 붙인다]
-  RC=0; ( set -e; source "$CFG"; run_readonly_json_role "$1" "$2" "$3" "$SCHEMA" "$4" "smoke prompt for $3" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+  RC=0; ( set -e; source "$LOADER"; run_readonly_json_role "$1" "$2" "$3" "$SCHEMA" "$4" "smoke prompt for $3" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 }
-role_accept() { ( set -e; source "$CFG"; role_session_accept "$1" "$2" smoke ) >> "$TMP/last.log" 2>&1; }
+role_accept() { ( set -e; source "$LOADER"; role_session_accept "$1" "$2" smoke ) >> "$TMP/last.log" 2>&1; }
 req_file() { jq -r '.request_path' "$ND/pending.json"; }
 req_get() { jq -r "$1" "$(req_file)"; }
 req_count() { ls "$ND/requests"/*.json 2>/dev/null | wc -l | tr -d ' '; }
@@ -163,33 +165,33 @@ sim_stop() { # agent-id agent-type
 }
 
 # ================= R04 지원하지 않는 모델 / 모델·CLI override 충돌 =================
-r="$(bash -c 'source "$1"; REVIEWER_CLI=codex role_backend REVIEWER' _ "$CFG" 2>&1)" && fail "R04: claude 모델 + REVIEWER_CLI=codex 가 통과함: $r"
+r="$(bash -c 'source "$1"; REVIEWER_CLI=codex role_backend REVIEWER' _ "$LOADER" 2>&1)" && fail "R04: claude 모델 + REVIEWER_CLI=codex 가 통과함: $r"
 printf '%s' "$r" | grep -q ROLE_CLI_CONFLICT || fail "R04: 충돌 오류 코드 없음: $r"
-r="$(bash -c 'source "$1"; WORKER_MODEL=gpt-6-luna WORKER_CLI=claude role_backend WORKER' _ "$CFG" 2>&1)" && fail "R04: gpt 모델 + WORKER_CLI=claude 가 통과함"
-r="$(bash -c 'source "$1"; WORKER_MODEL=mystery-1 role_backend WORKER' _ "$CFG" 2>&1)" && fail "R04: 이름으로 판정할 수 없는 모델이 통과함"
-r="$(bash -c 'source "$1"; CLAUDE_BACKEND=sdk role_backend VALIDATOR' _ "$CFG" 2>&1)" && fail "R04: 알 수 없는 CLAUDE_BACKEND 가 통과함"
+r="$(bash -c 'source "$1"; WORKER_MODEL=gpt-6-luna WORKER_CLI=claude role_backend WORKER' _ "$LOADER" 2>&1)" && fail "R04: gpt 모델 + WORKER_CLI=claude 가 통과함"
+r="$(bash -c 'source "$1"; WORKER_MODEL=mystery-1 role_backend WORKER' _ "$LOADER" 2>&1)" && fail "R04: 이름으로 판정할 수 없는 모델이 통과함"
+r="$(bash -c 'source "$1"; CLAUDE_BACKEND=sdk role_backend VALIDATOR' _ "$LOADER" 2>&1)" && fail "R04: 알 수 없는 CLAUDE_BACKEND 가 통과함"
 [ ! -e "$ND/pending.json" ] && [ ! -s "$CLI_LOG" ] || fail "R04: 오류인데 요청·CLI 호출이 생김"
 pass "R04. 모델·CLI override 충돌 / 미지원 모델 / 알 수 없는 backend → 명시적 오류, 호출 없음"
 
 # ================= R01 R02 R03 모델 기준 라우팅 =================
-r="$(bash -c 'source "$1"; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$CFG")"
+r="$(bash -c 'source "$1"; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$LOADER")"
 [ "$r" = "claude_native claude_native claude_native claude_native claude_native " ] || fail "R01: 다섯 역할이 모두 native 가 아님: $r"
-r="$(bash -c 'source "$1"; DESIGN_REVISION_MODEL=gpt-6-sol VALIDATOR_MODEL=gpt-6.2-astra WORKER_MODEL=o4-mini REVIEWER_MODEL=codex-x FIXER_MODEL=gpt-5.6-sol; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$CFG")"
+r="$(bash -c 'source "$1"; DESIGN_REVISION_MODEL=gpt-6-sol VALIDATOR_MODEL=gpt-6.2-astra WORKER_MODEL=o4-mini REVIEWER_MODEL=codex-x FIXER_MODEL=gpt-5.6-sol; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$LOADER")"
 [ "$r" = "codex_cli codex_cli codex_cli codex_cli codex_cli " ] || fail "R02: 다섯 역할이 모두 codex 가 아님: $r"
-r="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra REVIEWER_MODEL=gpt-5.6-sol; a="$(for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done)"; VALIDATOR_MODEL=claude-opus-5-5 WORKER_MODEL=gpt-6-luna; printf "%s| " "$a"; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$CFG")"
+r="$(bash -c 'source "$1"; VALIDATOR_MODEL=gpt-6.2-astra REVIEWER_MODEL=gpt-5.6-sol; a="$(for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done)"; VALIDATOR_MODEL=claude-opus-5-5 WORKER_MODEL=gpt-6-luna; printf "%s| " "$a"; for x in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do printf "%s " "$(role_backend $x)"; done' _ "$LOADER")"
 [ "$r" = "claude_native codex_cli claude_native codex_cli claude_native | claude_native claude_native codex_cli codex_cli claude_native " ] || fail "R03: 교차 변경 라우팅 불일치: $r"
-r="$(bash -c 'source "$1"; CLAUDE_BACKEND=legacy_cli; printf "%s %s" "$(role_backend VALIDATOR)" "$(REVIEWER_CLI=codex role_backend REVIEWER)"' _ "$CFG")"
+r="$(bash -c 'source "$1"; CLAUDE_BACKEND=legacy_cli; printf "%s %s" "$(role_backend VALIDATOR)" "$(REVIEWER_CLI=codex role_backend REVIEWER)"' _ "$LOADER")"
 [ "$r" = "claude_cli codex_cli" ] || fail "R03: legacy_cli 가 종전 의미가 아님: $r"
 # R02 실행 확인: codex 모델이면 native 요청 0개, codex CLI 1회
-RC=0; ( set -e; source "$CFG"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-x-$RANDOM" "design-validator-round-01" "$SCHEMA" "$TMP/codex-out.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-x-$RANDOM" "design-validator-round-01" "$SCHEMA" "$TMP/codex-out.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 0 ] && [ "$(grep -c '^codex' "$CLI_LOG")" = 1 ] && [ ! -e "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "R02: codex 역할이 기존 CLI 경로로 가지 않음 (rc $RC)"; }
 : > "$CLI_LOG"; rm -f .agent-work/usage.jsonl
 pass "R01·R02·R03. 역할이 아니라 모델이 backend 를 정한다(native / codex CLI / 명시적 legacy_cli)"
 
 # ================= R12 전역 effort·model override 사전 검사 =================
-RC=0; ( set -e; source "$CFG"; CLAUDE_CODE_EFFORT_LEVEL=low run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/o.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_CODE_EFFORT_LEVEL=low run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/o.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 1 ] && grep -q NATIVE_EFFORT_OVERRIDE "$TMP/last.log" && [ ! -e "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "R12: CLAUDE_CODE_EFFORT_LEVEL 불일치가 요청 전에 막히지 않음 (rc $RC)"; }
-RC=0; ( set -e; source "$CFG"; CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/o.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/o.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 1 ] && grep -q NATIVE_MODEL_OVERRIDE "$TMP/last.log" && [ ! -e "$ND/pending.json" ] || fail "R12: CLAUDE_CODE_SUBAGENT_MODEL_FORCE 가 요청 전에 막히지 않음"
 pass "R12. 전역 model/effort override → 요청 발행 전 중단"
 
@@ -256,18 +258,18 @@ jq -e '.cost_kind=="estimated" and ((.estimated_cost_usd - 0.001036) | fabs) < 1
   and .input_uncached==3 and .cache_read==500 and .cache_write==20 and (.pricing_assumptions|test("실제 청구액 아님"))' .agent-work/usage.jsonl >/dev/null \
   || fail "R26: native 호출의 비용 추정이 가격표 환산과 다름: $(cat .agent-work/usage.jsonl)"
 # 전사에서 토큰을 읽은 호출은 '사용량 미관측'이 아니다. 보고 줄은 추정 비용에 포함하고 추정 불가 0건으로 적는다
-r26_line="$( ( source "$CFG"; usage_cost_report_line ) )"
+r26_line="$( ( source "$LOADER"; usage_cost_report_line ) )"
 case "$r26_line" in *"추정 비용(codex·claude native) \$0.001 (API 표준 요금 기준 환산, estimated)"*"추정 불가 0건(사용량 미관측 0건"*"claude_native=1건(reported \$0, estimated \$0.001, unknown 0)"*) ;;
   *) fail "R26: 비용 보고 줄이 native 추정 비용을 싣지 않거나 관측된 호출을 미관측으로 셈: $r26_line";; esac
 # 환산할 수 없는 경우는 0 달러가 아니라 unknown: 캐시 쓰기의 TTL 구분 없음 · fast mode · US 전용 추론 · 가격표에 없는 모델(프롬프트 길이별 요금인 haiku 포함)
-r26_est() { ( source "$CFG"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.estimated_cost_usd' ); }
+r26_est() { ( source "$LOADER"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.estimated_cost_usd' ); }
 [ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":500,"cache_creation_input_tokens":20,"output_tokens":40}')" = null ] || fail "R26: 캐시 쓰기 TTL 구분이 없는데 단가를 추측해 추정함"
 [ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":40,"speeds":["fast"]}')" = null ] || fail "R26: fast mode 요청을 표준 요금으로 추정함"
 [ "$(r26_est '{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":40,"inference_geos":["us"]}')" = null ] || fail "R26: US 전용 추론 요청을 표준 요금으로 추정함"
 [ "$(r26_est '{"input_tokens":1000000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0,"speeds":["standard"],"inference_geos":["global"]}')" = 4 ] || fail "R26: 입력 1M 토큰의 추정이 $4 가 아님"
 # 불완전한 usage 는 정상 추정치로 기록하지 않는다: 필수 토큰 필드 누락·숫자 아님·음수, 일부 API 요청의 usage 누락 → unknown + partial(누락을 0 으로 읽지 않는다)
 r26_full='"input_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0'
-r26_chk() { ( source "$CFG"; claude_native_usage_check "$1" | jq -r '[.status, (.error // "")] | join(" ")' ); }
+r26_chk() { ( source "$LOADER"; claude_native_usage_check "$1" | jq -r '[.status, (.error // "")] | join(" ")' ); }
 for r26_bad in '{"input_tokens":1000,"cache_read_input_tokens":500,"cache_creation_input_tokens":0}' \
                '{"input_tokens":1000,"cache_creation_input_tokens":0,"output_tokens":40}' \
                '{"input_tokens":1000,"cache_read_input_tokens":500,"output_tokens":40}' \
@@ -287,13 +289,13 @@ r26_bad="{$r26_full,\"api_requests\":1,\"usage_unidentified_records\":2}"
 [ "$(r26_chk '{}')" = "unavailable " ] && [ "$(r26_chk 'null')" = "unavailable " ] && [ "$(r26_est '{}')" = null ] || fail "R26: usage 가 없는 캡처가 unavailable 이 아님"
 [ "$(r26_chk "{$r26_full}")" = "transcript " ] || fail "R26: 완전한 usage 가 transcript 로 판정되지 않음"
 # speed·inference_geo 미보고는 표준 요금으로 가정해 추정하되 그 가정을 적는다. 둘 다 보고된 요청만이면 가정 문구가 없다
-r26_asm() { ( source "$CFG"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.assumptions' ); }
+r26_asm() { ( source "$LOADER"; claude_native_estimate_cost "$1" "$(claude_model_pricing claude-opus-5-5)" | jq -r '.assumptions' ); }
 [ "$(r26_est "{$r26_full}")" = 0.004 ] || fail "R26: speed·geo 미보고 요청의 추정이 표준 요금 환산이 아님"
 case "$(r26_asm "{$r26_full}")" in *"speed 미보고 요청은 standard 로 가정"*"inference_geo 미보고 요청은 표준 요금"*) ;; *) fail "R26: speed·geo 미보고 가정이 assumptions 에 없음: $(r26_asm "{$r26_full}")";; esac
 case "$(r26_asm "{$r26_full,\"speeds\":[\"standard\",\"unreported\"],\"inference_geos\":[\"global\"]}")" in *"speed 미보고"*) ;; *) fail "R26: 일부 요청의 speed 미보고 가정이 빠짐";; esac
 case "$(r26_asm "{$r26_full,\"speeds\":[\"standard\"],\"inference_geos\":[\"global\"]}")" in *"미보고"*) fail "R26: 보고된 speed·geo 에 가정 문구가 붙음";; esac
-( source "$CFG"; claude_model_pricing claude-haiku-5-5 >/dev/null || claude_model_pricing claude-opus-5-5-20260101 >/dev/null ) && fail "R26: 가격표에 없는 모델(길이별 요금·날짜 접미사 ID)에 가격을 돌려줌"
-( source "$CFG"; printf '{"cli":"claude_native","cost_usd":null,"estimated_cost_usd":null,"usage_observation_status":"unavailable"}\n' > "$TMP/r26.usage"; [ "$(usage_summary "$TMP/r26.usage" | jq -r '.usage_unobserved_invocations')" = 1 ] ) \
+( source "$LOADER"; claude_model_pricing claude-haiku-5-5 >/dev/null || claude_model_pricing claude-opus-5-5-20260101 >/dev/null ) && fail "R26: 가격표에 없는 모델(길이별 요금·날짜 접미사 ID)에 가격을 돌려줌"
+( source "$LOADER"; printf '{"cli":"claude_native","cost_usd":null,"estimated_cost_usd":null,"usage_observation_status":"unavailable"}\n' > "$TMP/r26.usage"; [ "$(usage_summary "$TMP/r26.usage" | jq -r '.usage_unobserved_invocations')" = 1 ] ) \
   || fail "R26: 전사에 usage 가 없는 native 호출이 미관측으로 세어지지 않음"
 [ ! -e .agent-work/.session-validator-design-01-ddd.native.json ] || fail "R19: accept 하지 않은 검증자 세션이 확정됨"
 pass "R09·R06·R26. completed 원문만 수용(1회), 중복 훅 무시, usage 는 관측값 + 비용 unknown"
@@ -391,7 +393,7 @@ jq -e '.report_status=="OK" and .usage.api_requests==0 and .usage.usage_unidenti
 role_ro VALIDATOR "validator-design-44-b" "design-validator-round-44" "$TMP/v44.json"; [ "$RC" = 0 ] || { cat "$TMP/last.log"; fail "U1: 수용 실패(44) (rc $RC)"; }
 [ "$(u1_row design-validator-round-44 | jq -r '[.cost_kind, .estimated_cost_usd, .usage_observation_status, .usage_error, .input_uncached, .output, .num_turns, .context_last_turn, .success] | @csv')" = '"unknown",,"partial","USAGE_REQUEST_ID_MISSING",,,,605,true' ] \
   || fail "U1: message.id 없는 요청이 정상 관측으로 기록됐거나, 마지막 레코드 자체의 usage 로 정해지는 컨텍스트(5 + 600)가 남지 않음: $(u1_row design-validator-round-44)"
-[ "$( ( source "$CFG"; usage_summary | jq -r '[.usage_unobserved_invocations >= 5, .estimated_cost_usd < 0.01] | @csv' ) )" = 'true,true' ] || fail "U1: 불완전 관측 행이 미관측 집계에 들어가지 않음"
+[ "$( ( source "$LOADER"; usage_summary | jq -r '[.usage_unobserved_invocations >= 5, .estimated_cost_usd < 0.01] | @csv' ) )" = 'true,true' ] || fail "U1: 불완전 관측 행이 미관측 집계에 들어가지 않음"
 pass "U1. 불완전한 usage(필수 필드 누락·음수·비숫자·일부 요청의 usage 누락·합계에 없는 보조 모델 호출·message.id 없는 레코드) → 비용 unknown·관측 partial·토큰 null, 결과 수용은 불변. context_last_turn 은 마지막 본 모델 호출의 usage 가 검증될 때만 따로 남는다"
 
 # ================= R11 다른 모델로 fallback =================
@@ -414,10 +416,10 @@ pass "R11. 요청과 다른 모델의 결과 → 불수용, 재실행도 모델 
 : > "$CLI_LOG"
 role_ro VALIDATOR "validator-design-07-a" "design-validator-round-07" "$TMP/v7.json"; [ "$RC" = 42 ] || fail "R29: 요청 발행 실패"
 id7="$(req_get '.request_id')"
-RC=0; ( set -e; source "$CFG"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-design-07-b" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-design-07-b" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 43 ] && grep -q NATIVE_PENDING_BACKEND_CHANGED "$TMP/last.log" && [ ! -s "$CLI_LOG" ] && [ ! -e "$TMP/v7.json" ] \
   || { cat "$TMP/last.log"; fail "R29: 모델을 codex 로 바꾼 같은 호출 지점이 남은 native 요청 위에서 CLI 를 호출함 (rc $RC, cli: $(cat "$CLI_LOG"))"; }
-RC=0; ( set -e; source "$CFG"; CLAUDE_BACKEND=legacy_cli; run_readonly_json_role VALIDATOR "validator-design-07-c" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_BACKEND=legacy_cli; run_readonly_json_role VALIDATOR "validator-design-07-c" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 43 ] && grep -q NATIVE_PENDING_BACKEND_CHANGED "$TMP/last.log" && [ ! -s "$CLI_LOG" ] \
   || { cat "$TMP/last.log"; fail "R29: CLAUDE_BACKEND=legacy_cli 로 바꾼 같은 호출 지점이 claude -p 를 호출함 (rc $RC, cli: $(cat "$CLI_LOG"))"; }
 [ "$(req_get '.request_id')" = "$id7" ] && [ "$(req_get '.state')" = PREPARED ] || fail "R29: backend 변경 중단이 요청 state 를 바꿈: $(req_get '.state')"
@@ -426,7 +428,7 @@ role_ro VALIDATOR "validator-design-07-d" "design-validator-round-07" "$TMP/v7.j
 [ "$RC" = 42 ] && [ "$(req_get '.request_id')" = "$id7" ] || fail "R29: 설정 원복 뒤 같은 요청이 이어지지 않음 (rc $RC)"
 sim_agent "$PASS_JSON" || fail "R29: dispatch 실패"
 # 결과가 캡처된 뒤(RESULT_READY)에 backend 가 바뀌어도 같다 — 수용도 CLI 호출도 하지 않는다
-RC=0; ( set -e; source "$CFG"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-design-07-e" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; VALIDATOR_MODEL=gpt-6.2-astra; run_readonly_json_role VALIDATOR "validator-design-07-e" "design-validator-round-07" "$SCHEMA" "$TMP/v7.json" "p" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 43 ] && grep -q NATIVE_PENDING_BACKEND_CHANGED "$TMP/last.log" && [ ! -s "$CLI_LOG" ] && [ ! -e "$TMP/v7.json" ] && [ "$(req_get '.state')" = RESULT_READY ] \
   || { cat "$TMP/last.log"; fail "R29: RESULT_READY 요청 위에서 backend 변경이 통과함 (rc $RC)"; }
 role_ro VALIDATOR "validator-design-07-f" "design-validator-round-07" "$TMP/v7.json"; [ "$RC" = 0 ] && [ -s "$TMP/v7.json" ] || { cat "$TMP/last.log"; fail "R29: 설정 원복 뒤 수용 실패 (rc $RC)"; }
@@ -440,7 +442,7 @@ role_ro VALIDATOR "validator-design-04-b" "design-validator-round-04" "$TMP/v4.j
 ( bash .claude/skills/feature/scripts/native-agent-bridge.sh discard "$(req_get '.request_id')" ) >/dev/null 2>&1 || fail "R07: discard 실패"
 role_ro VALIDATOR "validator-design-04-c" "design-validator-round-04" "$TMP/v4.json"; [ "$RC" = 42 ] || fail "R07: 요청 재발행 실패"
 sim_agent "$PASS_JSON" || fail "R07: dispatch 실패"
-RC=0; ( set -e; source "$CFG"; CLAUDE_CODE_SESSION_ID=sess-other run_readonly_json_role VALIDATOR k "design-validator-round-04" "$SCHEMA" "$TMP/v4.json" "smoke prompt for design-validator-round-04" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_CODE_SESSION_ID=sess-other run_readonly_json_role VALIDATOR k "design-validator-round-04" "$SCHEMA" "$TMP/v4.json" "smoke prompt for design-validator-round-04" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 43 ] && grep -q NATIVE_OWNER_SESSION_MISMATCH "$TMP/last.log" || { cat "$TMP/last.log"; fail "R07: 다른 메인 세션이 결과를 가져감 (rc $RC)"; }
 reset_native
 pass "R07. 프롬프트 해시·소유 세션·호출 지점 불일치 → 불수용, 자동 복구 없음"
@@ -486,7 +488,7 @@ role_ro REVIEWER "reviewer-a02" "impl-review-a02-round-01" "$TMP/r3.json"
 role_ro VALIDATOR "validator-design-01-x" "design-validator-round-01" "$TMP/v5.json"; [ "$(req_get '.session_intent')" = NEW ] || fail "R19: 검증자가 fresh 가 아님"
 ( bash .claude/skills/feature/scripts/native-agent-bridge.sh discard "$(req_get '.request_id')" ) >/dev/null 2>&1 || fail "discard 실패"
 # R17: 부모 세션이 바뀜(/clear·세션 교체) → 묵시적 fresh 금지
-RC=0; ( set -e; source "$CFG"; CLAUDE_CODE_SESSION_ID=sess-new run_readonly_json_role REVIEWER reviewer-a01 "impl-review-a01-round-03" "$SCHEMA" "$TMP/r4.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_CODE_SESSION_ID=sess-new run_readonly_json_role REVIEWER reviewer-a01 "impl-review-a01-round-03" "$SCHEMA" "$TMP/r4.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 1 ] && grep -q NATIVE_PARENT_SESSION_LOST "$TMP/last.log" && [ ! -e "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "R17: 부모 세션 소실인데 요청이 발행됨 (rc $RC)"; }
 pass "R19·R17. 검증자 매회 fresh / 리뷰어 attempt 단위 재개(SendMessage, 같은 agent id) / 부모 세션 소실 시 묵시적 fresh 금지"
 
@@ -494,7 +496,7 @@ pass "R19·R17. 검증자 매회 fresh / 리뷰어 attempt 단위 재개(SendMes
 echo "11111111-2222-3333-4444-555555555555" > .agent-work/.session-reviewer-a09
 role_ro REVIEWER "reviewer-a09" "impl-review-a09-round-01" "$TMP/r9.json"
 [ "$RC" = 1 ] && grep -q SESSION_CLI_MISMATCH "$TMP/last.log" && [ ! -e "$ND/pending.json" ] && [ -f .agent-work/.session-reviewer-a09 ] || { cat "$TMP/last.log"; fail "R27: claude -p 세션이 native 로 묵시적 이관됨 (rc $RC)"; }
-RC=0; ( set -e; source "$CFG"; CLAUDE_BACKEND=legacy_cli; run_readonly_json_role REVIEWER reviewer-a01 "impl-review-a01-round-03" "$SCHEMA" "$TMP/r9.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; CLAUDE_BACKEND=legacy_cli; run_readonly_json_role REVIEWER reviewer-a01 "impl-review-a01-round-03" "$SCHEMA" "$TMP/r9.json" p "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 1 ] && grep -q SESSION_CLI_MISMATCH "$TMP/last.log" && [ ! -s "$CLI_LOG" ] || { cat "$TMP/last.log"; fail "R27: native 세션이 claude -p 로 묵시적 이관됨 (rc $RC)"; }
 reset_native
 pass "R27. 진행 중인 claude -p ↔ native 세션은 서로 자동 이관되지 않음(상태 보존)"
@@ -678,9 +680,9 @@ cp .claude/skills/feature/prompts/fixer.md "$TMP/fixer.md.keep"; echo "<!-- chan
 role_ro VALIDATOR "validator-design-01-b" "design-validator-round-01" "$TMP/v6.json"
 [ "$RC" = 43 ] && grep -q NATIVE_STALE_REQUEST "$TMP/last.log" && [ ! -e "$TMP/v6.json" ] || { cat "$TMP/last.log"; fail "R28: 스킬 변경 뒤 낡은 결과가 수용됨 (rc $RC)"; }
 cp "$TMP/fixer.md.keep" .claude/skills/feature/prompts/fixer.md; reset_native
-RC=0; ( set -e; source "$CFG"; NATIVE_INPUT_FP=fp-1 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/v6.json" "smoke prompt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; NATIVE_INPUT_FP=fp-1 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/v6.json" "smoke prompt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 sim_agent "$PASS_JSON" || fail "R28: dispatch 실패"
-RC=0; ( set -e; source "$CFG"; NATIVE_INPUT_FP=fp-2 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/v6.json" "smoke prompt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( set -e; source "$LOADER"; NATIVE_INPUT_FP=fp-2 run_readonly_json_role VALIDATOR k "design-validator-round-01" "$SCHEMA" "$TMP/v6.json" "smoke prompt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 43 ] && grep -q '입력 지문' "$TMP/last.log" || { cat "$TMP/last.log"; fail "R28: 입력 지문 변경 뒤 낡은 결과가 수용됨 (rc $RC)"; }
 reset_native
 pass "R28. 요청 발행 뒤 스킬·프롬프트·입력 지문이 바뀌면 낡은 결과 거부"
@@ -748,7 +750,7 @@ git checkout -q -- src/u01.txt   # 앞 사례(R14)가 남긴 source 변경을 �
 # source 만 한 호출자는 복구 명령을 실행하지 않는다(위치 인자가 discard 여도)
 role_ro VALIDATOR "validator-design-21-a" "design-validator-round-21" "$TMP/s1.json"; [ "$RC" = 42 ] || { cat "$TMP/last.log"; fail "S1: 요청 발행 실패"; }
 ids1="$(req_get '.request_id')"
-run_to "$TMP/repo" bash -c 'f="$1"; set -- discard "$2"; source "$f"; echo SOURCED-CONFIG' _ "$CFG" "$ids1"
+run_to "$TMP/repo" bash -c 'f="$1"; set -- discard "$2"; source "$f"; echo SOURCED-CONFIG' _ "$LOADER" "$ids1"
 [ "$RC" = 0 ] && grep -q SOURCED-CONFIG "$TMP/last.log" && [ -f "$ND/pending.json" ] && [ "$(req_get '.state')" = PREPARED ] || { cat "$TMP/last.log"; fail "S1: config.sh 를 source 만 했는데 복구 명령이 실행됨 (rc $RC)"; }
 run_to "$TMP/repo" bash -c 'f="$1"; set -- discard "$2"; source "$f"; declare -F native_role_call >/dev/null && echo SOURCED-BRIDGE' _ "$ABS_BR" "$ids1"
 [ "$RC" = 0 ] && grep -q SOURCED-BRIDGE "$TMP/last.log" && [ -f "$ND/pending.json" ] || { cat "$TMP/last.log"; fail "S1: 브리지를 source 만 했는데 복구 명령이 실행됨 (rc $RC)"; }
@@ -795,7 +797,7 @@ WND="$TMP/wt/.agent-work/native-agent"
 role_ro VALIDATOR "validator-design-22-o" "design-validator-round-22" "$TMP/s2o.json"; [ "$RC" = 42 ] || fail "S2: 원본 요청 발행 실패"
 id_origin="$(req_get '.request_id')"
 WT_TOP="$(git -C "$TMP/wt" rev-parse --show-toplevel)"
-RC=0; ( cd "$TMP/wt" && set -e && FEATURE_PROJECT_ROOT="$WT_TOP" && export FEATURE_PROJECT_ROOT && source "$CFG" && run_readonly_json_role VALIDATOR "validator-design-22-w" "design-validator-round-22" "$TMP/repo/$SCHEMA" "$TMP/s2w.json" "smoke prompt wt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
+RC=0; ( cd "$TMP/wt" && set -e && FEATURE_PROJECT_ROOT="$WT_TOP" && export FEATURE_PROJECT_ROOT && source "$LOADER" && run_readonly_json_role VALIDATOR "validator-design-22-w" "design-validator-round-22" "$TMP/repo/$SCHEMA" "$TMP/s2w.json" "smoke prompt wt" "" ) > "$TMP/last.log" 2>&1 || RC=$?
 [ "$RC" = 42 ] && [ -f "$WND/pending.json" ] || { cat "$TMP/last.log"; fail "S2: worktree 요청 발행 실패 (rc $RC)"; }
 id_wt="$(jq -r '.request_id' "$WND/pending.json")"
 [ "$id_wt" != "$id_origin" ] && [ "$(jq -r '.worktree_root' "$WND/requests/$id_wt.json")" = "$WT_TOP" ] || fail "S2: 두 요청이 구분되지 않음"
@@ -862,7 +864,7 @@ sim_pre
 [ "$(printf '%s' "$SIM_OUT" | jq -r '.hookSpecificOutput.permissionDecision')" = deny ] && [ "$(req_get '.dispatch_attempt.tool_use_id')" = "$tus3" ] || fail "S3: DISPATCHING 요청의 두 번째 dispatch 가 거부되지 않음"
 [ ! -s "$CLI_LOG" ] && [ ! -e .agent-work/.session-validator-design-23-a.native.json ] || fail "S3: CLI fallback 또는 새 Agent 세션이 생김"
 # 따옴표·agent 이름이 달라도 같은 판정이다(레코드 단위 오류 필드만 있어도)
-evid() { ( set -e; source "$CFG"; native_dispatch_evidence; printf '%s/%s' "$NATIVE_EVID" "$NATIVE_EVID_REASON" ); }
+evid() { ( set -e; source "$LOADER"; native_dispatch_evidence; printf '%s/%s' "$NATIVE_EVID" "$NATIVE_EVID_REASON" ); }
 : > "$MAIN_TR"
 jq -nc --arg tu "$tus3" '{type:"user", sessionId:"sess-main", toolDenialKind:"user-rejected", toolUseResult:"Error: Agent type \"my-custom-agent\" not found", message:{role:"user", content:[{type:"tool_result", is_error:true, tool_use_id:$tu, content:"tool failed"}]}}' >> "$MAIN_TR"
 [ "$(evid)" = "UNKNOWN/AGENT_TYPE_NOT_FOUND" ] || fail "S3: 레코드 오류 필드의 not found 가 UNKNOWN 이 아님: $(evid)"

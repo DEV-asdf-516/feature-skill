@@ -23,6 +23,7 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 # 기본: 워커·리뷰어·디자이너·수정자 claude, 검증자 codex. 사례 B 에서 워커를 codex 로 바꾼다.
 sed -i.bak 's/^VALIDATOR_CLI=.*/VALIDATOR_CLI="codex"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
@@ -43,8 +44,8 @@ cat > .agent-work/implementation-units.json <<EOF
 ]}
 EOF
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT" CODEX_HOME="$TMP/codex-home"
 mkdir -p "$MOCK_STATE"
 printf 'model = "keep"\n' > "$TMP/codex-home/config.toml"; cp "$TMP/codex-home/config.toml" "$TMP/codex-config.orig"

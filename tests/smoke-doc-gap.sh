@@ -41,6 +41,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 cd "$TMP/repo" || exit 1
 git init -q
@@ -59,8 +61,8 @@ cat > .agent-work/implementation-units.json <<EOF
 ]}
 EOF
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 
@@ -171,7 +173,7 @@ no_reconsensus A
 jq -e '.version==1 and .origin=="review" and .next_step=="WAITING_USER" and .gaps[0].key=="R-01" and .gaps[0].tag=="review-issue=R-01" and (.gaps[0].options|length)==2 and .resolved_impl_fingerprint=="" and .base_consensus_review!=""' .agent-work/doc-gap-resume.json >/dev/null \
   || fail "A: doc-gap-resume.json 불일치: $(cat .agent-work/doc-gap-resume.json)"
 REVIEW_A="$(gap .review)"; [ -f "$REVIEW_A" ] && jq -e '.issues[0].action=="DOC_GAP"' "$REVIEW_A" >/dev/null || fail "A: 리뷰 JSON 이 보존되지 않음 ($REVIEW_A)"
-[ "$(gap .source_tree)" = "$(bash -c "source $CFG; snapshot_worktree_tree")" ] || fail "A: source_tree 가 현재 작업 트리와 다름"
+[ "$(gap .source_tree)" = "$(bash -c "source $LOADER; snapshot_worktree_tree")" ] || fail "A: source_tree 가 현재 작업 트리와 다름"
 grep -q 'R-01' .agent-work/run-state.json && grep -q 'Map 사전 인덱스' .agent-work/run-state.json && grep -q 'approach.md:L1-L1' .agent-work/run-state.json || fail "A: detail 에 issue id·질문·options·refs 가 없음"
 [ "$(tail -1 src/u01.txt)" = "worker 01-intake" ] && [ "$(tail -1 src/u02.txt)" = "worker 02-drop" ] || fail "A: 코드가 보존되지 않음"
 INDEX_A="$(index_hash)"
@@ -191,13 +193,13 @@ pass "A: 리뷰어 DOC_GAP → NEED_USER/REVIEW_DOC_GAP, 검증자·디자이너
 
 # ===== 사례 B: 답 + approach 반영 후 재실행 → impl consensus 0, review-gap 워커 1회 → 리뷰어 → DONE =====
 printf '\n## 결정 R-01 (REQUIRED)\nMap 사전 인덱스를 쓴다.\n' >> .agent-work/approach.md
-( source "$CFG"; consensus_pass_current impl ) && fail "B: 전제 — 문서가 바뀌었는데 impl PASS 지문이 유효함(사례가 stale 경로를 검증하지 못함)"
+( source "$LOADER"; consensus_pass_current impl ) && fail "B: 전제 — 문서가 바뀌었는데 impl PASS 지문이 유효함(사례가 stale 경로를 검증하지 못함)"
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "B: exit 0/DONE 기대, 실제 $rc/$(status)"; }
 [ "$(paste -sd'|' "$MOCK_LOG")" = "review-gap-worker|reviewer APPROVE|full-test|full-lint" ] || fail "B: 호출 순서 불일치(워커 1회 → 리뷰어 1회 기대): $(paste -sd'|' "$MOCK_LOG")"
 no_reconsensus B
 [ "$(gap .next_step)" = RESOLVED ] && [ -n "$(gap .resolved_impl_fingerprint)" ] || fail "B: 체크포인트가 RESOLVED 가 아님: $(cat .agent-work/doc-gap-resume.json)"
-[ "$(jq -r .next_step .agent-work/consensus-impl.json)" = PASS ] && ( source "$CFG"; consensus_pass_current impl ) && fail "B: impl consensus 체크포인트가 위조됨(PASS 지문이 새 문서로 덮임)"
+[ "$(jq -r .next_step .agent-work/consensus-impl.json)" = PASS ] && ( source "$LOADER"; consensus_pass_current impl ) && fail "B: impl consensus 체크포인트가 위조됨(PASS 지문이 새 문서로 덮임)"
 grep -q 'review-issue=R-01' "$MOCK_STATE/review-gap-prompt.txt" && grep -q 'Map 사전 인덱스' "$MOCK_STATE/review-gap-prompt.txt" && grep -q "$REVIEW_A" "$MOCK_STATE/review-gap-prompt.txt" || fail "B: review-gap 워커 프롬프트에 사용자 결정·리뷰 경로가 없음"
 [ "$(tail -1 src/u01.txt)" = "review-gap fix" ] || fail "B: review-gap 워커 변경이 없음"
 [ -f .agent-work/review-gap-result.json ] && jq -e '.status=="DONE"' .agent-work/worker-result.json >/dev/null || fail "B: review-gap 결과가 unit 합산 worker-result.json 을 덮어씀"
@@ -322,14 +324,14 @@ printf '\n## 또 다른 변경\n' >> .agent-work/approach.md
 printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 rc="$(run_runner)"
 [ "$(calls validator)" -eq 1 ] && grep -q 'impl 부터' "$TMP/run.log" || fail "H-1: RESOLVED 뒤 approach.md 추가 변경이 impl 재합의를 거치지 않음: $(paste -sd'|' "$MOCK_LOG")"
-( source "$CFG"; doc_gap_resolved_current ) && fail "H-1: 지문이 다른데 doc_gap_resolved_current 가 true"
+( source "$LOADER"; doc_gap_resolved_current ) && fail "H-1: 지문이 다른데 doc_gap_resolved_current 가 true"
 # H-2 위조: 체크포인트에 현재 지문을 손으로 써 넣어도(밑바탕 PASS 지문·review 불일치) 우회 불가
 reset_tree
 printf '\n## 무단 변경\n' >> .agent-work/approach.md
-jq -n --arg fp "$(bash -c "source $CFG; consensus_pass_fingerprint impl")" --arg r "$(jq -r .review .agent-work/consensus-impl.json)" \
+jq -n --arg fp "$(bash -c "source $LOADER; consensus_pass_fingerprint impl")" --arg r "$(jq -r .review .agent-work/consensus-impl.json)" \
   '{version:1,origin:"review",next_step:"RESOLVED",review:"x",attempt:1,round:1,unit_id:"",result:"",gaps:[],source_tree:"",docs_fingerprint:"",approach_hash:"",
     base_consensus_review:$r,base_consensus_round:1,base_pass_fingerprint:"forged",gap_impl_fingerprint:"",frozen_docs_hash:"",decisions_lines:0,decisions_prefix_hash:"",resolved_impl_fingerprint:$fp}' > .agent-work/doc-gap-resume.json
-( source "$CFG"; doc_gap_resolved_current ) && fail "H-2: 위조 체크포인트(밑바탕 PASS 지문 불일치)가 유효로 판정됨"
+( source "$LOADER"; doc_gap_resolved_current ) && fail "H-2: 위조 체크포인트(밑바탕 PASS 지문 불일치)가 유효로 판정됨"
 printf '{"stage":"review","test_retries":0,"stale_count":0,"history":[]}\n' > .agent-work/run-state.json
 rc="$(run_runner)"; [ "$(calls validator)" -eq 1 ] && grep -q 'impl 부터' "$TMP/run.log" || fail "H-2: 위조 체크포인트로 impl 재합의를 우회함: $(paste -sd'|' "$MOCK_LOG")"
 # H-3 대기 중 implementation.md 변경 + 답 → 해결 범위 밖(DOC_GAP_SCOPE_EXCEEDED), 모델 0회, 수리되지 않음. 되돌리면 재개
@@ -347,11 +349,11 @@ rc="$(run_runner)"; [ "$(gap .next_step)" = WORKER_PENDING ] || fail "H-4: 전�
 grep -v 'review-issue=R-01' .agent-work/decisions.md > "$TMP/d.tmp"; mv "$TMP/d.tmp" .agent-work/decisions.md
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SCOPE_EXCEEDED ] && [ ! -s "$MOCK_LOG" ] || { tail -5 "$TMP/run.log"; fail "H-4: 답 줄 삭제 뒤에도 워커가 진행됨 ($rc/$(reason))"; }
-( source "$CFG"; impl_docs_accepted ) && fail "H-4: 답이 없는데 impl_docs_accepted 가 true"
+( source "$LOADER"; impl_docs_accepted ) && fail "H-4: 답이 없는데 impl_docs_accepted 가 true"
 pass "H: impl_docs_accepted 는 활성 체크포인트 + 실제 consensus PASS + 답 존재 + 해결 범위 안 변경 + 고정 지문 일치일 때만 true — approach 단독 변경·위조·범위 밖 문서 변경·답 삭제는 전부 재합의/중단"
 
 # ===== 사례 I: 코드 변경 없는 Gap A 직후 Gap B — Gap B 의 review-gap 워커를 건너뛰지 않는다 (feature 061 재현) =====
-tree_now() { bash -c "source $CFG; snapshot_worktree_tree"; }
+tree_now() { bash -c "source $LOADER; snapshot_worktree_tree"; }
 sha_of() { shasum -a 256 "$1" | cut -c1-64; }
 reset_tree; printf 'DOCGAP' > "$MOCK_STATE/review-next"
 rc="$(run_runner)"; [ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] || fail "I: 전제(Gap A) 실패"
@@ -370,7 +372,7 @@ jq -e --arg r1 "$REVIEW_I1" --arg s1 "$(sha_of "$REVIEW_I1")" --arg s2 "$(sha_of
   and (.prior_gaps[0].resolved_impl_fingerprint|length)==64 and .prior_gaps[0].location=="src/u01.txt:L1-L1"' .agent-work/doc-gap-resume.json >/dev/null \
   || fail "I: Gap B 체크포인트(유일 tag·prior_gaps 의 원본 리뷰/이슈 ID/사용자 결정) 불일치: $(cat .agent-work/doc-gap-resume.json)"
 grep -q 'tag: review-issue=R-01@2' .agent-work/run-state.json || fail "I: detail 에 Gap B 의 답 tag 가 없음"
-( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "I: 앞선 해결(Gap A)의 연결이 유효로 확인되지 않음"
+( source "$LOADER"; [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "I: 앞선 해결(Gap A)의 연결이 유효로 확인되지 않음"
 # 답 없이 재실행: Gap A 의 답 줄([review-issue=R-01])이 Gap B 의 답으로 읽히면 안 된다 — 모델 0회로 대기
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = REVIEW_DOC_GAP ] && [ ! -s "$MOCK_LOG" ] && grep -q '답 없는 gap: review-issue=R-01@2' .agent-work/run-state.json \
@@ -472,14 +474,14 @@ rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = DOC_GAP_SOURCE_CHANGED ] && [ ! -s "$MOCK_LOG" ] && [ "$(tail -1 src/u01.txt)" = "external edit" ] \
   || { tail -5 "$TMP/run.log"; fail "K-5: 리뷰 전 tree 변경인데 DOC_GAP_SOURCE_CHANGED(모델 0회·원복 없음)가 아님 ($rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
 # K-6 리뷰 루프가 이미 진행됐으면(수정자 대기 체크포인트 / 러너가 남긴 진행 표시) tree 차이는 리뷰 체크포인트의 몫이다 — 이 판정은 tree 로 막지 않는다
-k_verdict() { ( source "$CFG"; doc_gap_review_entry_verdict "$(doc_gap_worker_identity)" "$(snapshot_worktree_tree)" >/dev/null; echo $? ); }
+k_verdict() { ( source "$LOADER"; doc_gap_review_entry_verdict "$(doc_gap_worker_identity)" "$(snapshot_worktree_tree)" >/dev/null; echo $? ); }
 [ "$(k_verdict)" -eq 11 ] || fail "K-6: 전제 — 리뷰 진행 전 tree 변경이 11 이 아님"
 cp .agent-work/review-impl.json "$TMP/k.review-impl" 2>/dev/null || true
 printf '{"next_step":"FIXER_PENDING"}\n' > .agent-work/review-impl.json
 [ "$(k_verdict)" -eq 0 ] || fail "K-6: 리뷰 루프가 진행 중(FIXER_PENDING)인데 tree 차이로 막음"
 printf '{"next_step":"NONE"}\n' > .agent-work/review-impl.json
 [ "$(k_verdict)" -eq 11 ] || fail "K-6: 리뷰 체크포인트가 초기화 상태인데 tree 차이를 통과시킴"
-( source "$CFG"; doc_gap_mark_review_progressed ) && [ "$(k_verdict)" -eq 0 ] || fail "K-6: 러너의 진행 표시(review_progressed) 뒤에도 tree 차이로 막음"
+( source "$LOADER"; doc_gap_mark_review_progressed ) && [ "$(k_verdict)" -eq 0 ] || fail "K-6: 러너의 진행 표시(review_progressed) 뒤에도 tree 차이로 막음"
 printf '\n' >> .agent-work/review-gap-result.json
 [ "$(k_verdict)" -eq 12 ] || fail "K-6: 리뷰가 진행됐어도 결과 파일 변경은 불확실(12)이어야 함"
 cp "$TMP/k.result" .agent-work/review-gap-result.json; cp "$TMP/k.ck" .agent-work/doc-gap-resume.json; cp "$TMP/k.u01" src/u01.txt
@@ -494,15 +496,15 @@ pass "K: REVIEW_PENDING 재개도 완료 기록·식별자·결과 파일 해시
 # ===== 사례 M: 리뷰 해시 없는 옛 활성 체크포인트를 다음 gap 으로 넘길 때 해시를 사후 생성하지 않는다 =====
 # 픽스처: K-7 뒤의 해결된 체크포인트(RESOLVED, 유효)에서 review_sha256 만 없앤다 = 이 필드가 생기기 전에 기록된 체크포인트
 cp .agent-work/doc-gap-resume.json "$TMP/m.ck"
-( source "$CFG"; doc_gap_resolved_current ) || fail "M: 전제 — K-7 뒤 체크포인트가 유효한 해결 상태가 아님"
+( source "$LOADER"; doc_gap_resolved_current ) || fail "M: 전제 — K-7 뒤 체크포인트가 유효한 해결 상태가 아님"
 [ -f "$(gap .review)" ] || fail "M: 전제 — 원본 리뷰 파일이 없음(사후 해시가 만들어질 조건이 아님)"
-( source "$CFG"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256|length==64' >/dev/null ) || fail "M: 전제 — 해시가 있는 체크포인트의 carry 가 해시를 넘기지 않음"
+( source "$LOADER"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256|length==64' >/dev/null ) || fail "M: 전제 — 해시가 있는 체크포인트의 carry 가 해시를 넘기지 않음"
 for strip in 'del(.review_sha256)' '.review_sha256=""'; do
   jq "$strip" "$TMP/m.ck" > .agent-work/doc-gap-resume.json
-  ( source "$CFG"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256=="" and .[-1].origin=="review" and (.[-1].answer|length)>0' >/dev/null ) \
-    || fail "M: 해시 없는 체크포인트($strip)를 넘기면서 현재 리뷰 내용으로 해시를 만들어 넣음: $( ( source "$CFG"; _doc_gap_carry_prior ) )"
+  ( source "$LOADER"; _doc_gap_carry_prior | jq -e '.[-1].review_sha256=="" and .[-1].origin=="review" and (.[-1].answer|length)>0' >/dev/null ) \
+    || fail "M: 해시 없는 체크포인트($strip)를 넘기면서 현재 리뷰 내용으로 해시를 만들어 넣음: $( ( source "$LOADER"; _doc_gap_carry_prior ) )"
   # 넘어간 기록은 검증 근거가 없으므로 다음 체크포인트에서 유효한 앞선 해결로 인정되지 않는다
-  ( source "$CFG"; jq --argjson p "$(_doc_gap_carry_prior)" '.prior_gaps=$p' "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.m" && cp "$DOC_GAP_RESUME.m" "$DOC_GAP_RESUME"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) \
+  ( source "$LOADER"; jq --argjson p "$(_doc_gap_carry_prior)" '.prior_gaps=$p' "$DOC_GAP_RESUME" > "$DOC_GAP_RESUME.m" && cp "$DOC_GAP_RESUME.m" "$DOC_GAP_RESUME"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) \
     || fail "M: 해시 없이 넘어간 앞선 해결 기록($strip)이 유효로 인정됨"
 done
 cp "$TMP/m.ck" .agent-work/doc-gap-resume.json
@@ -512,9 +514,9 @@ pass "M: 리뷰 해시 없는 옛 체크포인트는 다음 gap 으로 넘어가
 cp .agent-work/decisions.md "$TMP/l.decisions"
 { printf -- '- [USER-QUESTION][scope=impl][review-issue=R-77] 질문 → 답\n'; i=0; while [ "$i" -lt 6000 ]; do printf -- '- [round %s] 합의 이력 줄 — 파이프 버퍼를 넘기기 위한 채움 문장이다 0123456789 0123456789 0123456789\n' "$i"; i=$((i + 1)); done; } > .agent-work/decisions.md
 [ "$(wc -c < .agent-work/decisions.md)" -gt 300000 ] || fail "L: 전제 — 문서가 파이프 버퍼보다 크지 않음"
-( set -o pipefail; source "$CFG"; _doc_gap_tag_taken 'review-issue=R-77' '[]' ) || fail "L: pipefail 아래 큰 decisions.md 의 첫 줄에 있는 tag 를 '쓰이지 않음'으로 판정"
-( set -o pipefail; source "$CFG"; _doc_gap_tag_taken 'review-issue=R-78' '[]' ) && fail "L: 쓰이지 않은 tag 를 '쓰임'으로 판정"
-( set -o pipefail; source "$CFG"; [ "$(_doc_gap_unique_tags '[{"tag":"review-issue=R-77"}]' '[]' | jq -r '.[0].tag')" = 'review-issue=R-77@2' ] ) || fail "L: 이미 쓰인 tag 가 @2 로 유일화되지 않음"
+( set -o pipefail; source "$LOADER"; _doc_gap_tag_taken 'review-issue=R-77' '[]' ) || fail "L: pipefail 아래 큰 decisions.md 의 첫 줄에 있는 tag 를 '쓰이지 않음'으로 판정"
+( set -o pipefail; source "$LOADER"; _doc_gap_tag_taken 'review-issue=R-78' '[]' ) && fail "L: 쓰이지 않은 tag 를 '쓰임'으로 판정"
+( set -o pipefail; source "$LOADER"; [ "$(_doc_gap_unique_tags '[{"tag":"review-issue=R-77"}]' '[]' | jq -r '.[0].tag')" = 'review-issue=R-77@2' ] ) || fail "L: 이미 쓰인 tag 가 @2 로 유일화되지 않음"
 cp "$TMP/l.decisions" .agent-work/decisions.md
 pass "L: tag 중복 검사는 pipefail 아래 큰 문서에서도 이미 쓰인 tag 를 찾는다(SIGPIPE 오판 없음)"
 
@@ -540,7 +542,7 @@ for attempt in 1 2; do   # 실패한 실행이 지문을 고정하지 않으므�
     || fail "N($attempt): 바뀐 unit·절·복구 안내가 detail 에 없음: $(jq -r .detail .agent-work/run-state.json)"
   [ ! -e .agent-work/.doc-gap-resume.candidate.json ] || fail "N($attempt): 후보 파일 잔재가 남음"
 done
-( source "$CFG"; impl_docs_accepted ) && fail "N: 사전 검사 실패 상태에서 impl 문서가 승인된 것으로 판정됨(후보 상태가 실제 승인으로 새어 나감)"
+( source "$LOADER"; impl_docs_accepted ) && fail "N: 사전 검사 실패 상태에서 impl 문서가 승인된 것으로 판정됨(후보 상태가 실제 승인으로 새어 나감)"
 sed -i.bak 's/^unit 01 방식 — Map 사전 인덱스(어느 gap 의 해결인지 표시 없음)$/unit 01 방식 — [review-issue=R-01] Map 사전 인덱스/' .agent-work/approach.md && rm -f .agent-work/approach.md.bak
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "N: tag 를 보완했는데 같은 체크포인트로 진행되지 않음 ($rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }

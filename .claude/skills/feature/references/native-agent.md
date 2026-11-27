@@ -13,7 +13,7 @@
    - `DISPATCHING` → dispatch 를 시도했지만 실행이 확인되지 않았다(아래 "dispatch 상태"). **다시 호출하지 않는다** — 훅이 같은 요청의 두 번째 호출을 거부한다. 방금 호출이 background 로 시작됐으면 완료 알림을 기다린다. 도구 호출이 오류로 돌아왔으면 같은 명령을 재실행해 러너의 판정을 받는다.
    - `DISPATCHED` → 실행이 확인됐다. 다시 호출하지 않고 그 Agent 의 완료 알림을 기다린다.
    - `RESULT_READY` → 아무것도 호출하지 않는다.
-3. Agent 가 끝났다는 알림(또는 foreground 완료)을 받은 뒤 **같은 `feature-run.sh` 명령을 재실행**한다. Agent 호출이 "background 로 시작됨"으로 돌아오면 그것은 완료가 아니다 — 알림을 기다린다. 도구 호출 자체가 **오류·거부**로 돌아오면(다른 훅의 거부 포함) 다시 보내지 않고 바로 같은 명령을 재실행한다 — 러너가 그 호출의 거부 여부를 판정한다(아래 "dispatch 상태").
+3. Agent 가 끝났다는 알림(또는 foreground 완료)을 받은 뒤 **같은 `feature-run.sh` 명령을 재실행**한다. Agent 호출이 "background 로 시작됨"으로 돌아오면 그것은 완료가 아니다 — 알림을 기다린다. 알림이 "is waiting on its own background work"(Agent 가 자기 백그라운드 명령을 기다리며 멈췄다 — 결과가 중간일 수 있다)이면 그것도 완료가 아니다 — 같은 Agent 가 이어서 처리하도록 같은 task-id 의 다음 알림을 기다린다. 그 사이 같은 명령을 재실행하는 것은 상태 확인일 뿐 새 모델 호출이 아니다 — 훅이 캡처를 보류해 두었으므로 요청은 `DISPATCHING`/`DISPATCHED` 그대로 exit 42 로 돌아오고, 그때 `Agent`/`SendMessage` 를 다시 보내지 않는다. 실제 완료 보고를 캡처한 `RESULT_READY` 만 러너가 기존 절차로 소비한다. 도구 호출 자체가 **오류·거부**로 돌아오면(다른 훅의 거부 포함) 다시 보내지 않고 바로 같은 명령을 재실행한다 — 러너가 그 호출의 거부 여부를 판정한다(아래 "dispatch 상태").
 4. 다시 exit 42 면 1번부터 반복한다(다음 역할의 요청이다). 그 밖의 종료 코드는 SKILL.md 의 표대로 처리한다.
 
 ## dispatch 상태 — `DISPATCHING` 은 실행의 증거가 아니다
@@ -24,7 +24,7 @@
 |---|---|---|
 | `PREPARED → DISPATCHING` | PreToolUse | 요청 검증·프롬프트 주입 통과. 시도(`dispatch_attempt`: `tool_use_id`·메인 세션·도구·전사 경로)만 기록한다. PreToolUse 훅들은 병렬로 돌고 하나라도 거부하면 도구가 실행되지 않으므로, 이 훅의 allow 로는 실행됐다고 보지 않는다 |
 | `DISPATCHING → DISPATCHED` | PostToolUse | 같은 `tool_use_id`·메인 세션·도구의 **실행 성공** 응답. `Agent` 는 `status: async_launched` + `agentId`, `SendMessage` 는 `success: true` + `resumedAgentId` 가 요청의 `resume_agent_id` 와 같을 때(`success` 만으로는 재개의 증거가 아니다). 그 밖의 응답은 형태만 기록하고 상태는 그대로다 |
-| `DISPATCHING`·`DISPATCHED` → `RESULT_READY` | SubagentStop | 전사 결속 통과(요청을 dispatch 한 메인 세션, 요청의 Agent 종류, 전사의 agent id, 재개면 `resume_agent_id`, PostToolUse 가 결속한 agent id). SubagentStop 은 PostToolUse 보다 먼저 올 수 있다 |
+| `DISPATCHING`·`DISPATCHED` → `RESULT_READY` | SubagentStop | 전사 결속 통과(요청을 dispatch 한 메인 세션, 요청의 Agent 종류, 전사의 agent id, 재개면 `resume_agent_id`, PostToolUse 가 결속한 agent id). SubagentStop 은 PostToolUse 보다 먼저 올 수 있다. SubagentStop 은 Agent 의 턴 종료일 뿐 작업 완료의 증거가 아니다 — 보고가 `SubagentHandback` 이 아닌데 그 Agent 가 인계 뒤 띄운 백그라운드 Bash 명령(`run_in_background`·오래 걸린 명령의 자동 이동)의 종결 알림이 전사에 아직 없으면(`STOP_BACKGROUND_PENDING`), 또는 모두 종결됐지만 마지막 종결 알림 뒤의 새 보고가 아직 기록되지 않았으면(`STOP_BACKGROUND_REPORT_PENDING`) 중간 종료다. 전이하지 않고 결과 파일도 쓰지 않으며 `hook-trace.jsonl` 에 그 사유와 task id 만 남긴다(같은 Agent 가 다시 멈출 때 캡처한다) |
 
 - 다른 호출의 이벤트(`tool_use_id`·세션·agent id 불일치)는 요청 상태를 바꾸지 못하고 `hook-trace.jsonl` 에 흔적만 남는다. 늦은·중복 PostToolUse 는 `RESULT_READY` 를 덮어쓰지 않는다.
 - `DISPATCHING` 에서 PostToolUse 가 오지 않으면 **실행 여부 불명**이다. 러너는 재실행 때 메인 전사에서 그 `tool_use_id` 의 도구 결과를 읽어 판정한다.
@@ -77,6 +77,7 @@
 - Agent 종류를 찾지 못함(`Agent type 'feature-…' not found`): `.claude/agents/feature-<역할>.md` 는 러너가 요청 직전에 쓰지만, 세션 시작 때 `.claude/agents/` 디렉터리가 없었으면 이 세션은 그 정의를 읽지 못한다. 이 오류가 돌아오면 다시 보내지 말고 같은 러너 명령을 재실행해 요청 state 를 확인한다. 안내는 state 에 따라 다르다.
   - `PREPARED` 그대로(PreToolUse 훅이 그 호출을 기록하지 않았다): Claude Code 세션을 재시작(같은 대화 재개)한 뒤 그 dispatch 를 한 번 보낸다(기존 1회 dispatch 계약 그대로).
   - `DISPATCHING`(훅이 시도를 기록했다): 실행 전 거부가 증명되지 않는다. 러너는 이 오류를 알려진 거부 종류(`toolDenialKind`)가 함께 있어도 `UNKNOWN` 으로 판정하고 exit 42 로 대기한다(`NATIVE_DISPATCH_DENIED` 가 아니다). 세션을 재시작한 뒤에도 그 요청을 다시 dispatch 하지 않고, `redispatch` 는 거부 증거가 없어 거절된다. 모델이 실행됐는지(진행 중인 Agent·작업 트리 변경)를 사용자와 확인하고, 사용자 결정 뒤 `discard` 로만 정리한다(작업 트리가 호출 전 tree 와 같아야 하며 "거부가 확인되지 않았다" 경고가 붙는다). 자동 재호출·자동 fresh·CLI 대체는 없다.
+- `hook-trace.jsonl` 의 `STOP_BACKGROUND_PENDING`·`STOP_BACKGROUND_REPORT_PENDING`(과 `detail` 의 task id)은 진단 정보다. 백그라운드 명령은 오래 걸릴 수 있으므로 기다리는 것이 정상이다. 오래도록 종결 알림이나 새 보고가 오지 않으면 요청 state·사유·task id 를 사용자에게 보고하고 멈춘다 — 자동으로 다시 dispatch 하거나 요청을 버리지 않는다. 사용자가 버리기로 정했더라도 먼저 그 Agent 와 백그라운드 명령이 실제로 멈췄는지 확인한다(실행 중인 작업 위에서 원복·`discard` 하지 않는다). `discard` 의 작업 트리·요청 결속 검사는 그대로다.
 - `DISPATCHING`·`DISPATCHED` 에서 Agent 가 끝났는데도 결과가 캡처되지 않으면 훅 등록(`.claude/settings.json` 의 PreToolUse·PostToolUse·SubagentStop)과 `.agent-work/native-agent/hook-trace.jsonl` 을 확인하고 사용자에게 보고한다. Agent 가 실행됐을 수 있으므로 다시 dispatch 하지 않는다.
 
 ## 전제와 한계

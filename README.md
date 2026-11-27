@@ -145,9 +145,9 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
 - **합의 에스컬레이션의 사용자 결정은 최종이다**: `ASK_USER`·`DEADLOCK`·`MAX_ROUNDS` 로 멈추면 합의 루프가 마지막 실제 리뷰(경로·내용 해시·blocker 사본)와 발생 시점 지문을 `user-escalation-resume-<target>.json`(`WAITING_USER`)에 남긴다. 사용자가 그 리뷰의 모든 blocker 에 `[USER-QUESTION][scope=<target>][escalation=<id>]` 답(선택·수용·기각 모두 같은 형식, 발생 뒤 추가한 줄만 인정, 빈 답·`<답>` 플레이스홀더·다른 scope·다른 id·그 blocker 와 다른 질문 문구 불가)을 달면(`ASK_USER` 는 선택을 그 단계 문서에도 반영해야 한다 — 문서가 발생 시점과 같으면 수리되지 않는다) 재실행은 `USER_RESOLVED` 로 수리하고 **같은 단계의 검증자·디자이너를 다시 부르지 않는다** — 검증자가 사용자 결정을 다시 심판하지 않는다. `USER_RESOLVED` 는 검증자 `PASS` 가 아니다: `consensus-<target>.json` 은 PASS 가 되지 않고 리뷰 JSON 의 BLOCK 도 그대로이며, 다음 단계의 게이트(design 수리 뒤 impl 합의, 코드 리뷰, verify)는 그대로 돈다. 우회는 좁다 — 대기 중 `request.md`·conventions·(impl) `design.md`·`feature-scope.json`·`implementation-units.json`·`decisions.md` 기존 줄이 바뀌었거나 계약 버전이 달라졌으면, 또는 수리 뒤 문서·결정을 또 바꿨으면 체크포인트는 `SUPERSEDED` 가 되고 Round 1 부터 재합의한다. impl 을 사용자 수리로 통과한 뒤 워커·리뷰어가 DOC_GAP 을 내면 기존 `doc-gap-resume.json` 경로가 그 수리를 밑바탕(`base_kind=USER_RESOLVED`)으로 이어받는다.
 - **디자이너는 처방을 복사하지 않는다**: blocking issue를 5단계(요구 근거, 이번 변경 관련, 도달 가능한 경로, 지금 결정 필요, 불변식만 요구)로 판정해 REJECT한다. ACCEPT해도 위반된 불변식만 문서에 반영한다.
 - **검증자는 문서를 믿지 않고 대조한다**: 문서의 사실 주장("X 는 변경 불필요", "기존 구현 없음")은 확인 대상이다. 검증자는 ① 적용되는 `conventions.md` 명시 규칙과의 직접 충돌(동작이 같아도 BLOCK) ② 요구·확정 결정·기존 필수 계약에 근거 없는 새 제품 동작 ③ 변경 대상 함수·쿼리·서비스의 직접 호출부·피호출부 ④ 새 responsibility boundary 의 탐색 근거를 독립적으로 확인한다. 탐색은 변경 대상과 직접 의존까지이고, 확정적인 계약 위반만 막는다 — 필수 파생 기술 변경·helper/지역 변수 같은 표현 차이·스타일 선호는 대상이 아니다. 같은 세 가지(요구 출처·컨벤션 대조·실제 코드 경로)를 오케스트레이터도 material decision 에 한해 문서 작성 전에 확인한다(SKILL.md Phase 0 4번).
-- **검증 계약 버전**: 검증자 프롬프트·스키마·러너 검사 중 하나라도 바꾸면 `config.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 다른 버전의 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
+- **검증 계약 버전**: 검증자 프롬프트·스키마·러너 검사 중 하나라도 바꾸면 `scripts/lib/runtime.sh`의 `VALIDATOR_CONTRACT_VERSION`을 올린다. 러너가 다른 버전의 이전 PASS를 자동 무효화하므로 `--new` 없이 재실행하면 된다.
 - **리뷰어는 병합 게이트다**: issue 는 여섯 가지 입장 조건을 모두 만족할 때만 등록된다. 이번 diff 가 만든 문제, 아홉 category 중 하나, 증거 유형에 맞는 근거, verify 전에 반드시 해결(`UNDECIDED_APPROACH` 는 동작이 맞아도 예외), 기존 결함·장래 개선이 아님, 정확한 위치다. 명명·포맷·선호 리팩터링·정상 대응 분기·`delegated_choices` 보고 누락은 issue 가 아니다. `required_outcome` 은 결과만 적고 기법을 처방하지 않는다. `impl-review-loop.sh` 가 증거 필드(`DIRECT_MISMATCH` / `REACHABLE_FAILURE` / `SEMANTIC_REDUNDANCY`), action 별 필드(`FIX_CODE` / `DOC_GAP` — 리뷰어는 사용자 질문을 만들지 않고, 정책 선택 여부는 재합의 때 문서 검증자가 판정한다), id 유일성, Round 2 `origin`(UNRESOLVED_PREVIOUS / FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX)과 참조 대상(직전 이슈 id, 수정 diff 에 실제로 바뀐 파일)을 강제한다. 리뷰 diff 는 HEAD 가 아니라 기준선 tree(`worker-baseline.tree`) 대비다. 이 tree 는 러너가 워커 진입 직전에 기록하므로 피처 이전의 미커밋 변경은 이번 작업으로 취급되지 않는다. 수정 diff 는 라운드마다 작업 트리를 git tree 객체로 찍어 정확히 잘라낸다.
-- **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어에게 주는 지시(프롬프트·스키마)가 바뀌면 `config.sh`의 `REVIEWER_CONTRACT_VERSION`을, 지시는 그대로이고 루프 검사기만 고쳤으면 `REVIEW_CHECKER_VERSION`을 올린다 — 검사기 버전이 바뀌면 저장된 무효 출력뿐 아니라 승인 캐시(`review-impl.json` 의 `checker_version`)도 그대로 재사용되지 않고 새 검사기로 로컬 재검증(모델 0회)된 뒤에만 쓰이며, 무효로 판정되면 새 attempt 로 리뷰한다. 승인 캐시는 작업 트리 지문뿐 아니라 승인 당시 리뷰어가 읽은 계약 문서 지문(`contract_docs_sha256` — request/design/implementation/approach 본문 + `decisions.md` 의 `[USER-QUESTION]` 줄 + worktree `conventions.md` 내용, 없으면 `ABSENT`)에도 묶인다 — 코드가 그대로여도 계약이나 컨벤션이 바뀌면(재합의, 컨벤션 생성·삭제 포함) 과거 APPROVE 를 재사용하지 않고 새 attempt 로 리뷰한다(판정 이력 줄만 늘어난 것은 영향 없음, 옛 포맷(`REVIEW_CHECKPOINT_VERSION` 3 이하) 체크포인트는 재리뷰). 리뷰 출력은 스키마 파일 전체(required·enum·minItems·minLength·정의되지 않은 필드)로 먼저 검사한다.
+- **리뷰 Round 2 도 종결 검토다**: 직전 이슈의 해결 여부와 수정자가 만든 직접 회귀만 다룬다. 동일 이슈가 내용 변화 없이 반복되면 두 번째 수정자를 부르지 않고 `DEADLOCK` 으로 멈춘다. `DOC_GAP` 은 수정자를 거치지 않고 문서 단계로 간다. 리뷰어에게 주는 지시(프롬프트·스키마)가 바뀌면 `scripts/lib/runtime.sh`의 `REVIEWER_CONTRACT_VERSION`을, 지시는 그대로이고 루프 검사기만 고쳤으면 `REVIEW_CHECKER_VERSION`을 올린다 — 검사기 버전이 바뀌면 저장된 무효 출력뿐 아니라 승인 캐시(`review-impl.json` 의 `checker_version`)도 그대로 재사용되지 않고 새 검사기로 로컬 재검증(모델 0회)된 뒤에만 쓰이며, 무효로 판정되면 새 attempt 로 리뷰한다. 승인 캐시는 작업 트리 지문뿐 아니라 승인 당시 리뷰어가 읽은 계약 문서 지문(`contract_docs_sha256` — request/design/implementation/approach 본문 + `decisions.md` 의 `[USER-QUESTION]` 줄 + worktree `conventions.md` 내용, 없으면 `ABSENT`)에도 묶인다 — 코드가 그대로여도 계약이나 컨벤션이 바뀌면(재합의, 컨벤션 생성·삭제 포함) 과거 APPROVE 를 재사용하지 않고 새 attempt 로 리뷰한다(판정 이력 줄만 늘어난 것은 영향 없음, 옛 포맷(`REVIEW_CHECKPOINT_VERSION` 3 이하) 체크포인트는 재리뷰). 리뷰 출력은 스키마 파일 전체(required·enum·minItems·minLength·정의되지 않은 필드)로 먼저 검사한다.
 - **수정자는 수정자다**: `FIX_CODE` 이슈의 required_outcome 만 구현하고 새 문제를 찾거나 무관한 리팩터링을 하지 않는다. 잘못된 이슈는 코드 대신 `decisions.md` 에 `[fix round N] <id> REJECT` 로 남긴다. `OUT_OF_SCOPE_CHANGE` 는 수정자에게 가지 않는다. 범위 밖 변경은 자동 원복하지 않고 현재 상태를 보존한 채 러너가 `FOREIGN_WORKTREE_CHANGE` 로 사용자에게 반환한다. 되돌릴지 보존할지는 사용자가 결정한다. 같은 working tree 의 다른 세션 변경일 수 있고 `pre_bash_guard` 가 `git restore`/`checkout --`/`reset --hard` 를 차단한다. 워커·수정자는 git index 조작(add/reset/stash/restore --staged)이 금지된다. codex 훅의 정규식에 더해 러너·루프가 호출 전후 index 지문(`git ls-files --stage`)을 비교해 바뀌었으면 자동 복구 없이 중단한다(결과 기준 차단). 관련 테스트만 필터로 돌리고 전체 스위트는 verify 단계가 한 번 돌린다.
 - **승인 독립성**: 리뷰 세션(`reviewer`)과 수정 세션(`fixer`)은 절대 합치지 않는다.
 - **판정 격리**: 합의 루프는 사실과 계약만 공유하고 판단 과정은 넘기지 않는다. 검증자는 호출마다 fresh 세션이고, 수정 뒤 종결 검증자가 받는 것은 직전 blocker 의 구조화된 주장·증거(`reviews/prev-blockers-*.json` — 증거 위치·reachable_scenario·impact·최소 불변식, 자유 서술 `why_blocks_now` 제외)와 실제 문서 diff(`decisions.md` 제외)뿐이다. 검증자는 `decisions.md` 원본도 받지 않는다 — 러너가 `[USER-QUESTION][scope=…]` 줄만 추린 `reviews/user-decisions-<target>.md` 를 준다. 디자이너의 ACCEPT/REJECT 사유는 검증자에게 전달되지 않으므로, 디자이너가 REJECT 한 이슈를 검증자가 독립적으로 다시 성립한다고 보면 DEADLOCK 으로 사용자에게 간다. 디자이너는 blocker 의 구조화된 필드만 받고(`reviews/designer-input-*.json`) 세션은 stage 단위로 이어간다.
@@ -187,7 +187,7 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
     │   ├── pipeline-contracts.md    # 구현 단위 직렬 실행·강제 규칙(역할 경계)·변경 소유권·세션/사용량 기록
     │   ├── native-agent.md          # exit 42 NATIVE_AGENT_REQUIRED: native Agent dispatch 절차·중단 코드
     │   └── codex-app-server.md      # Codex App Server backend: 호출 기록 상태·중단 코드(CODEX_TURN_* 등)·status/reconcile/discard 수리 절차
-    ├── config.sh                # 모델/effort/라운드 한도/프로젝트 명령 + 가드 + 헬퍼
+    ├── config.sh                # 사용자 설정 전용(모델/effort/CLI·backend/라운드 한도/프로젝트 명령/경로/알림) — 설치·업데이트가 덮어쓰지 않는다
     ├── prompts/                 # 역할별 페르소나 템플릿 (envsubst 변수 치환 — unit 워커·unit 테스트 수정·빠른 검사 위반 수정 포함)
     ├── schemas/                 # 검증자/리뷰어/워커 판정 JSON 스키마 + implementation-units
     └── scripts/
@@ -196,13 +196,30 @@ worker 이후는 항상 기존 그대로 review → verify 다. 모든 구현 �
         ├── consensus-loop.sh    # 문서 합의 루프 — `design` | `impl` 인자 겸용, blocker 근거·Round 2 연계 검사
         ├── impl-review-loop.sh  # 구현 리뷰 수렴 루프 — 리뷰어 게이트, issue 근거·Round 2 연계 검사, 교착 감지 (리뷰어 호출 직전 프로젝트 빠른 검사 게이트)
         ├── fast-check.sh        # 프로젝트 빠른 검사 연결(선택, FAST_CHECK_CMD) — worktree 루트 실행·타임아웃·결과 구분(통과/위반/실행 오류)·읽기 전용 확인·실행 기록. 같은 엔진으로 Unit 정적 검사(UNIT_CHECK_CMD)·위험도별 추가 검증(RISK_VERIFY_CMD)도 실행한다
-        ├── codex-app-server.sh  # Codex App Server backend 연결부(config.sh 가 source) — 모델 0회 사전 검사·재전송 차단 게이트·호출 기록·세션 원장·사용량 행, 직접 실행하면 status/reconcile/discard/preflight
+        ├── codex-app-server.sh  # Codex App Server backend 연결부(로더가 source) — 모델 0회 사전 검사·재전송 차단 게이트·호출 기록·세션 원장·사용량 행, 직접 실행하면 status/reconcile/discard/preflight
         ├── codex-app-server.mjs # Codex App Server 런타임(Node.js 18+, 외부 패키지 없음) — `codex app-server` 자식 프로세스·JSON-RPC·이벤트 수집·상태 전이 기록
         ├── post-run-report.sh   # DONE 뒤 사후 분석 보고서(post-run-report.json) — 비용·검증·실패 회고·규칙 개선 후보. 기존 기록 집계만(모델 호출 0회), 실패해도 DONE 유지
-        └── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
+        ├── worker-invoke.sh     # run_worker(워커 1회 호출 + 사후 게이트) — feature-run.sh 가 source. tests/worker-regression.sh 가 같은 경로로 실제 워커를 부른다
+        └── lib/                 # 런타임(스킬 코드 — 설치·업데이트가 갱신한다). 진입점은 bootstrap.sh 하나
+            ├── bootstrap.sh     # 단일 로더 — 경로 초기화·필수 모듈 검사·config.sh 소유권 판정(source 전)·config.sh·모듈·브리지/App Server 연결·설정 가드
+            ├── config-layout.sh # config.sh 소유권 판정(feature_config_runtime_lines) — 로더와 install.sh 가 같이 쓴다, 실행문 없음
+            ├── runtime.sh       # 계약·포맷 버전 상수·JQ_PATH_DEFS·프롬프트/규칙 로더·tree 스냅샷·sha256/지문·JSON Schema 검사
+            ├── backend/
+            │   ├── session.sh   # 세션 정책·claude 세션 인자/확정·codex 세션 어댑터·role_session_accept
+            │   └── router.sh    # 역할 → CLI/backend 라우팅·run_readonly_json_role·워커 CLI 도구 제한·run_edit_role
+            ├── contract/
+            │   ├── scope.sh     # feature-scope manifest·기준선 가드·CLI 종료 코드≠의미적 완료·결과/경로/범위 가드
+            │   ├── unit.sh      # 구현 단위 manifest·unit 유효 계약 스냅샷·rolling implementation context
+            │   ├── consensus.sh # 문서 합의 체크포인트 공용 정의
+            │   └── review.sh    # 범위·승인·수정자 재개 지문·리뷰 계약 문서 지문·fix_ref·impl_approval_current·verify_approved_fingerprint
+            ├── state/
+            │   ├── escalation.sh # 합의 단계 사용자 에스컬레이션 수리 체크포인트·consensus_stage_accepted
+            │   └── doc-gap.sh   # 구현 후 DOC_GAP 재개 체크포인트
+            └── telemetry.sh     # usage.jsonl 기록·요금표·비용 추정·usage_summary
 
 tests/
 ├── install-smoke.sh             # LLM 없이 git+jq 로 설치·러너·훅·리뷰 루프 연결 확인
+├── smoke-runtime-loader.sh      # 런타임 로더 계약 — 설정 전용 config 로드·부작용 없음·구 설정(런타임 함수 정의·런타임 소유 대입) source 전 거부·오탐 없음(사용자 함수·여러 줄 문자열)·config/모듈 읽기 실패 거부·모듈 누락 거부·가드 유지·단독 진입 (LLM 호출 없음)
 ├── smoke-foreign-change.sh      # 범위 밖 변경 원복 금지·범위 가드 회귀 (mock claude)
 ├── smoke-feature-worktree.sh    # 피처 전용 worktree 부트스트랩·finalize 회귀 — dirty snapshot·격리·재실행 재사용·거부 조건·3-way 반영·충돌·archive·정리
 ├── smoke-implementation-units.sh # 구현 단위 직렬 실행 회귀 — 순서·겹침 없음·중단/재개·lock·unit scope·unit 사이 리뷰어 0회·targeted test·rolling context (mock)
@@ -253,7 +270,7 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    (`session_id` 별 마커, `$TMPDIR/claude-conventions-injected/`), 파이프라인 child Claude(`FEATURE_ROLE_CHILD=1`)에는 주입하지 않는다.
    child 는 `run_readonly_json_role`/`run_edit_role` 이 conventions 를 이미 명시 전달하므로 훅까지 넣으면 turn 마다 중복 cache read 가 생긴다.
    커스터마이즈가 없으면 `.new` 로 덮어쓰면 된다.
-   `install.sh` 는 `SKILL.md`·`prompts/`·`schemas/`·`scripts/`·`references/` 를 한 단위로 스테이징한 뒤 교체한다. `SKILL.md` 가 가리키는
+   `install.sh` 는 `SKILL.md`·`prompts/`·`schemas/`·`scripts/`(런타임 모듈 `scripts/lib/` 포함)·`references/` 를 한 단위로 스테이징한 뒤 교체한다. `SKILL.md` 가 가리키는
    `references/*.md` 가 소스에 하나라도 없거나 비어 있으면 아무것도 교체하지 않고 실패한다(성공 메시지 없음). `references/` 가 없던 구버전 설치는
    업데이트 때 새로 배포되며 `config.sh`·`core_rules.md`·훅 스크립트 보존 정책은 그대로다. 설치 뒤 참조 문서가 사라지면 러너가 exit 1 로 시작을 거부한다.
    **압축 복구 훅**: `.claude/hooks/compact_recovery.sh` 를 `SessionStart` 의 `"matcher": "compact"` 로 등록한다(기본 `settings.json` 에 포함). 기존
@@ -283,15 +300,48 @@ conventions.md                   # 선택: 모든 역할에 추가 주입할 프
    RISK_VERIFY_CMD=""                     # (선택) 리뷰 승인 뒤 TEST_CMD 앞에서 도는 위험도별 추가 검증 명령 — 아래 "검증 게이트"
    CHECK_GUIDE_FILE=""                    # (선택) 프로젝트가 쓴 검사 규칙 안내 문서의 worktree 상대 경로 — 아래 "검사 계획 사전 전달"
    ```
+   `config.sh` 는 사용자 설정 전용이다 — 런타임(헬퍼·계약/포맷 버전 상수·경로 초기화·설정 가드)은 `scripts/lib/` 에 있고 `scripts/lib/bootstrap.sh` 가 이 파일을 읽는다.
+   그래서 런타임·버전 상수만 바뀐 업데이트는 `config.sh` 병합이 필요 없다. 기존 `config.sh` 는 보존되고, 소스 템플릿과 다르면 `config.sh.new` 가 새 선택 설정의 설명·기본값 참고용으로 놓인다(`[INFO]`, 수동 단계 아님).
    모델별 지원 effort가 다르므로 모델과 effort를 함께 맞춘다. 실제 허용 여부는 각 CLI가 검증한다.
    빈 값이나 `CHANGE_ME`가 남으면 config.sh 가드가 스크립트 실행을 거부한다(예외: 프로젝트 명령을 실행하지 않는 조회 전용 `codex-app-server.sh status|preflight|hooks` 는 `TEST_CMD`/`LINT_CMD` 의 `CHANGE_ME` 를 넘어간다).
    **기존 설치의 Codex backend 전환**: `install.sh` 는 기존 `config.sh` 를 덮어쓰지 않으므로 `CODEX_BACKEND` 줄이 없는 설정은 종전대로 `codex exec`(legacy_exec)로 돈다(설치가 `[INFO]` 로 알린다).
    App Server 로 바꾸려면 ① 진행 중인 피처를 먼저 마치고 ② `config.sh.new` 의 `Codex 모델의 실행 backend` 블록(`CODEX_BACKEND`·`CODEX_APP_SERVER_*`)을 사용자 설정 영역에 옮겨 적은 뒤
-   ③ `bash .claude/skills/feature/scripts/codex-app-server.sh preflight` 로 codex·Node.js 호환성을 확인한다. 런타임 계약 표식(`FEATURE_RUNTIME_CONTRACT_VERSION`)이 옛 값인 `config.sh` 위에는 새 스크립트가 설치되지 않는다(혼합 설치 사전 거부).
+   ③ `bash .claude/skills/feature/scripts/codex-app-server.sh preflight` 로 codex·Node.js 호환성을 확인한다. 런타임 분리 이전의 `config.sh`(런타임 코드·버전 상수가 든 것) 위에는 새 스크립트가 설치되지 않는다 — 아래 "구 설치 이관".
 3. (선택) 프로젝트별 보호가 필요하면 훅을 추가한다. 생성 코드·마이그레이션 편집 금지 같은 규칙은
    `.codex/hooks/worker_guard.sh` 와 claude `PreToolUse` 훅에 같은 패턴(경로 grep → exit 2)으로 넣는다.
 4. (선택) 저장소 루트에 `conventions.md`를 두면 모든 역할에 주입된다. 파일이 없으면 생략한다. `core_rules.md`는 워커에게만 별도로 주입된다.
 5. `.gitignore` 에 `.agent-work/` 를 추가한다.
+
+### 구 설치 이관 (런타임 분리 이전 `config.sh`)
+
+런타임이 `scripts/lib/` 로 분리되기 전의 설치는 `config.sh` 안에 헬퍼 본문과 버전 상수를 갖고 있다. `install.sh` 는 대상 `config.sh` 를 먼저 판정한다
+(소스 저장소의 `scripts/lib/config-layout.sh` — 대상 런타임은 로드하지 않는다). 아래 둘 중 하나라도 있으면 분리 이전 설정이다.
+
+- 런타임 함수 이름의 정의 줄(`name() …` / `function name …`) — 이름은 `scripts/lib/` 모듈이 정의하는 함수 전부다(`render_prompt`·`role_backend` 등, 분리 이전의 모든 `config.sh` 가 정의한다)
+- 런타임 소유 이름의 대입: `FEATURE_RUNTIME_CONTRACT_VERSION`·`VALIDATOR_CONTRACT_VERSION`·`REVIEWER_CONTRACT_VERSION`·`REVIEW_CHECKER_VERSION`·`CONSENSUS_CHECKPOINT_VERSION`·`REVIEW_CHECKPOINT_VERSION`·`PROJECT_ROOT`·`FEATURE_SKILL_DIR`(`export` 형태 포함)
+
+주석·설정 대입·`source ~/.secrets` 같은 줄, 런타임 이름이 아닌 사용자 함수, 여러 줄 설정 문자열 안의 함수 모양 줄(예: `TEST_CMD` 안의 `run_checks() {`)은 판정하지 않는다.
+판정은 줄 단위다(Bash 파서가 아니다) — 여러 줄 문자열이라도 줄 첫머리가 위 이름의 정의·대입이면(예: `PROJECT_ROOT=… ./run-tests` 로 시작하는 줄) 위반으로 보고 그 줄을 보여 준다. `env PROJECT_ROOT=…` 처럼 쓰거나 스크립트 파일로 옮긴다.
+로더는 `config.sh` 를 읽은 결과도 본다 — 문법 오류·`return N`·마지막 명령의 실패로 0 이 아닌 값이 나오면 로드가 멈춘다(`[ -f F ] && source F` 로 끝내지 말고 `if [ -f F ]; then source F; fi`).
+`set -e` 없이 로드하면 로더의 `[FAIL]` + exit 1 이고, `set -e` 호출자(러너·루프)는 그 자리에서 셸이 원래 종료 코드로 끝난다(예: `return 7` → exit 7, 로더의 `[FAIL]` 없음). 분리 이전 설정이면 `install.sh` 는 **활성 코드를 하나도 바꾸지 않고** exit 1 로 멈춘다.
+`config.sh` 는 그대로 두고 이관용 `config.sh.new`(설정 전용 템플릿)와 안내(위반 줄 목록 포함)를 출력한다. 자동 병합은 하지 않는다. 절차:
+
+1. 진행 중인 피처를 먼저 마치거나 수리한다(아래 호환성 제한). 실행 중인 러너가 있으면 설치하지 않는다.
+2. 백업: `cp .claude/skills/feature/config.sh .claude/skills/feature/config.sh.pre-runtime-split`
+3. 이관(둘 중 하나):
+   - (i) `config.sh.new` 를 새 `config.sh` 로 삼고 기존 사용자 값(모델·effort·CLI·backend·명령·한도·경로·알림·환경 변수 표현식)을 그대로 옮긴다.
+   - (ii) 기존 `config.sh` 에서 위반 줄을 지운다 — `# 헬퍼` 구분선 이하 전부, 검증자·리뷰어 계약 버전·체크포인트 포맷 버전 블록, `PROJECT_ROOT`·`FEATURE_SKILL_DIR` 두 줄.
+4. **backend 줄이 없던 설정**: 기존 `config.sh` 에 `CLAUDE_BACKEND` 줄이 없으면 종전 의미는 `legacy_cli`(`claude -p`), `CODEX_BACKEND` 줄이 없으면 `legacy_exec`(`codex exec`)다.
+   이관으로 그 의미가 native/app_server 로 바뀌지 않게 `config.sh.new` 에는 그 줄을 `legacy_cli`/`legacy_exec` 로 적어 둔다(설치 안내가 줄마다 알린다). (ii) 로 이관하면 줄을 새로 넣지 않으면 된다.
+   native·app_server 로의 전환은 진행 중인 피처가 없을 때 직접 한다.
+5. `install.sh` 를 다시 실행한다. 판정을 통과할 때까지 활성 코드는 바뀌지 않는다.
+
+**호환성 제한.** 지문 계산식·입력·버전 값은 바뀌지 않으므로 기존 완료 피처·합의 PASS·완료 unit·리뷰 승인 기록은 그대로 유효하다. 예외는 하나다.
+
+- 구 런타임이 발행하고 아직 수용되지 않은 native 요청(`.agent-work/native-agent/pending.json`)은 브리지 파일의 해시가 바뀌어 새 런타임의 수용 단계에서 `NATIVE_STALE_REQUEST` 로 거부된다(자동 재발행·discard 없음).
+  업데이트 전에 같은 명령을 재실행해 수용까지 끝내거나, 사용자 결정으로 기존 `redispatch`/`discard` 절차를 밟는다.
+- 완료 불명 Codex App Server turn 은 종전 정책대로 막힌다. 업데이트 전에 `bash .claude/skills/feature/scripts/codex-app-server.sh status` 로 확인·수리한다.
+- 설치기는 실행 중인 러너를 검사하지 않는다. 러너가 도는 동안에는 설치하지 않는다.
 
 ## 사용
 
@@ -538,7 +588,7 @@ Codex App Server 행(`source: codex-app-server`, `backend: codex_app_server`)은
 성공 기준을 `cache_read` 단독 감소에 두지 않는다. 세션을 stage/attempt 로 나누면 새 세션마다 저장소를 다시 읽으므로 `cache_write`·`input_uncached` 가 늘 수 있다. 동일 피처 A/B 실행의 총비용(CodeBurn 상위 + `cost_usd` 하위)·invocations/calls·num_turns·cache_read·cache_write·input_uncached 를 함께 놓고 총비용이 줄었는지로 판단한다.
 
 ```bash
-bash -c 'source .claude/skills/feature/config.sh; usage_summary .agent-work/usage.jsonl' \
+bash -c 'source .claude/skills/feature/scripts/lib/bootstrap.sh; usage_summary .agent-work/usage.jsonl' \
   | jq '{invocations, num_turns, cache_read, cache_write, input_uncached, cache_read_per_turn, cost_usd, sessions: (.by_session|length), by_role}'
 ```
 
@@ -552,6 +602,7 @@ jq -s '{cost_usd: (map(.cost_usd // 0) | add), input_uncached: (map(.input_uncac
 ```bash
 bash tests/run-smokes.sh             # 무과금 스모크 전체를 병렬로(-j N, 이름 패턴 인자 가능). LLM 호출 없음
 bash tests/install-smoke.sh          # 설치·러너·훅 연결. LLM 호출 없음
+bash tests/smoke-runtime-loader.sh   # 런타임 로더: 설정 전용 config 로드·구 설정/모듈 누락 source 전 거부·가드 유지·단독 진입. LLM 호출 없음
 bash tests/smoke-foreign-change.sh   # 범위 밖 변경 원복 금지·범위 가드. LLM 호출 없음
 bash tests/smoke-feature-worktree.sh # 피처 전용 worktree 부트스트랩·격리·재실행 + finalize(3-way 반영·충돌·archive·정리·재실행). LLM 호출 없음
 bash tests/smoke-implementation-units.sh # 구현 단위 직렬 실행·targeted test·재개·unit 사이 리뷰어 0회. LLM 호출 없음

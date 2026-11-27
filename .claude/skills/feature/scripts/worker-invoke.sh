@@ -9,7 +9,7 @@
 # 실제 WORKER_MODEL 의 material-contract 충실도를 재기 위해서다. 테스트용 별도 워커 구현·프롬프트·CLI 인자 복제는 없다.
 #
 # 호출자 계약(feature-run.sh 와 worker-regression.sh 가 동일하게 제공):
-#   config.sh 가 먼저 source 되어 있고, 현재 디렉터리가 저장소 루트(WORK_DIR 상대 경로)다.
+#   로더(scripts/lib/bootstrap.sh)가 먼저 source 되어 있고, 현재 디렉터리가 저장소 루트(WORK_DIR 상대 경로)다.
 #   함수: log, env_error(exit 1), stop_need_user(reason detail → exit 2), stop_need_docs(reason detail → exit 3)
 #   변수: SKILL_DIR, WORKER_SCHEMA, WORKER_RESULT, STAGE, 선택 RUN_TAG / TEST_LOG / REVIEW_FILE+GAP_CONTEXT+DOC_GAP_REVIEW(review-gap 호출)
 #   UNDECIDED(DOC_GAP·USER_DECISION 모두) 는 impl 재합의가 아니라 doc-gap-resume.json + NEED_USER(UNDECIDED) 다.

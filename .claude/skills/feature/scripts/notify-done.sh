@@ -15,7 +15,7 @@
 #     아니라 curl --config(stdin)으로 전달하고(ps 노출 방지), HTTP 결과는 -w '%{http_code}' 로만 판정해
 #     curl 오류 메시지(URL=topic 포함)가 로그에 남지 않는다.
 # 설정은 config.sh 의 "ntfy 완료 푸시 알림" 절: NTFY_TOPIC(필수)·NTFY_URL·NTFY_TOKEN(선택)·NTFY_TIMEOUT·NTFY_CURL_BIN.
-# 호출 문맥 의존: config.sh 가 먼저 source 돼 있고, log 함수와 WORK_DIR·ROOT·FEATURE_ID 가 정의돼 있어야 한다.
+# 호출 문맥 의존: 로더(scripts/lib/bootstrap.sh)가 먼저 source 돼 있고, log 함수와 WORK_DIR·ROOT·FEATURE_ID 가 정의돼 있어야 한다.
 # =============================================================
 
 NOTIFY_DONE_MARKER="$WORK_DIR/notify-done.sent"

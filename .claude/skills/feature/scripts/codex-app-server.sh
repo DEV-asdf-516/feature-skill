@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================
-# Codex App Server backend — Shell 쪽 연결부 (config.sh 가 source 한다)
+# Codex App Server backend — Shell 쪽 연결부 (로더(scripts/lib/bootstrap.sh)가 source 한다)
 # 파일 경로: .claude/skills/feature/scripts/codex-app-server.sh
 #
 # Codex 모델 역할(gpt-*/o*/codex*)을 `codex exec` 대신 하네스가 직접 띄운 `codex app-server`(stdio JSON-RPC)로 실행한다.
@@ -9,7 +9,7 @@
 #   · 호출 전 기록(turn record)과 재전송 차단 게이트
 #   · 세션 원장(.session-<key>.codex.json, backend=app_server) 스테이징·확정
 #   · 사용량 행(usage.jsonl) 기록
-# 을 맡는다. run_readonly_json_role / run_edit_role 의 인자·출력 경로·종료 의미는 그대로다(config.sh 가 backend 로 위임한다).
+# 을 맡는다. run_readonly_json_role / run_edit_role 의 인자·출력 경로·종료 의미는 그대로다(scripts/lib/backend/router.sh 가 backend 로 위임한다).
 #
 # native Agent 인계(exit 42/43)와 다르다: Shell 이 자식 프로세스를 직접 띄울 수 있으므로 2-pass 가 없다. 대신 요청·응답·수용 사이를 파일로 남긴다.
 #
@@ -725,13 +725,13 @@ codex_app_cli_hooks() {
   [ "$rc" = 0 ]
 }
 # ---------- 단독 진입 ----------
-# 진입은 프로세스당 한 번이다: 아래에서 config.sh 를 source 하면 config.sh 가 이 파일을 다시 source 한다. 절대 경로로 실행했으면 그때도 BASH_SOURCE[0] == $0 이라
+# 진입은 프로세스당 한 번이다: 아래에서 로더를 source 하면 로더가 이 파일을 다시 source 한다. 절대 경로로 실행했으면 그때도 BASH_SOURCE[0] == $0 이라
 # 경로 비교만으로는 다시 단독 진입으로 판정해 무한히 재진입한다. CODEX_APP_MAIN_PID 로 한 번만 들어가고, 재진입은 함수 정의만 다시 읽는다
 # (export 하지 않는다 — 부모 프로세스에서 물려받은 값은 pid 가 달라 무시된다).
 # 프로젝트 루트(= .agent-work 가 있는 곳)는 native 브리지의 단독 명령과 같은 규칙(native_standalone_project_root)으로 정한다:
 #   FEATURE_PROJECT_ROOT 명시 > 현재 디렉터리가 속한 git worktree(이 스킬이 설치된 저장소와 같은 저장소일 때만) > 그 밖에는 멈춘다.
 #   설치 위치(원본)의 기록으로 조용히 넘어가지 않고, 무관한 저장소의 .agent-work 도 건드리지 않는다.
-# 심볼릭 링크로 실행해도 실제 스크립트 위치의 config.sh 를 읽는다(링크의 디렉터리가 아니다).
+# 심볼릭 링크로 실행해도 실제 스크립트 위치의 로더를 읽는다(링크의 디렉터리가 아니다).
 _codex_app_real_script() { # path → 심볼릭 링크를 끝까지 따라간 스크립트 경로(링크가 아니면 그대로)
   local p="$1" l n=0
   while [ -L "$p" ] && [ "$n" -lt 40 ]; do
@@ -754,26 +754,26 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${CODEX_APP_MAIN_PID:-}" != "$$" ]; then
   _codex_app_script="$(_codex_app_real_script "$0")" || { echo "[FAIL] 스크립트 경로를 확정하지 못했다(심볼릭 링크 순환?): $0" >&2; exit 1; }
   _codex_app_skill_dir="$(cd "$(dirname "$_codex_app_script")/.." && pwd)" || exit 1
   # 실행 경로를 절대 경로로 고정한다: 아래에서 프로젝트 루트로 cd 하므로 상대 경로($0·BASH_SOURCE)는 그 뒤에 다른 파일을 가리킬 수 있고,
-  # config.sh 가드의 조회 명령 예외는 "실행 중인 스크립트가 이 파일이다"를 절대 경로로만 인정한다. 같은 pid 로 한 번만 다시 실행한다(다시 실행된 쪽은 $0 이 같아 지나간다).
+  # 설정 가드의 조회 명령 예외는 "실행 중인 스크립트가 이 파일이다"를 절대 경로로만 인정한다. 같은 pid 로 한 번만 다시 실행한다(다시 실행된 쪽은 $0 이 같아 지나간다).
   _codex_app_abs="$_codex_app_skill_dir/scripts/$(basename "$_codex_app_script")"
   if [ "$0" != "$_codex_app_abs" ]; then exec "${BASH:-bash}" "$_codex_app_abs" "$@"; fi
-  [ -f "$_codex_app_skill_dir/config.sh" ] || { echo "[FAIL] config.sh 없음: $_codex_app_skill_dir/config.sh — 이 스크립트는 설치된 스킬의 scripts/ 안에서(또는 그 파일을 가리키는 링크로) 실행한다" >&2; exit 1; }
+  [ -f "$_codex_app_skill_dir/scripts/lib/bootstrap.sh" ] || { echo "[FAIL] 런타임 로더 없음: $_codex_app_skill_dir/scripts/lib/bootstrap.sh — 이 스크립트는 설치된 스킬의 scripts/ 안에서(또는 그 파일을 가리키는 링크로) 실행한다" >&2; exit 1; }
   [ -f "$_codex_app_skill_dir/scripts/native-agent-bridge.sh" ] || { echo "[FAIL] 스크립트 없음: $_codex_app_skill_dir/scripts/native-agent-bridge.sh (프로젝트 루트 판정) — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라" >&2; exit 1; }
   _codex_app_install_root="$(cd "$_codex_app_skill_dir/../../.." && pwd)" || exit 1
-  # 루트 판정 함수만 빌려 쓴다(브리지의 단독 진입 블록은 BASH_SOURCE[0] != $0 이라 돌지 않는다). config.sh 가 브리지를 다시 읽으면 결과 변수가 초기화되므로 값을 옮겨 둔다.
+  # 루트 판정 함수만 빌려 쓴다(브리지의 단독 진입 블록은 BASH_SOURCE[0] != $0 이라 돌지 않는다). 로더가 브리지를 다시 읽으면 결과 변수가 초기화되므로 값을 옮겨 둔다.
   # shellcheck disable=SC1091
   source "$_codex_app_skill_dir/scripts/native-agent-bridge.sh"
   native_standalone_project_root "$_codex_app_install_root" || exit 1
   _codex_app_root="$NATIVE_STANDALONE_ROOT"; _codex_app_root_explicit="$NATIVE_STANDALONE_ROOT_EXPLICIT"
   cd "$_codex_app_root" || { echo "[FAIL] 프로젝트 루트로 이동 실패: $_codex_app_root" >&2; exit 1; }
-  # 설치 저장소 자신이면 config.sh 기본값(종전 문자열)을 그대로 둔다. worktree·명시 지정이면 확정한 절대 경로를 넘긴다(export 하지 않는다).
+  # 설치 저장소 자신이면 로더의 기본값(종전 문자열)을 그대로 둔다. worktree·명시 지정이면 확정한 절대 경로를 넘긴다(export 하지 않는다).
   if [ "$_codex_app_root_explicit" = 1 ] || [ "$(pwd -P)" != "$(cd "$_codex_app_install_root" && pwd -P)" ]; then FEATURE_PROJECT_ROOT="$_codex_app_root"; fi
-  # 조회 전용 명령(status·preflight·hooks)은 프로젝트 명령을 실행하지 않는다 — config.sh 가드가 TEST_CMD/LINT_CMD 의 CHANGE_ME 를 넘어가게 자기 pid 를 적는다
+  # 조회 전용 명령(status·preflight·hooks)은 프로젝트 명령을 실행하지 않는다 — 설정 가드가 TEST_CMD/LINT_CMD 의 CHANGE_ME 를 넘어가게 자기 pid 를 적는다
   # (export 하지 않는다. reconcile·discard 는 호출 기록을 바꾸므로 대상이 아니다 — 그 기록을 만든 실행은 이미 채워진 config.sh 를 지났다).
   # 그 밖의 명령은 표식을 비운다(환경·BASH_ENV 로 들어온 값을 덮어쓴다). 가드는 표식에 더해 실행 중인 스크립트가 이 파일인지도 본다.
   case "$1" in status|preflight|hooks) FEATURE_CONFIG_QUERY_ONLY_PID=$$ ;; *) FEATURE_CONFIG_QUERY_ONLY_PID="" ;; esac
   # shellcheck disable=SC1091
-  source "$_codex_app_skill_dir/config.sh"
+  source "$_codex_app_skill_dir/scripts/lib/bootstrap.sh"
   case "$1" in
     status) codex_app_cli_status "${2:-}" ;;
     reconcile) codex_app_cli_reconcile "$2" ;;

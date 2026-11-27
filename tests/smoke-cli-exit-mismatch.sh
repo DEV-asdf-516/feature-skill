@@ -31,6 +31,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 # 이 스모크의 사례는 CLI 별 종료코드·결과 전달 규약(codex: -o 결과 / claude: structured_output)을 검증하므로 역할별 CLI 를 여기서 고정한다.
 # production config 의 모델→CLI 매핑(REVIEWER_MODEL 등)이 바뀌어도 사례 의미가 유지된다.
@@ -53,8 +55,8 @@ EOF
 RUN=".claude/skills/feature/scripts/feature-run.sh"
 LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
 REVIEW_LOOP=".claude/skills/feature/scripts/impl-review-loop.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT" FEATURE_LIVE_TEE=1
 mkdir -p "$MOCK_STATE"
 EMPTY_TREE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
@@ -368,9 +370,9 @@ reset_consensus; fake_pass design   # 이후 사례를 위해 design PASS 픽스
 # ===== 사례 E: fixer 코드 수정 + exit non-zero → 수정자 1회, 재호출 없음, 다음 체크포인트 REVIEWER_PENDING, 리뷰어가 판정 =====
 reset_tree
 echo "worker edit" >> src/u01.txt   # 워커가 만든 변경(리뷰 대상)
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree.tmp   # 기준선은 워커 변경 '전' 이어야 한다 — 아래에서 다시 만든다
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree.tmp   # 기준선은 워커 변경 '전' 이어야 한다 — 아래에서 다시 만든다
 git checkout -q -- src/u01.txt
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree; rm -f .agent-work/worker-baseline.tree.tmp
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree; rm -f .agent-work/worker-baseline.tree.tmp
 echo "worker edit" >> src/u01.txt
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > .agent-work/worker-result.json

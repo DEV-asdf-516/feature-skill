@@ -126,7 +126,7 @@ Unit 정적 검사(`config.sh` 의 `UNIT_CHECK_CMD`, 계약은 `references/pipel
 ### `REVIEW_OUTPUT_INVALID` — exit 2 `NEED_USER`
 
 리뷰어가 JSON 을 돌려줬지만 출력 계약(스키마 → 버전 → origin/`fix_ref` → DOC_GAP `code_refs` 경로 → verdict 일관성)에 어긋남. 승인도 수정 요청도 아니며 수정자는 호출되지 않았다. 원본 결과·이벤트 로그·invocation id·입력 지문·구조화 진단(`issue_id`/`field`/`observed`/`expected`/`rule_id`)이 `reviews/invalid-review.json` 에 남는다.
-**그대로 재실행해도 리뷰어는 호출되지 않고 같은 진단이 나온다**(같은 프롬프트를 같은 세션에 재전송하지 않는다 — codex resume marker·미수용 세션을 지우거나 우회하지 않는다). detail 의 위반 목록을 사용자에게 보고하고, ① 검사기(impl-review-loop) 버그였으면 고치고 `config.sh` 의 `REVIEW_CHECKER_VERSION` 을 올린 뒤 같은 명령으로 재실행(입력이 같으면 저장된 출력을 로컬 재검증
+**그대로 재실행해도 리뷰어는 호출되지 않고 같은 진단이 나온다**(같은 프롬프트를 같은 세션에 재전송하지 않는다 — codex resume marker·미수용 세션을 지우거나 우회하지 않는다). detail 의 위반 목록을 사용자에게 보고하고, ① 검사기(impl-review-loop) 버그였으면 고치고 `scripts/lib/runtime.sh` 의 `REVIEW_CHECKER_VERSION` 을 올린 뒤 같은 명령으로 재실행(입력이 같으면 저장된 출력을 로컬 재검증
 — 모델 0회. 입력에는 작업 트리·범위·직전 리뷰뿐 아니라 계약 문서 request/design/implementation/approach/decisions 의 내용도 들어간다 — 코드가 그대로여도 계약 문서가 바뀌었으면 재사용되지 않고 detail 이 달라진 문서를 알려 준다) ② 새 리뷰가 필요하면 사용자 승인 뒤 `--new-review-attempt` 를 붙여 재실행(새 attempt Round 1·새 세션, `--new` 아님).
 `fix_ref` 를 추정으로 고쳐 넣지 않는다. 검사는 스키마 파일 전체(required·enum·minItems·minLength·정의되지 않은 필드)를 먼저 보고(`SCHEMA_INVALID`, 위반 필드마다 따로), 통과한 출력에만 조건부 필드 규칙을 적용한다
 
@@ -273,7 +273,7 @@ WAITING_USER 동안은 모델을 부르지 않으며, 프로세스가 워커 직
 불확실하면 `WORKER_OUTCOME_UNCERTAIN`). review 이상으로 가려면 `implementation-units.lock.json` 이 있을 때 모든 unit 의 `done.json` 이 유효해야 한다. 문서 합의 루프는 stage 보다 잘게 `consensus-design.json` / `consensus-impl.json` 에 round 와 다음 단계(`VALIDATOR_PENDING` / `DESIGNER_PENDING` / `PASS`)를 기록한다
 — 검증자가 끝난 뒤 디자이너 호출이 실패(모델 ID 오류 등)하면 재실행은 같은 리뷰 JSON 으로 디자이너만 다시 부르고, 디자이너가 문서를 일부 고친 뒤 죽었으면(입력 지문 불일치) 같은 수정을 반복하지 않고 다음 검증 라운드로 간다. PASS 도 입력 지문과 함께 캐시되어 입력이 그대로이고 참조 리뷰가 실제 현재 계약의 PASS 이면 검증자를 다시 부르지 않는다.
 지문은 세 종류다: editable(대상 문서 + `decisions.md` 전체 — 스냅샷·diff·변경 파일 목록과 같은 집합, 디자이너 부분 실행 감지), upstream(design 은 `request.md`, impl 은 `request.md`+`design.md`, + `[USER-QUESTION]`
-— 바뀌면 저장된 리뷰가 무효라 Round 1 부터), PASS(입력 문서 전체 + `[USER-QUESTION]` — 이후 판정 기록이 쌓여도 PASS 가 무효화되지 않음). 체크포인트 포맷은 `config.sh`의 `CONSENSUS_CHECKPOINT_VERSION`/`REVIEW_CHECKPOINT_VERSION`으로 따로 버전을 매기며, 지문 의미가 바뀌면 올린다
+— 바뀌면 저장된 리뷰가 무효라 Round 1 부터), PASS(입력 문서 전체 + `[USER-QUESTION]` — 이후 판정 기록이 쌓여도 PASS 가 무효화되지 않음). 체크포인트 포맷은 `scripts/lib/runtime.sh`의 `CONSENSUS_CHECKPOINT_VERSION`/`REVIEW_CHECKPOINT_VERSION`으로 따로 버전을 매기며, 지문 의미가 바뀌면 올린다
 — 다른 버전의 체크포인트는 지문을 비교하지 않고 처음(Round 1 / 새 attempt)으로 돌아간다. `ASK_USER`/`DEADLOCK`/`MAX_ROUNDS` 로 멈추면 마지막 리뷰·blocker 를 `user-escalation-resume-<target>.json` 에 먼저 남긴 뒤 합의 체크포인트를 Round 1 로 초기화한다
 — 이 초기화는 재검증 예약이 아니다: 사용자가 모든 blocker 를 결정하면 재검증 없이 다음 단계로 가고, 위 우회 조건이 깨졌을 때만 Round 1 부터 재검증한다. 구현 리뷰 루프도 같은 구조로 `review-impl.json` 에 attempt·round·다음 단계(`REVIEWER_PENDING` / `FIXER_PENDING` / `APPROVE`)와 작업 트리 지문을 기록한다
 — 리뷰어가 `REQUEST_CHANGES` 를 낸 뒤 수정자 호출이 실패하면 재실행은 같은 attempt 에서 기존 리뷰 JSON 으로 수정자만 다시 부르고, 수정자가 코드나 `decisions.md`를 일부 고친 뒤 죽었으면(작업 트리 + `decisions.md` 지문 불일치) 다음 리뷰 라운드로 간다.

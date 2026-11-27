@@ -33,7 +33,7 @@
   ② `FINALIZED`(worktree 는 없고 결과가 원본 working tree 에 있음) — 승인 지문은 worktree 와 함께 사라졌으므로 대신 원본에서 `feature_finalized_source_current <id>`(feature-worktree.sh; archive `finalize.json.source_after_tree` 와 지금 원본 tree 대조)가 성공해야만 커밋을 허용한다.
   finalize 이후 사용자가 원본을 고쳤으면(`FINALIZE_STALE`) 승인된 상태 그대로가 아니므로 그 변경을 사용자에게 확인시킨 뒤 결정한다. 어느 경우든 커밋은 원본 working tree 에서, 사용자 지시 뒤에만.
   ```bash
-  bash -c 'source <skill_dir>/config.sh; source <skill_dir>/scripts/feature-worktree.sh; feature_finalized_source_current <id>'
+  bash -c 'source <skill_dir>/scripts/lib/bootstrap.sh; source <skill_dir>/scripts/feature-worktree.sh; feature_finalized_source_current <id>'
   ```
 - **finalize 는 사용자 승인 없이는 실행하지 않는다.** `DONE` 뒤 오케스트레이터가 반드시 묻고, 승인 답이 있을 때만 `--feature <id> --finalize` 를 실행한다. 러너·훅·다른 에이전트가 자동으로 부르지 않는다.
 - **finalize 의 불변식.** 3-way(B/O/F) 충돌은 자동 해결하지 않는다(모델 위임 금지, `FINALIZE_CONFLICT` 로 반환). 원본 index 는 읽지도 쓰지도 않는다(임시 index 만). 원본에 commit·stash·checkout·reset 을 하지 않는다. archive 가 만들어지기 전에는 어떤 파괴적 정리도 하지 않고, finalize 가 실패하면 worktree·브랜치를 삭제하지 않는다. 적용 결과가 기대 merge tree 와 다르면 실패로 보고만 하고 자동 원복하지 않는다(사용자 변경을 추측해 지우지 않는다 — archive 의 patch/tree 로 사람이 복구).

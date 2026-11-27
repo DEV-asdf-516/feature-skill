@@ -91,16 +91,17 @@ fi
 EOF
 chmod +x "$TMP/bin/claude"
 export PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1
-MOCK_SCHEMA="$(grep -E '^REVIEWER_CONTRACT_VERSION=' .claude/skills/feature/config.sh | cut -d= -f2 | cut -d' ' -f1)"; export MOCK_SCHEMA
+MOCK_SCHEMA="$(grep -E '^REVIEWER_CONTRACT_VERSION=' .claude/skills/feature/scripts/lib/runtime.sh | cut -d= -f2 | cut -d' ' -f1)"; export MOCK_SCHEMA
 LOOP=".claude/skills/feature/scripts/impl-review-loop.sh"
 CFG="./.claude/skills/feature/config.sh"
+LOADER="./.claude/skills/feature/scripts/lib/bootstrap.sh"
 index_hash() { git ls-files --stage -v -z | shasum -a 256; }
-approval_ok() { ( source "$CFG"; verify_approved_fingerprint >/dev/null 2>&1 ); }
+approval_ok() { ( source "$LOADER"; verify_approved_fingerprint >/dev/null 2>&1 ); }
 BL() { cat .agent-work/worker-baseline.tree; }   # 러너·루프가 호출 전에 읽어 넘기는 소유권 기준선
-viol() { ( source "$CFG"; feature_scope_violations "$1" "$2" "$(BL)" | paste -sd, - ); }
+viol() { ( source "$LOADER"; feature_scope_violations "$1" "$2" "$(BL)" | paste -sd, - ); }
 
 # --- 기준선 기록 (러너가 worker 진입 직전 하는 것과 동일) ---
-( source "$CFG"; snapshot_worktree_tree > .agent-work/worker-baseline.tree ) || fail "기준선 tree 기록 실패"
+( source "$LOADER"; snapshot_worktree_tree > .agent-work/worker-baseline.tree ) || fail "기준선 tree 기록 실패"
 
 # --- 기준선 이후: 워커 역할 / 다른 세션 역할 변경 ---
 echo "worker change" >> src/feature.txt
@@ -174,7 +175,7 @@ mv src/owned/foreign.txt src/foreign.txt   # 다음 사례를 위해 시험 환�
 # ===== 사례 5: manifest 가 있는데 잘못됐으면 전체 트리 지문으로 조용히 돌아가지 않는다 =====
 cp .agent-work/feature-scope.json "$TMP/scope.valid"
 printf '{"version":1,"files":[]}' > .agent-work/feature-scope.json
-if ( source "$CFG"; compute_approval_fingerprint >/dev/null 2>"$TMP/case5.err" ); then fail "사례5: 잘못된 manifest 인데 지문 계산이 성공함(전체 트리 fallback)"; fi
+if ( source "$LOADER"; compute_approval_fingerprint >/dev/null 2>"$TMP/case5.err" ); then fail "사례5: 잘못된 manifest 인데 지문 계산이 성공함(전체 트리 fallback)"; fi
 grep -q "유효하지 않은 feature-scope.json" "$TMP/case5.err" || fail "사례5: 실패 사유 메시지 없음"
 : > "$MOCK_LOG"
 MOCK_REVIEW=APPROVE bash "$LOOP" >"$TMP/case5.log" 2>&1; rc=$?
@@ -184,7 +185,7 @@ cp "$TMP/scope.valid" .agent-work/feature-scope.json
 pass "사례5: 잘못된 manifest → 지문 계산 실패 + 리뷰 루프 exit 1, 모델 호출 0"
 
 # ===== 사례 6: manifest 계약 — roots 만 있는 피처는 유효, 비-canonical 경로는 무효 =====
-scope_ok() { ( source "$CFG"; feature_scope_valid ); }
+scope_ok() { ( source "$LOADER"; feature_scope_valid ); }
 printf '{"version":1,"files":[],"new_file_roots":["src/owned/"]}' > .agent-work/feature-scope.json
 scope_ok || fail "사례6: files=[] + new_file_roots 1개가 유효하지 않음"
 printf '{"version":1,"files":[],"new_file_roots":["src/owned"]}' > .agent-work/feature-scope.json
@@ -203,7 +204,7 @@ cp "$TMP/scope.valid" .agent-work/feature-scope.json
 pass "사례6: roots-only manifest 유효 / 선행 ./ · 후행 / · 빈·.. 세그먼트 · 전부 빈 manifest 무효"
 
 # ===== 사례 7: 기본 설정에서는 워커 프롬프트에 외부 스킬이 주입되지 않는다 (WORKER_SKILLS 비어 있음) =====
-worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$CFG")" || fail "사례7: load_worker_rules 실패"
+worker_rules="$(bash -c 'source "$1"; load_worker_rules' _ "$LOADER")" || fail "사례7: load_worker_rules 실패"
 echo "$worker_rules" | grep -q '\[CORE RULES\]' || fail "사례7: core rules 가 워커 프롬프트에 없음"
 echo "$worker_rules" | grep -q '\[WORKER SKILL:' && fail "사례7: 기본 설정인데 워커 스킬 블록이 주입됨"
 pass "사례7: 기본 설정에서 워커 스킬 미주입"
@@ -232,34 +233,34 @@ pass "사례8: manifest 넓히기 → SCOPE_MANIFEST_CHANGED, 원복 없음, 리
 # ===== 사례 9: new_file_roots 는 신규 생성만 허용 =====
 mkdir -p src/owned && echo "existing" > src/owned/existing.txt
 git add src/owned/existing.txt && git -c user.email=smoke@test -c user.name=smoke commit -qm "existing under root"
-( source "$CFG"; snapshot_worktree_tree > .agent-work/worker-baseline.tree )   # 기준선에 existing.txt 포함
-b="$(source "$CFG"; snapshot_worktree_tree)"
+( source "$LOADER"; snapshot_worktree_tree > .agent-work/worker-baseline.tree )   # 기준선에 existing.txt 포함
+b="$(source "$LOADER"; snapshot_worktree_tree)"
 echo "modified" >> src/owned/existing.txt
-a="$(source "$CFG"; snapshot_worktree_tree)"
+a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ "$v" = "src/owned/existing.txt" ] || fail "사례9: root 아래 기존 파일 수정이 위반으로 잡히지 않음 (violations=[$v])"
 git checkout -q -- src/owned/existing.txt 2>/dev/null || { echo "existing" > src/owned/existing.txt; }
-b="$(source "$CFG"; snapshot_worktree_tree)"
+b="$(source "$LOADER"; snapshot_worktree_tree)"
 echo "brand new" > src/owned/new.txt
-a="$(source "$CFG"; snapshot_worktree_tree)"
+a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ -z "$v" ] || fail "사례9: root 아래 신규 파일 생성이 위반으로 잡힘 (violations=[$v])"
 # 승인 지문: 기준선에 있던 root 파일 변경은 지문에 영향 없음, 신규 파일 변경은 영향 있음
-fp0="$(source "$CFG"; compute_feature_fingerprint)"
-echo "ext" >> src/owned/existing.txt; fp1="$(source "$CFG"; compute_feature_fingerprint)"
+fp0="$(source "$LOADER"; compute_feature_fingerprint)"
+echo "ext" >> src/owned/existing.txt; fp1="$(source "$LOADER"; compute_feature_fingerprint)"
 [ "$fp0" = "$fp1" ] || fail "사례9: 기준선에 있던 root 파일 변경이 범위 지문을 바꿈"
-echo "more" >> src/owned/new.txt; fp2="$(source "$CFG"; compute_feature_fingerprint)"
+echo "more" >> src/owned/new.txt; fp2="$(source "$LOADER"; compute_feature_fingerprint)"
 [ "$fp1" != "$fp2" ] || fail "사례9: root 아래 신규 파일 변경이 범위 지문에 반영되지 않음"
 pass "사례9: new_file_roots 아래 기존 파일 수정 → 위반 / 신규 생성 → 허용, 지문은 신규 엔트리만 반영"
 
 # ===== 사례 10: 피처가 만든 root 파일의 후속 라운드 수정은 허용 =====
 # (사례 9 의 상태: 기준선에는 src/owned/existing.txt 만 있고 src/owned/new.txt 는 그 뒤에 생성됨)
-b="$(source "$CFG"; snapshot_worktree_tree)"
+b="$(source "$LOADER"; snapshot_worktree_tree)"
 echo "fixer edits the file the worker created" >> src/owned/new.txt
-a="$(source "$CFG"; snapshot_worktree_tree)"
+a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ -z "$v" ] || fail "사례10: 피처가 만든 root 파일의 후속 수정이 위반으로 잡힘 (violations=[$v])"
-b="$a"; echo "again" >> src/owned/existing.txt; a="$(source "$CFG"; snapshot_worktree_tree)"
+b="$a"; echo "again" >> src/owned/existing.txt; a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ "$v" = "src/owned/existing.txt" ] || fail "사례10: 대조군 — 기준선 파일 수정이 위반으로 잡히지 않음 (violations=[$v])"
 pass "사례10: 이전 호출이 만든 root 파일의 후속 수정 허용 / 기준선 파일 수정은 여전히 위반"
@@ -273,7 +274,7 @@ MOCK_REVIEW=APPROVE bash "$LOOP" >"$TMP/case11.log" 2>&1 || { cat "$TMP/case11.l
 approval_ok || fail "사례11: 원본==lock 인데 승인 지문이 통과하지 않음"
 jq -c '.files += ["src/foreign.txt"]' .agent-work/feature-scope.json > "$TMP/scope.widened" && cp "$TMP/scope.widened" .agent-work/feature-scope.json
 approval_ok && fail "사례11: 원본 manifest 만 바뀌었는데 승인 지문이 통과함"
-( source "$CFG"; verify_approved_fingerprint 2>&1 >/dev/null | grep -q 'SCOPE_MANIFEST_CHANGED' ) || fail "사례11: 실패 사유가 SCOPE_MANIFEST_CHANGED 가 아님"
+( source "$LOADER"; verify_approved_fingerprint 2>&1 >/dev/null | grep -q 'SCOPE_MANIFEST_CHANGED' ) || fail "사례11: 실패 사유가 SCOPE_MANIFEST_CHANGED 가 아님"
 : > "$MOCK_LOG"; bash "$LOOP" >"$TMP/case11b.log" 2>&1; rc=$?
 [ "$rc" -eq 2 ] && [ "$(jq -r .status .agent-work/state.json)" = SCOPE_MANIFEST_CHANGED ] || fail "사례11: 승인 재사용/리뷰 진행이 막히지 않음 (exit $rc)"
 [ "$(wc -l < "$MOCK_LOG" | tr -d ' ')" -eq 0 ] || fail "사례11: 모델이 호출됨"
@@ -284,20 +285,20 @@ pass "사례11: APPROVE 후 원본만 변경 → 승인 지문 실패(SCOPE_MANI
 # (상태: 기준선에 src/owned/new.txt 없음, 이전 호출이 생성)
 [ -f src/owned/new.txt ] || fail "사례12: 전제 — src/owned/new.txt 가 없음"
 cp src/owned/new.txt "$TMP/new.keep"
-b="$(source "$CFG"; snapshot_worktree_tree)"
+b="$(source "$LOADER"; snapshot_worktree_tree)"
 rm -f src/owned/new.txt
-a="$(source "$CFG"; snapshot_worktree_tree)"
+a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ "$v" = "src/owned/new.txt" ] || fail "사례12: 피처가 만든 root 파일 삭제(D)가 위반으로 잡히지 않음 (violations=[$v])"
 cp "$TMP/new.keep" src/owned/new.txt
-b="$(source "$CFG"; snapshot_worktree_tree)"
+b="$(source "$LOADER"; snapshot_worktree_tree)"
 rm -f src/owned/new.txt && ln -s existing.txt src/owned/new.txt
-a="$(source "$CFG"; snapshot_worktree_tree)"
+a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ "$v" = "src/owned/new.txt" ] || fail "사례12: 피처가 만든 root 파일의 symlink 화(T)가 위반으로 잡히지 않음 (violations=[$v])"
 rm -f src/owned/new.txt && cp "$TMP/new.keep" src/owned/new.txt
 # 대조군: 같은 파일의 후속 수정(M)은 여전히 허용
-b="$(source "$CFG"; snapshot_worktree_tree)"; echo "m" >> src/owned/new.txt; a="$(source "$CFG"; snapshot_worktree_tree)"
+b="$(source "$LOADER"; snapshot_worktree_tree)"; echo "m" >> src/owned/new.txt; a="$(source "$LOADER"; snapshot_worktree_tree)"
 v="$(viol "$b" "$a")"
 [ -z "$v" ] || fail "사례12: 대조군 — 피처가 만든 root 파일 수정(M)이 위반으로 잡힘 (violations=[$v])"
 pass "사례12: 피처가 만든 root 파일 D/T → 위반, M → 허용"

@@ -28,6 +28,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
 # 워커·검증자는 codex(가격표 모델), 리뷰어·디자이너·수정자는 claude
 sed -i.bak 's/^VALIDATOR_MODEL=.*/VALIDATOR_MODEL="gpt-5.6-sol"/; s/^WORKER_MODEL=.*/WORKER_MODEL="gpt-5.6-luna"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
@@ -43,8 +45,8 @@ printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 c
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 printf '{"version":1,"units":[{"id":"01-intake","title":"접수","goal":"unit 01","requirements":["REQ-01"],"scope":{"files":["src/u01.txt"],"new_file_roots":[]},"references":["implementation.md#01"],"targeted_test":"true"}]}\n' > .agent-work/implementation-units.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"; LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 FAKE_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 
@@ -126,7 +128,7 @@ ls .agent-work/reviews | grep -q 'invocation-.*\.tmp' && fail "F: invocation 임
 pass "A/F: 워커 invocation 당 usage 행 1개, input/cache/output/reasoning 매핑, luna 추정 비용 0.00157, reasoning 이중 가산 없음, events/stderr 분리, -o provenance 유지"
 
 # ===== 사례 G: usage_summary 비용 분리 (reviewer reported 0.25 + worker estimated 0.00152, 검증자(sol) 는 픽스처 단계 행) =====
-summary="$(bash -c "source $CFG; usage_summary")"
+summary="$(bash -c "source $LOADER; usage_summary")"
 [ "$(printf '%s' "$summary" | jq -r '[((.reported_cost_usd*100)|round), .cost_unknown_invocations, (.by_role.WORKER.cost_unknown_invocations), ((.by_role.WORKER.estimated_cost_usd*100000000)|round), (.by_role.REVIEWER.estimated_cost_usd)]|@csv')" = '25,0,0,157000,0' ] \
   || fail "G: usage_summary 비용 분리 불일치: $summary"
 [ "$(printf '%s' "$summary" | jq -r '(.combined_cost_usd_estimate - .reported_cost_usd - .estimated_cost_usd) | fabs < 0.0000001')" = true ] || fail "G: combined ≠ reported + estimated: $summary"
@@ -145,13 +147,13 @@ reset_tree
 sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="gpt-9-future"/' "$CFG" && rm -f "$CFG.bak"
 rc="$(FAKE_USAGE_MODE=one run_runner)"; [ "$rc" -eq 0 ] || fail "C: 실행 실패 ($rc)"
 [ "$(rowf WORKER '[.model,.cost_usd,.estimated_cost_usd,.cost_kind,.pricing_basis,.tokens_total]|@csv')" = '"gpt-9-future",,,"unknown",,10500' ] || fail "C: unknown 모델 행 불일치: $(row WORKER)"
-[ "$(bash -c "source $CFG; usage_summary" | jq -r '.by_role.WORKER.cost_unknown_invocations')" = 1 ] || fail "C: unknown 이 집계되지 않음"
+[ "$(bash -c "source $LOADER; usage_summary" | jq -r '.by_role.WORKER.cost_unknown_invocations')" = 1 ] || fail "C: unknown 이 집계되지 않음"
 # gpt-6-luna(GOAL-6): 3000*0.10 + 6000*0.01 + 1000*0.125 + 500*0.50 = 300+60+125+250 = 735 /1M
 sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="gpt-6-luna"/' "$CFG" && rm -f "$CFG.bak"
 reset_tree; rc="$(FAKE_USAGE_MODE=one run_runner)"; [ "$rc" -eq 0 ] || fail "C(gpt-6): 실행 실패 ($rc)"
 [ "$(rowf WORKER '[.model,.cost_kind,((.estimated_cost_usd*100000000)|round)]|@csv')" = '"gpt-6-luna","estimated",73500' ] || fail "C(gpt-6-luna): 비용 불일치: $(row WORKER)"
-[ "$(bash -c "source $CFG; codex_model_pricing gpt-6-sol" | jq -r '[(.input*100|round),(.cached*100|round),(.cache_write_30m*100|round),(.cache_write_12h*100|round),(.output*100|round),.long_context_input_tokens,(.long.input*100|round)]|@csv')" = '200,20,250,500,1000,272000,400' ] || fail "C(gpt-6-sol): 가격표 불일치"
-bash -c "source $CFG; codex_model_pricing gpt-6.1-sol" >/dev/null 2>&1 && fail "C: 정확한 모델 ID 매칭이 아님(gpt-6.1-sol 이 등록 모델로 취급됨)"
+[ "$(bash -c "source $LOADER; codex_model_pricing gpt-6-sol" | jq -r '[(.input*100|round),(.cached*100|round),(.cache_write_30m*100|round),(.cache_write_12h*100|round),(.output*100|round),.long_context_input_tokens,(.long.input*100|round)]|@csv')" = '200,20,250,500,1000,272000,400' ] || fail "C(gpt-6-sol): 가격표 불일치"
+bash -c "source $LOADER; codex_model_pricing gpt-6.1-sol" >/dev/null 2>&1 && fail "C: 정확한 모델 ID 매칭이 아님(gpt-6.1-sol 이 등록 모델로 취급됨)"
 sed -i.bak 's/^WORKER_MODEL=.*/WORKER_MODEL="gpt-5.6-luna"/' "$CFG" && rm -f "$CFG.bak"
 pass "C: 가격표에 없는 모델 → estimated_cost_usd null, cost_kind unknown, 추측 가격 없음"
 
@@ -186,7 +188,7 @@ for mode in none:USAGE_EVENTS_MISSING:unavailable plain:USAGE_EVENTS_CORRUPT:una
   [ "$(row WORKER | wc -l | tr -d ' ')" = 1 ] && [ "$(rowf WORKER '[.cost_kind,.cost_usd,.estimated_cost_usd,.tokens_total,.input_uncached,.usage_observation_status,.usage_error,(.raw_log|endswith(".events.jsonl"))]|@csv')" = "\"unknown\",,,,,\"$obs\",\"$err\",true" ] \
     || fail "E($mode): usage 판정 불가 invocation 이 unknown 행 1개(null 비용·토큰, $err/$obs)로 기록되지 않음: $(row WORKER)"
   [ "$(row REVIEWER | wc -l | tr -d ' ')" = 1 ] || fail "E($mode): 다른 역할의 행이 사라짐"
-  [ "$(bash -c "source $CFG; usage_summary" | jq -r '[.cost_unknown_invocations,.usage_unobserved_invocations]|@csv')" = '1,1' ] || fail "E($mode): 요약이 미관측 invocation 을 세지 않음"
+  [ "$(bash -c "source $LOADER; usage_summary" | jq -r '[.cost_unknown_invocations,.usage_unobserved_invocations]|@csv')" = '1,1' ] || fail "E($mode): 요약이 미관측 invocation 을 세지 않음"
   grep -q '추정 불가 1건(사용량 미관측 1건' "$TMP/run.log" || fail "E($mode): DONE 보고에 미관측 건수가 없음"
 done
 pass "E: usage 이벤트 없음/깨짐/usage:{}/정상+깨진 줄 혼재 → WARN + unknown 행 1개(0달러 아님, 과소 집계 없음, plain 'tokens used' 미사용), 실행 성공, 같은 invocation 재실행 없음"
@@ -199,7 +201,7 @@ reset_tree
 printf '{"type":"thread.started","thread_id":"t-h"}\n{"type":"turn.completed","usage":{"input_tokens":10000,"cached_input_tokens":6000,"cache_write_input_tokens":1000,"output_tokens":500,"reasoning_output_tokens":300}}\n' > "$TMP/side/astra-short.jsonl"
 printf '{"type":"thread.started","thread_id":"t-h"}\n{"type":"turn.completed","usage":{"input_tokens":300000,"cached_input_tokens":100000,"cache_write_input_tokens":50000,"output_tokens":1000,"reasoning_output_tokens":0}}\n' > "$TMP/side/astra-long.jsonl"
 cat "$TMP/side/astra-short.jsonl" "$TMP/side/astra-long.jsonl" > "$TMP/side/astra-mixed.jsonl"
-rec() { bash -c "source $CFG; log_role_usage codex \"$1\" \"$2\" \"$3\" \"$4\" 0 inv-$3" 2>>"$TMP/side/rec.warn"; }
+rec() { bash -c "source $LOADER; log_role_usage codex \"$1\" \"$2\" \"$3\" \"$4\" 0 inv-$3" 2>>"$TMP/side/rec.warn"; }
 rec VALIDATOR gpt-6-astra h-short "$TMP/side/astra-short.jsonl"; rec VALIDATOR gpt-6-astra h-long "$TMP/side/astra-long.jsonl"; rec REVIEWER gpt-6-astra h-mixed "$TMP/side/astra-mixed.jsonl"
 rowl() { jq -c --arg l "$1" 'select(.label==$l)' .agent-work/usage.jsonl; }
 [ "$(rowl h-short | jq -r '[.cost_kind,((.estimated_cost_usd*10000)|round),.long_context_turns,.pricing_basis]|@csv')" = '"estimated",735,0,"openai-api-standard-2026-10-30"' ] || fail "H(short): astra 단문 비용 불일치: $(rowl h-short)"
@@ -218,7 +220,7 @@ pass "H: gpt-6-astra 단문 0.0735 / 장문(turn 입력 272K 초과) 4.525 / 혼
 # ===== 사례 I: 최종 보고(러너 DONE 로그·usage-summary.json)와 usage_summary 숫자 일치, by_cli/by_model 분리 =====
 reset_tree
 rc="$(FAKE_USAGE_MODE=one run_runner)"; [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || fail "I: 실행 실패 ($rc)"
-summary="$(bash -c "source $CFG; usage_summary")"
+summary="$(bash -c "source $LOADER; usage_summary")"
 [ -f .agent-work/usage-summary.json ] && [ "$(jq -c '[.invocations,.reported_cost_usd,.estimated_cost_usd,.combined_cost_usd_estimate,.cost_unknown_invocations]' .agent-work/usage-summary.json)" = "$(printf '%s' "$summary" | jq -c '[.invocations,.reported_cost_usd,.estimated_cost_usd,.combined_cost_usd_estimate,.cost_unknown_invocations]')" ] \
   || fail "I: usage-summary.json 이 usage_summary 와 다름"
 line="$(grep '비용(usage_summary' "$TMP/run.log")" || fail "I: DONE 로그에 비용 보고 줄이 없음"
@@ -228,8 +230,8 @@ case "$line" in *"claude=1건(reported \$0.25, estimated \$0"*"codex=1건(report
 pass "I: DONE 보고(reported + estimated + combined 추정 + unknown 건수)가 usage_summary·usage-summary.json 과 같은 숫자, by_cli/by_model 분리"
 
 # ===== 사례 J (GOAL-6 P0-A): 등록 모델 전부 × short/long 요금표 전수 비교, 30m/12h 캐시 쓰기, 272,000/272,001 경계, 요청 전체 요율, 누적 비판정 =====
-price() { bash -c "source $CFG; codex_model_pricing $1"; }
-est() { bash -c "source $CFG; codex_estimate_cost '$1' \"\$(codex_model_pricing $2)\""; }   # turns_json model
+price() { bash -c "source $LOADER; codex_model_pricing $1"; }
+est() { bash -c "source $LOADER; codex_estimate_cost '$1' \"\$(codex_model_pricing $2)\""; }   # turns_json model
 flat() { jq -r '[.input,.cached,.cache_write_30m,.cache_write_12h,.output,.long_context_input_tokens,.long.input,.long.cached,.long.cache_write_30m,.long.cache_write_12h,.long.output]|map(tostring)|join(" ")' | sed 's/\.0\b//g'; }
 check_price() { [ "$(price "$1" | flat)" = "$2" ] || fail "J: $1 요금표 불일치: $(price "$1" | flat) ≠ $2"; }
 check_price gpt-6.2-astra "8 0.4 10 20 40 272000 16 0.8 20 40 60"

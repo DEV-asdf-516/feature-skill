@@ -21,6 +21,8 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 # 역할 CLI 고정: 디자이너=claude(mock), 검증자=codex(fake). 모델 ID 는 라우팅과 무관한 값으로 두어 DESIGNER_CLI 명시가 실제로 쓰이는지 확인한다.
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; \
   s|^DESIGN_REVISION_MODEL=.*|DESIGN_REVISION_MODEL=\"smoke-revision-model\"|; s|^DESIGNER_EFFORT=.*|DESIGNER_EFFORT=\"smoke-effort\"|; s|^DESIGNER_CLI=.*|DESIGNER_CLI=\"claude\"|; \
@@ -28,9 +30,9 @@ sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.
 grep -q '^DESIGNER_MODEL=' "$CFG" && fail "config.sh 에 DESIGNER_MODEL 이 남아 있음(호환 alias 금지)"
 
 # --- A. lookup ---
-lookup="$(bash -c 'source "$1"; printf "%s|%s|%s" "$(role_model DESIGNER)" "$(role_effort DESIGNER)" "$(role_cli DESIGNER)"' _ "$CFG")" || fail "config.sh source 실패"
+lookup="$(bash -c 'source "$1"; printf "%s|%s|%s" "$(role_model DESIGNER)" "$(role_effort DESIGNER)" "$(role_cli DESIGNER)"' _ "$LOADER")" || fail "config.sh source 실패"
 [ "$lookup" = "smoke-revision-model|smoke-effort|claude" ] || fail "DESIGNER lookup 불일치: $lookup"
-others="$(bash -c 'source "$1"; printf "%s|%s" "$(role_model VALIDATOR)" "$(role_cli VALIDATOR)"' _ "$CFG")"
+others="$(bash -c 'source "$1"; printf "%s|%s" "$(role_model VALIDATOR)" "$(role_cli VALIDATOR)"' _ "$LOADER")"
 [ "$others" = "gpt-smoke|codex" ] || fail "다른 역할 lookup 이 깨짐: $others"
 pass "A. role_model DESIGNER → DESIGN_REVISION_MODEL, DESIGNER_EFFORT/DESIGNER_CLI 유지"
 
@@ -44,7 +46,7 @@ for doc in request design implementation approach; do printf '# %s\n' "$doc" > "
 printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 contract\n' >> .agent-work/implementation.md   # unit references(implementation.md#NN)가 가리키는 절 — 러너가 그 절 본문으로 unit 별 계약 변경을 판정한다
 : > .agent-work/decisions.md
 LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_VERDICT_FILE="$TMP/verdict"
 : > "$MOCK_LOG"
 

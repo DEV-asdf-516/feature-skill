@@ -2,7 +2,7 @@
 # =============================================================
 # 피처 전용 git worktree 부트스트랩 — feature-run.sh 가 source 하는 라이브러리 (단독 실행 아님)
 # 파일 경로: .claude/skills/feature/scripts/feature-worktree.sh
-# 전제: config.sh 가 먼저 source 돼 있어야 한다 (WORK_DIR, snapshot_worktree_tree, compute_worktree_fingerprint).
+# 전제: 로더(scripts/lib/bootstrap.sh)가 먼저 source 돼 있어야 한다 (WORK_DIR, snapshot_worktree_tree, compute_worktree_fingerprint).
 #
 # 목적: 같은 프로젝트의 여러 피처를 동시에 돌려도 상태 파일·리뷰·문서·소스 변경이 섞이지 않게,
 #       피처 시작 시 전용 worktree 를 먼저 확정하고 이후 모든 단계를 그 안에서만 돈다.

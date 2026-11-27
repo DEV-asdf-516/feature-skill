@@ -40,7 +40,7 @@
 #            확정한 사실의 압축 색인 — 세션 기억은 source of truth 가 아니고 이 색인·문서가 체크포인트다). unit 별 리뷰·수정자·설계는 없다.
 #            Unit N 이 끝나기 전에는 N+1 을 시작하지 않는다 — 다음 unit 시작 권한은 러너만 갖는다.
 #            병렬·DAG·우선순위·worker pool 없음. 재실행은 첫 미완료 unit 부터(유효한 결과 + after-tree 일치 + **워커가 받은 계약 == 현재 계약**이면 워커 재호출 없이 테스트부터).
-#            unit 유효 계약(config.sh "unit 유효 계약 스냅샷"): unit 마다 references 가 가리키는 문서 절 본문·그 unit 의 사용자 결정·unit JSON(local)과
+#            unit 유효 계약(scripts/lib/contract/unit.sh "unit 유효 계약 스냅샷"): unit 마다 references 가 가리키는 문서 절 본문·그 unit 의 사용자 결정·unit JSON(local)과
 #            request/conventions/묶이지 않은 결정(global)을 최초 워커 호출 직전에 스냅샷한다. 네 지점이 같은 지문을 본다 — ① 완료 체크포인트 건너뛰기 전
 #            ② 과거 worker-result 로 테스트부터 재개하기 전 ③ done.json 확정 전 ④ review/verify/DONE 진입 전. local 이 바뀐 unit 만 stale 이 되어
 #            [UNIT TURN]/[CHANGED CONTRACT](실제 diff)를 받은 워커 턴 + targeted test 뒤에만 새 done.json 이 생긴다. 다른 unit 의 독립 절 변경은 영향이 없다.
@@ -96,7 +96,7 @@
 # =============================================================
 set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$SKILL_DIR/config.sh"
+source "$SKILL_DIR/scripts/lib/bootstrap.sh"
 ROOT="$(git rev-parse --show-toplevel)"
 
 # ---------- [Added: GOAL-44] 참조 문서(references/) — SKILL.md 가 분기 직전에 읽으라고 가리키는 상세 지침 ----------
@@ -128,7 +128,7 @@ skill_reference_for() { # status reason
     ENV_ERROR:*) if codex_app_server_configured; then echo "exit-states-resume.md codex-app-server.md"; else echo exit-states-resume.md; fi;;
   esac
 }
-codex_app_server_configured() { # 어느 역할이든 Codex App Server backend 로 라우팅돼 있는가(config.sh 를 읽기 전이면 아니오)
+codex_app_server_configured() { # 어느 역할이든 Codex App Server backend 로 라우팅돼 있는가(로더를 읽기 전이면 아니오)
   local r
   declare -F role_backend >/dev/null || return 1
   for r in DESIGNER VALIDATOR WORKER REVIEWER FIXER; do [ "$(role_backend "$r" 2>/dev/null)" != codex_app_server ] || return 0; done
@@ -246,7 +246,7 @@ fi
 
 # 프로젝트 종속 경로 재바인딩 — 소스는 worktree 로 격리됐는데 규칙 파일·conventions·프로젝트 로컬 워커 스킬을 원본에서 읽으면
 # 원본의 이후 변경이 이 실행에 새어 든다. 실행 엔진 위치(SKILL_DIR/FEATURE_SKILL_DIR)는 그대로 두고 프로젝트 경로만 바꾼다.
-# 하위 루프(consensus/impl-review)는 config.sh 를 따로 source 하므로 환경 변수로 같은 값을 물려준다.
+# 하위 루프(consensus/impl-review)는 로더(scripts/lib/bootstrap.sh)를 따로 source 하므로 환경 변수로 같은 값을 물려준다.
 if [ "$(cd "$PROJECT_ROOT" && pwd -P)" != "$(pwd -P)" ]; then
   export FEATURE_PROJECT_ROOT="$ROOT"
   PROJECT_ROOT="$ROOT"
@@ -511,11 +511,11 @@ require_units_contract_current() { # 다음-단계
 
 # ---------- preflight ----------
 STAGE=preflight
-# 런타임 계약 표식: 이 스크립트가 전제하는 config.sh 본문(헬퍼) 세대. config.sh 는 사용자 편집 파일이라 설치가 덮어쓰지 않으므로, 옛 본문이 남은 혼합 설치를
-# 헬퍼 이름이 아니라 이 값으로 가려 모델 호출 전에 멈춘다(install.sh 도 설치 전에 같은 값을 대조한다). config.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION 과 함께 올린다.
+# 런타임 계약 표식: 이 스크립트가 전제하는 런타임 본문(scripts/lib/) 세대. 같은 scripts/ 의 scripts/lib/runtime.sh 값과 대조해 서로 다른 버전의 scripts/ 가 섞인 설치를
+# 모델 호출 전에 멈춘다. scripts/lib/runtime.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION 과 함께 올린다.
 REQUIRED_RUNTIME_CONTRACT_VERSION=3
 [ "${FEATURE_RUNTIME_CONTRACT_VERSION:-}" = "$REQUIRED_RUNTIME_CONTRACT_VERSION" ] \
-  || env_error "config.sh 의 런타임 계약 표식(FEATURE_RUNTIME_CONTRACT_VERSION=${FEATURE_RUNTIME_CONTRACT_VERSION:-없음})이 이 스크립트가 요구하는 값($REQUIRED_RUNTIME_CONTRACT_VERSION)과 다르다 — scripts/·schemas/ 와 config.sh 본문이 서로 다른 버전이다(혼합 설치). 새 config.sh(설치 시 만들어진 config.sh.new)의 '헬퍼' 이하 본문을 병합하고 모델·명령 설정은 유지한 뒤 재실행"
+  || env_error "런타임 계약 표식(scripts/lib/runtime.sh 의 FEATURE_RUNTIME_CONTRACT_VERSION=${FEATURE_RUNTIME_CONTRACT_VERSION:-없음})이 이 스크립트가 요구하는 값($REQUIRED_RUNTIME_CONTRACT_VERSION)과 다르다 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행한 뒤 재실행"
 require_role_bins DESIGNER VALIDATOR WORKER REVIEWER FIXER jq uuidgen envsubst git || env_error "역할별 CLI 확인 실패"
 for f in consensus-loop.sh impl-review-loop.sh; do
   [ -x "$SKILL_DIR/scripts/$f" ] || env_error "스크립트 없음/실행권한 없음: $f"
@@ -765,7 +765,7 @@ require_worker_outcome_guard_resolved \
 # unit 계약의 영향 확정이 필요한데 확정 파일이 없으면 합의 단계(검증자)로 가기 전에 모델 0회로 멈춘다. 구현 후 gap 대기 중에는 그 경로의 provenance 규칙이 먼저다.
 doc_gap_pending || units_contract_preflight check
 # 산출물이 힌트보다 뒤처져 있으면 뒤로 물린다 (state 만 믿지 않는다)
-# 합의 PASS 판정은 config.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
+# 합의 PASS 판정은 scripts/lib/contract/consensus.sh 의 consensus_pass_current — 체크포인트(consensus-<target>.json)가 PASS 이고 계약 버전·
 # 현재 입력 지문(request/design/impl docs + 그 target 범위의 [USER-QUESTION][scope=…])이 일치하며 가리키는 리뷰가 실제 PASS 여야 한다.
 # scope=impl 결정은 impl 지문에만 들어가므로 impl 합의 뒤 추가된 사용자 결정은 design PASS 를 무효화하지 않는다.
 # 파일명 정렬로 마지막 라운드 파일을 고르지 않는다 — 과거 round-02 PASS 가 새 round-01 BLOCK 을 가리고,
@@ -809,7 +809,7 @@ case "$STAGE" in
     fi;;
 esac
 # verify 로 바로 가려면 approved.fingerprint 파일 존재만으론 부족하다 — 리뷰 체크포인트가 현재 계약·현재 작업 트리의
-# 실제 APPROVE 리뷰를 가리켜야 한다(config.sh impl_approval_current). 아니면 리뷰 루프가 스스로 재개 지점을 고른다.
+# 실제 APPROVE 리뷰를 가리켜야 한다(scripts/lib/contract/review.sh impl_approval_current). 아니면 리뷰 루프가 스스로 재개 지점을 고른다.
 if [ "$STAGE" = verify ] && ! impl_approval_current; then
   log "구현 승인이 현재 작업 트리·계약에 대해 유효하지 않음 — review 부터"; STAGE=review
 fi

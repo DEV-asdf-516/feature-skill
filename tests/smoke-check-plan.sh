@@ -30,6 +30,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
 printf '%s\n' '#!/usr/bin/env bash' 'echo full-test >> "$MOCK_LOG"' > "$TMP/bin/full-test"; chmod +x "$TMP/bin/full-test"
 for v in FAST_CHECK_CMD UNIT_CHECK_CMD UNIT_CHECK_POLICY_PATHS CHECK_GUIDE_FILE; do
@@ -78,8 +80,8 @@ printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n' >> .agent-work/i
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/a.txt","src/b.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 for u in 01 02; do
@@ -268,7 +270,7 @@ git worktree add -q "$TMP/wt" -b feature/p4 HEAD || fail "P4: worktree 생성 �
 mkdir -p "$TMP/wt/.claude/hooks" "$TMP/wt/.agent-work" && cp .claude/hooks/core_rules.md "$TMP/wt/.claude/hooks/"
 printf '# check guide\nWORKTREE-ONLY guide text\n' > "$TMP/wt/docs/check-guide.md"
 plan_in() { # cwd extra-shell...  → $TMP/plan.out (JSON) / $TMP/plan.log
-  ( cd "$1" && shift && export FEATURE_PROJECT_ROOT="$(git rev-parse --show-toplevel)" && source "$CFG" && source "$TMP/repo/.claude/skills/feature/scripts/fast-check.sh" \
+  ( cd "$1" && shift && export FEATURE_PROJECT_ROOT="$(git rev-parse --show-toplevel)" && source "$LOADER" && source "$TMP/repo/.claude/skills/feature/scripts/fast-check.sh" \
     && eval "$*" && check_plan_prepare "$TMP/plan.out" "" "" && printf '%s\n' "$CHECK_PLAN_STATUS" ) > "$TMP/plan.log" 2>&1
 }
 rm -f "$TMP/plan.out"; plan_in "$TMP/wt" 'CHECK_GUIDE_FILE=docs/check-guide.md' || { cat "$TMP/plan.log"; fail "P4: worktree 에서 계획 구성 실패"; }
@@ -280,7 +282,7 @@ rm -f "$TMP/plan.out"; plan_in "$TMP/wt" 'CHECK_GUIDE_FILE=docs/check-guide.md' 
 # 규칙 경로가 선언되지 않은 명령: unknown 으로 남는다(명령 문자열에서 규칙·경로를 지어내지 않는다)
 rm -f "$TMP/plan.out"; plan_in "$TMP/repo" "FAST_CHECK_CMD='bash -c \"lint --config=/opt/lint/strict.yml --max-len 120\"'; CHECK_GUIDE_FILE=''" || { cat "$TMP/plan.log"; fail "P4: 계획 구성 실패"; }
 jq -e '.checks[1] | .status=="configured" and .rule_sources=="unknown" and .policy_paths==[]' "$TMP/plan.out" >/dev/null || fail "P4: 선언 없는 명령의 규칙 출처가 unknown 이 아님: $(jq -c '.checks[1]' "$TMP/plan.out")"
-( cd "$TMP/repo" && source "$CFG" && source .claude/skills/feature/scripts/fast-check.sh && check_plan_prompt_block "$TMP/plan.out" full ) > "$TMP/plan.block" 2>&1
+( cd "$TMP/repo" && source "$LOADER" && source .claude/skills/feature/scripts/fast-check.sh && check_plan_prompt_block "$TMP/plan.out" full ) > "$TMP/plan.block" 2>&1
 grep -q '규칙·설정 경로: 선언된 것 없음(unknown)' "$TMP/plan.block" || fail "P4: 프롬프트 블록이 unknown 을 밝히지 않음"
 grep -q 'strict.yml' <<< "$(jq -c 'del(.checks[1].command) | del(.fingerprint)' "$TMP/plan.out")" && fail "P4: 명령 문자열의 인자를 규칙 경로로 지어냄"
 git worktree remove --force "$TMP/wt" >/dev/null 2>&1 || true
@@ -307,7 +309,7 @@ P5_RAW="$(wc -c < "$raw" | tr -d ' ')"; P5_BUNDLE="$(wc -c < "$bundle" | tr -d '
 # 모든 줄이 후보로 잡히는 로그: 잘림을 밝히고 상한을 지킨다. 요약이 잘려도 판정(기록)은 그대로다 (헬퍼 직접 호출)
 i=1; : > "$TMP/noisy.log"; while [ "$i" -le 3000 ]; do printf 'src/file%s.java:%s: error: "quoted" \\ backslash 한글 진단 메시지 번호 %s\n' "$i" "$i" "$i" >> "$TMP/noisy.log"; i=$((i + 1)); done
 printf '{"status":"VIOLATION","kind":null,"exit_code":1,"timed_out":false}\n' > "$TMP/noisy.rec"
-( cd "$TMP/repo" && source "$CFG" && source .claude/skills/feature/scripts/fast-check.sh && check_digest_write "$TMP/noisy.log" "$TMP/noisy.rec" unit-check && [ "$CHECK_DIGEST" = "$TMP/noisy.log.digest.json" ] ) > "$TMP/dg.log" 2>&1 \
+( cd "$TMP/repo" && source "$LOADER" && source .claude/skills/feature/scripts/fast-check.sh && check_digest_write "$TMP/noisy.log" "$TMP/noisy.rec" unit-check && [ "$CHECK_DIGEST" = "$TMP/noisy.log.digest.json" ] ) > "$TMP/dg.log" 2>&1 \
   || { cat "$TMP/dg.log"; fail "P5: 후보가 많은 로그의 요약 생성 실패"; }
 [ "$(wc -c < "$TMP/noisy.log.digest.json" | tr -d ' ')" -le 8192 ] \
   && jq -e '.truncated==true and .matched_count==3000 and .included_count < 3000 and .included_count == (.entries|length) and .status=="VIOLATION" and .exit_code==1 and .raw_lines==3000' "$TMP/noisy.log.digest.json" >/dev/null \
@@ -337,10 +339,10 @@ jq -e '.generation==1 and .session_bound==true' .agent-work/worker-session.json 
 [ "$(cat .agent-work/units/01-a/worker-before.tree)" = "$(cat .agent-work/units/01-a/before.tree)" ] || fail "P6: 계획 구성이 unit 의 호출 전 기준 tree 를 바꿈"
 # 검사 설정이 바뀌면 같은 unit 의 다음 계획에 변경이 표시된다(직전 계획 파일과 지문 비교 — 새 상태 파일 없음)
 fp_before="$(jq -r '.fingerprint' .agent-work/units/01-a/check-plan.json)"
-( cd "$TMP/repo" && source "$CFG" && source .claude/skills/feature/scripts/fast-check.sh && UNIT_CHECK_POLICY_PATHS="tools/rules.txt" && check_plan_prepare .agent-work/units/01-a/check-plan.json 01-a .agent-work/units/01-a \
+( cd "$TMP/repo" && source "$LOADER" && source .claude/skills/feature/scripts/fast-check.sh && UNIT_CHECK_POLICY_PATHS="tools/rules.txt" && check_plan_prepare .agent-work/units/01-a/check-plan.json 01-a .agent-work/units/01-a \
   && [ "$CHECK_PLAN_CHANGED" = 1 ] && [ "$CHECK_PLAN_FP" != "$fp_before" ] ) > "$TMP/plan.log" 2>&1 || { cat "$TMP/plan.log"; fail "P6: 정책 경로 변경이 계획 변경으로 잡히지 않음"; }
 jq -e '.changed_since_previous==true' .agent-work/units/01-a/check-plan.json >/dev/null \
-  && ( cd "$TMP/repo" && source "$CFG" && source .claude/skills/feature/scripts/fast-check.sh && check_plan_prompt_block .agent-work/units/01-a/check-plan.json full | grep -q '직전 계획에서 바뀜' ) \
+  && ( cd "$TMP/repo" && source "$LOADER" && source .claude/skills/feature/scripts/fast-check.sh && check_plan_prompt_block .agent-work/units/01-a/check-plan.json full | grep -q '직전 계획에서 바뀜' ) \
   || fail "P6: 바뀐 계획이 변경 표시 없이 전달됨"
 # 워커 턴과 수정 턴 사이에 선언된 규칙 파일이 바뀌면(여기서는 targeted test 가 바꾼다) 수정 턴은 한 줄이 아니라 '바뀜' 표시가 붙은 전문을 받는다
 reset_tree; set_cfg UNIT_CHECK_CMD "tools/unit-check.sh"; set_cfg UNIT_CHECK_POLICY_PATHS "tools/rules.txt"; flag worker-bad-01; flag test-touches-rules

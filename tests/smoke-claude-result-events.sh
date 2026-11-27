@@ -27,6 +27,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 sed -i.bak 's/^VALIDATOR_CLI=.*/VALIDATOR_CLI="codex"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 cd "$TMP/repo" || exit 1
@@ -41,8 +43,8 @@ printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 c
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 printf '{"version":1,"units":[{"id":"01-intake","title":"접수","goal":"unit 01","requirements":["REQ-01"],"scope":{"files":["src/u01.txt"],"new_file_roots":[]},"references":["implementation.md#01"],"targeted_test":"echo test-01 >> %s/calls.log"}]}\n' "$TMP" > .agent-work/implementation-units.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 
@@ -140,7 +142,7 @@ grep -q 'CLAUDE_RESULT_MULTIPLE' "$TMP/run.log" || { tail -20 "$TMP/run.log"; fa
 [ "$(jq -c 'select(.type=="result")' "$(stream_file)" | wc -l | tr -d ' ')" = 2 ] || fail "B: 원본 stream 에 result 2개가 그대로 남아 있어야 함"
 [ "$(jq -r 'select(.role=="WORKER") | [.usage_error,.usage_observation_status,.context_last_turn]|@csv' .agent-work/usage.jsonl 2>/dev/null)" = '"CLAUDE_RESULT_MULTIPLE","partial",3' ] \
   || fail "B: 모호한 결과의 usage 가 어느 result 의 비용으로 기록되거나 unknown 행이 없음(관측 가능한 마지막 assistant 입력만 partial 로): $(jq -c 'select(.role=="WORKER")' .agent-work/usage.jsonl)"
-[ "$(bash -c "source $CFG; usage_summary" | jq -r '[.cost_unknown_invocations,.usage_unobserved_invocations,.by_role.WORKER.cost_unknown_invocations]|@csv')" = '1,1,1' ] || fail "B: 요약의 unknown 건수가 실패 invocation 을 세지 않음"
+[ "$(bash -c "source $LOADER; usage_summary" | jq -r '[.cost_unknown_invocations,.usage_unobserved_invocations,.by_role.WORKER.cost_unknown_invocations]|@csv')" = '1,1,1' ] || fail "B: 요약의 unknown 건수가 실패 invocation 을 세지 않음"
 # 사용자 복구(호출 전 tree 로) → 재실행 시 워커 재호출 → DONE
 git checkout -q -- src/u01.txt
 rc="$(FAKE_STREAM_MODE=one run_runner)"

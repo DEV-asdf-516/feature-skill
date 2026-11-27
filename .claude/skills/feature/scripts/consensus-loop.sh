@@ -16,7 +16,7 @@
 # =============================================================
 set -euo pipefail
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$SKILL_DIR/config.sh"
+source "$SKILL_DIR/scripts/lib/bootstrap.sh"
 PROJECT_CONVENTIONS="$(load_project_conventions)"
 
 # stdin 원천 차단 — codex/claude 비대화형 실행은 stdin이 열린 채 상속되면
@@ -83,7 +83,7 @@ if ! require_designer_scope_guard_resolved; then
   exit 2
 fi
 # Round 2+ 입력용: 디자이너 수정 전 문서를 보관하고, 다음 라운드에 현재 문서와의 diff 를 검증자에게 준다.
-# 파일 목록은 config.sh 의 consensus_docs_for — 스냅샷·diff·변경 파일·재개 지문이 같은 집합을 본다.
+# 파일 목록은 scripts/lib/contract/consensus.sh 의 consensus_docs_for — 스냅샷·diff·변경 파일·재개 지문이 같은 집합을 본다.
 consensus_docs() { consensus_docs_for "$TARGET"; }
 # 목록의 문서가 없을 수 있다(implementation-units.json 은 루프 단독 실행에서 선택) — 없는 쪽은 /dev/null 로 다뤄 생성·삭제도 변경으로 잡는다.
 snapshot_docs() { # dir
@@ -114,7 +114,7 @@ snapshot_docs_diff() { # dir → stdout (unified diff, 검증자 입력·사람 
 #   next_step: VALIDATOR_PENDING | DESIGNER_PENDING | PASS
 # review/snapshot 경로를 함께 저장해 DESIGNER_PENDING 재개가 같은 리뷰 JSON 을 그대로 쓰게 한다.
 RESUME_STATE="$WORK_DIR/consensus-$TARGET.json"
-# 지문은 config.sh 의 세 종류(editable / upstream / pass)를 항상 함께 저장한다. 어떤 것이 달라졌느냐가 재개 지점을 정한다.
+# 지문은 scripts/lib/contract/consensus.sh 의 세 종류(editable / upstream / pass)를 항상 함께 저장한다. 어떤 것이 달라졌느냐가 재개 지점을 정한다.
 save_consensus_checkpoint() { # round next_step review snapshot
   jq -n --arg target "$TARGET" --argjson version "$CONSENSUS_CHECKPOINT_VERSION" --argjson contract_version "$VALIDATOR_CONTRACT_VERSION" \
     --argjson round "$1" --arg next_step "$2" --arg review "${3:-}" --arg snapshot "${4:-}" \
@@ -270,7 +270,7 @@ while [ "$round" -le $((MAX_SPEC_ROUNDS + 1)) ]; do
   # 공통 계약(validator-review-*.md) 뒤에 프로필 오버레이를 붙인다. 오버레이는 envsubst 를 거치지 않는다(치환 변수 없음).
   # 검증자는 decisions.md 원본을 입력으로 받지 않는다 — 거기에는 디자이너의 [round N] ACCEPT/REJECT 사유가 섞여 있고, "읽되 무시하라" 는 격리가 아니다.
   # 이 target 의 확정 사용자 결정([USER-QUESTION][scope=…]) 줄만 매 호출 직전에 결정적으로 다시 추린다 — PASS/upstream 지문과 **같은 함수**
-  # (config.sh consensus_user_decision_lines)의 출력이다. 검증자가 보는 결정 집합과 지문에 들어가는 결정 집합이 어긋나면 관련 결정이 빠진 PASS 가 재사용된다.
+  # (scripts/lib/contract/consensus.sh consensus_user_decision_lines)의 출력이다. 검증자가 보는 결정 집합과 지문에 들어가는 결정 집합이 어긋나면 관련 결정이 빠진 PASS 가 재사용된다.
   # scope=design(요구·외부 동작·설계에 영향 — 발생 단계와 무관)은 design·impl 양쪽, scope=impl(구현 수단만)은 impl 만 본다.
   # 디자이너와 지문·체크포인트는 계속 decisions.md 원본을 쓴다.
   user_decisions="$WORK_DIR/reviews/user-decisions-$TARGET.md"

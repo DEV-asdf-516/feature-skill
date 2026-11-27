@@ -6,9 +6,9 @@
 # 원칙:
 #  - 대상의 기존 settings.json / .codex/hooks.json 은 절대 수정하지 않는다.
 #    누락된 hook 항목은 감지해서 "추가해야 할 내용"만 출력한다.
-#  - 프로젝트별 편집 파일(config.sh, core_rules.md)은 보존한다.
-#    새 버전과 다르면 <파일>.new 로 옆에 두고 병합을 안내한다.
-#  - 스킬 코드(scripts/, prompts/, schemas/, references/, SKILL.md, 훅 스크립트)는 갱신한다.
+#  - config.sh 는 사용자 설정 전용이라 보존한다. 새 버전과 다르면 config.sh.new 를 참고용으로만 둔다(병합 불필요).
+#    그 밖의 프로젝트별 편집 파일(core_rules.md)은 보존하고, 새 버전과 다르면 <파일>.new 로 옆에 두고 병합을 안내한다.
+#  - 스킬 코드(scripts/ — 런타임 모듈 scripts/lib/ 포함, prompts/, schemas/, references/, SKILL.md, 훅 스크립트)는 갱신한다.
 # =============================================================
 set -euo pipefail
 
@@ -39,39 +39,63 @@ install_user_editable() {
   fi
 }
 
-# ---------- 0. 호환성 사전 검사 (활성 코드를 바꾸기 전에 중단 판단) ----------
-# 기존 config.sh 는 보존되므로, 새 스크립트가 요구하는 헬퍼 함수가 거기 없으면
-# 스크립트만 교체된 시점에 설치가 깨진다. 교체 전에 검사하고 없으면 중단한다.
+# ---------- 0. config.sh 소유권 분류 (활성 코드를 바꾸기 전에 중단 판단) ----------
+# config.sh 는 사용자 설정 전용이다. 런타임 함수(scripts/lib/ 모듈이 정의하는 이름)의 정의나 런타임 소유 대입(계약·포맷 버전 상수, PROJECT_ROOT·FEATURE_SKILL_DIR)이 있으면 분리 이전 설치라
+# 새 scripts/ 와 구 config.sh 본문이 섞인다(혼합 설치). 판정은 소스 저장소의 scripts/lib/config-layout.sh 로 한다 — 대상 런타임은 로드하지 않는다.
 TARGET_SKILL_DIR="$TARGET_ROOT/.claude/skills/feature"
 SOURCE_CONFIG="$SOURCE_ROOT/.claude/skills/feature/config.sh"
 TARGET_CONFIG="$TARGET_SKILL_DIR/config.sh"
-if [ -f "$TARGET_CONFIG" ] && ! cmp -s "$SOURCE_CONFIG" "$TARGET_CONFIG"; then
-  missing_helpers=""
-  for helper_name in $(grep -oE '^[a-z_][a-z_0-9]*\(\)' "$SOURCE_CONFIG" | tr -d '()'); do
-    grep -qE "^${helper_name}\(\)" "$TARGET_CONFIG" || missing_helpers="$missing_helpers $helper_name"
-  done
-  if [ -n "$missing_helpers" ]; then
-    cp "$SOURCE_CONFIG" "$TARGET_CONFIG.new"
-    echo "[FAIL] 기존 $TARGET_CONFIG 에 새 스크립트가 요구하는 헬퍼가 없음:$missing_helpers" >&2
-    echo "       $TARGET_CONFIG.new 를 참고해 먼저 병합한 뒤 다시 실행하세요. (활성 코드는 변경하지 않았음)" >&2
-    exit 1
-  fi
-  # 헬퍼 '이름'이 전부 있어도 본문이 옛 버전이면 새 scripts/·schemas/·prompts/ 와 옛 config.sh 본문이 섞인다(혼합 버전).
-  # config.sh 의 버전 상수(런타임 계약 표식 FEATURE_RUNTIME_CONTRACT_VERSION, 검증자·리뷰어 계약 버전, 체크포인트 포맷 버전 …)는 사용자 설정이 아니라
-  # 코드와 한 몸인 값이다 — 소스와 하나라도 다르면(대상에 없음 포함) 활성 코드를 바꾸기 전에 중단한다. 모델·effort·TEST_CMD 같은 사용자 설정은 비교하지 않는다.
-  version_mismatch=""
-  while IFS='=' read -r version_name version_value; do
-    [ -n "$version_name" ] || continue
-    target_value="$(sed -n "s/^${version_name}=\([0-9][0-9]*\).*/\1/p" "$TARGET_CONFIG" | tail -1)"
-    [ "$target_value" = "$version_value" ] || version_mismatch="$version_mismatch $version_name(대상 ${target_value:-없음} / 새 버전 $version_value)"
-  done < <(sed -n 's/^\([A-Z][A-Z_]*_VERSION\)=\([0-9][0-9]*\).*/\1=\2/p' "$SOURCE_CONFIG")
-  if [ -n "$version_mismatch" ]; then
-    cp "$SOURCE_CONFIG" "$TARGET_CONFIG.new"
-    echo "[FAIL] 기존 $TARGET_CONFIG 의 본문이 새 스킬 코드와 다른 버전임(혼합 설치 방지):$version_mismatch" >&2
-    echo "       $TARGET_CONFIG.new 의 버전 상수와 '헬퍼' 구분선 아래 본문으로 교체하고, 그 위의 사용자 설정(모델·effort·CLI·TEST_CMD/LINT_CMD 등)은 기존 값을 유지해 병합한 뒤 다시 실행하세요." >&2
-    echo "       (활성 코드는 변경하지 않았음. 진행 중인 피처가 있으면 그 세션이 끝난 뒤에 병합·설치하세요 — 계약 버전이 바뀌면 진행 중인 합의·리뷰·워커 세션의 전제가 달라집니다)" >&2
-    exit 1
-  fi
+SOURCE_CONFIG_LAYOUT="$SOURCE_ROOT/.claude/skills/feature/scripts/lib/config-layout.sh"
+[ -f "$SOURCE_CONFIG_LAYOUT" ] \
+  || { echo "[FAIL] 소스 불완전: $SOURCE_CONFIG_LAYOUT 없음 — 소스 저장소를 온전히 받은 뒤 다시 실행하세요. (활성 코드는 변경하지 않았음)" >&2; exit 1; }
+source "$SOURCE_CONFIG_LAYOUT"
+if [ -f "$TARGET_CONFIG" ]; then
+  layout_rc=0; layout_lines="$(feature_config_runtime_lines "$TARGET_CONFIG")" || layout_rc=$?
+  case "$layout_rc" in
+    0) ;;
+    1)
+      # 이관 템플릿: 소스 config.sh 그대로이되, 기존 설정에 backend 줄이 없으면 그 의미(legacy)가 바뀌지 않게 소스 템플릿의 그 줄만 legacy 값으로 적는다.
+      # 사용자 파일의 줄은 해석·복사하지 않는다.
+      migration_sed=""
+      missing_claude_backend=0
+      missing_codex_backend=0
+      if ! grep -q '^CLAUDE_BACKEND=' "$TARGET_CONFIG"; then
+        missing_claude_backend=1
+        migration_sed="${migration_sed}s|^CLAUDE_BACKEND=\"native\"\$|CLAUDE_BACKEND=\"legacy_cli\"   # 이관: 기존 config.sh 에 이 줄이 없었다 — 종전 의미 legacy_cli 유지. native 전환은 진행 중인 피처가 없을 때 직접 한다|"$'\n'
+      fi
+      if ! grep -q '^CODEX_BACKEND=' "$TARGET_CONFIG"; then
+        missing_codex_backend=1
+        migration_sed="${migration_sed}s|^CODEX_BACKEND=\"app_server\"\$|CODEX_BACKEND=\"legacy_exec\"   # 이관: 기존 config.sh 에 이 줄이 없었다 — 종전 의미 legacy_exec 유지. app_server 전환은 진행 중인 피처가 없을 때 직접 한다|"$'\n'
+      fi
+      sed "$migration_sed" "$SOURCE_CONFIG" > "$TARGET_CONFIG.new"
+      if [ "$missing_claude_backend" -eq 1 ] && ! grep -q '^CLAUDE_BACKEND="legacy_cli"' "$TARGET_CONFIG.new"; then
+        echo "[FAIL] 소스 config.sh 에 CLAUDE_BACKEND=\"native\" 줄이 없어 이관 템플릿을 만들 수 없음: $TARGET_CONFIG.new (활성 코드는 변경하지 않았음)" >&2; exit 1
+      fi
+      if [ "$missing_codex_backend" -eq 1 ] && ! grep -q '^CODEX_BACKEND="legacy_exec"' "$TARGET_CONFIG.new"; then
+        echo "[FAIL] 소스 config.sh 에 CODEX_BACKEND=\"app_server\" 줄이 없어 이관 템플릿을 만들 수 없음: $TARGET_CONFIG.new (활성 코드는 변경하지 않았음)" >&2; exit 1
+      fi
+      {
+        echo "[FAIL] 기존 $TARGET_CONFIG 에 런타임 소유 줄이 있다(분리 이전 설정 — 혼합 설치 방지). 활성 코드는 변경하지 않았음."
+        echo "       위반 줄(줄번호:내용, 최대 20줄):"
+        printf '%s\n' "$layout_lines" | sed -n '1,20p' | sed 's/^/         /'
+        echo "       ① 진행 중인 피처를 먼저 마치거나 수리하세요: 미수용 native 요청(.agent-work/native-agent/pending.json)은 새 런타임이 NATIVE_STALE_REQUEST 로 거부합니다."
+        echo "          완료 불명 Codex App Server turn 은 'bash $TARGET_SKILL_DIR/scripts/codex-app-server.sh status' 로 확인하세요. 실행 중인 러너가 있으면 설치하지 마세요."
+        echo "       ② 백업: cp $TARGET_CONFIG $TARGET_CONFIG.pre-runtime-split"
+        echo "       ③ 이관(둘 중 하나):"
+        echo "          (i)  $TARGET_CONFIG.new 를 새 config.sh 로 삼고 기존 사용자 값(모델·effort·CLI·backend·명령·한도·경로·알림·환경 변수 표현식)을 그대로 옮긴다"
+        echo "          (ii) 기존 config.sh 에서 위반 줄('# 헬퍼' 구분선 이하 전부, 검증자·리뷰어 계약 버전·체크포인트 포맷 버전 블록, PROJECT_ROOT·FEATURE_SKILL_DIR 두 줄)을 지운다"
+        if [ "$missing_claude_backend" -eq 1 ]; then
+          echo "       ④ 기존 config.sh 에 CLAUDE_BACKEND 줄이 없다 — 종전 의미는 legacy_cli('claude -p')다. $TARGET_CONFIG.new 에 CLAUDE_BACKEND=\"legacy_cli\" 로 적었다((ii) 로 이관하면 이 줄을 새로 넣지 않으면 된다)."
+        fi
+        if [ "$missing_codex_backend" -eq 1 ]; then
+          echo "       ④ 기존 config.sh 에 CODEX_BACKEND 줄이 없다 — 종전 의미는 legacy_exec('codex exec')다. $TARGET_CONFIG.new 에 CODEX_BACKEND=\"legacy_exec\" 로 적었다((ii) 로 이관하면 이 줄을 새로 넣지 않으면 된다)."
+        fi
+        echo "       ⑤ 이관한 뒤 install.sh 를 다시 실행하세요(README '설치' 의 '구 설치 이관'). 판정을 통과할 때까지 활성 코드는 바뀌지 않습니다."
+      } >&2
+      exit 1
+      ;;
+    *) echo "[FAIL] 대상 config.sh 를 읽을 수 없음: $TARGET_CONFIG (활성 코드는 변경하지 않았음)" >&2; exit 1 ;;
+  esac
 fi
 
 # ---------- 1. 스킬 본체 (config.sh 는 사용자 편집 파일로 별도 처리) ----------
@@ -109,7 +133,15 @@ for skill_entry in $SKILL_ENTRIES; do
 done
 chmod +x "$TARGET_SKILL_DIR/scripts/"*.sh
 echo "[OK] 스킬 코드 갱신: $TARGET_SKILL_DIR (SKILL.md, prompts/, schemas/, scripts/, references/, agents/)"
-install_user_editable "$SOURCE_ROOT/.claude/skills/feature/config.sh" "$TARGET_SKILL_DIR/config.sh"
+# config.sh: 사용자 설정 전용(0단계 통과)이라 보존한다. 런타임은 위 scripts/(scripts/lib/)로 이미 갱신됐으므로 병합이 필요 없다 — manual_steps 로 세지 않는다.
+if [ ! -f "$TARGET_CONFIG" ]; then
+  cp "$SOURCE_CONFIG" "$TARGET_CONFIG"
+  echo "[OK] 생성: $TARGET_CONFIG"
+elif ! cmp -s "$SOURCE_CONFIG" "$TARGET_CONFIG"; then
+  cp "$SOURCE_CONFIG" "$TARGET_CONFIG.new"
+  echo "[INFO] 기존 설정 보존: $TARGET_CONFIG — 사용자 설정 전용 파일이라 병합할 필요가 없습니다(없는 선택 설정은 미설정으로 동작)."
+  echo "       $TARGET_CONFIG.new 는 새 설정 항목의 설명·기본값 참고용입니다."
+fi
 # 선택 설정 안내: 보존된 기존 config.sh 에 프로젝트 빠른 검사 설정 줄이 없으면(이 기능 이전의 설치) 미설정으로 그대로 동작한다.
 # 헬퍼는 scripts/fast-check.sh 에 있어 config.sh 본문 병합이 필요 없다(런타임 계약 표식 불변) — 필수 작업이 아니므로 manual_steps 로 세지 않는다.
 if ! grep -q '^FAST_CHECK_CMD=' "$TARGET_SKILL_DIR/config.sh"; then

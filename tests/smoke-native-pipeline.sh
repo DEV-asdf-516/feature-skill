@@ -32,9 +32,10 @@ cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/
 cp "$PROJECT_SRC/.claude/hooks/feature_native_agent.sh" "$TMP/repo/.claude/hooks/" || fail "훅 복사 실패"
 HOOK="$TMP/repo/.claude/hooks/feature_native_agent.sh"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 export CLI_LOG="$TMP/cli.log" MOCK_LOG="$TMP/calls.log"; : > "$CLI_LOG"; : > "$MOCK_LOG"
-V="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-RV="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+V="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+RV="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 for cli in claude codex; do
   printf '%s\n' '#!/usr/bin/env bash' "echo \"$cli \$*\" >> \"$CLI_LOG\"; exit 9" > "$TMP/bin/$cli"; chmod +x "$TMP/bin/$cli"
 done

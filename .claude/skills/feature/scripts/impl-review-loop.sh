@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$SKILL_DIR/config.sh"
+source "$SKILL_DIR/scripts/lib/bootstrap.sh"
 PROJECT_CONVENTIONS="$(load_project_conventions)"
 # 컨벤션 본문은 위 PROJECT_CONVENTIONS 로 한 번만 전달한다(claude --append-system-prompt / codex 프롬프트 앞 블록).
 # 프롬프트에는 경로만 추가로 넣어 리뷰어·수정자가 basis_refs 에 실제 규칙 파일·줄을 인용할 수 있게 한다. 파일이 없으면 빈 값 = 컨벤션 검사 없음.
@@ -60,8 +60,8 @@ fi
 echo "[$(date '+%F %T')] impl-review-loop 시작"
 
 require_role_bins REVIEWER FIXER jq uuidgen envsubst git || exit 1
-[ -n "${REVIEWER_CONTRACT_VERSION:-}" ] || { echo "[FAIL] config.sh 에 REVIEWER_CONTRACT_VERSION 이 없음 (config.sh.new 참고해 병합)" >&2; exit 1; }
-[ -n "${REVIEW_CHECKER_VERSION:-}" ] || { echo "[FAIL] config.sh 에 REVIEW_CHECKER_VERSION 이 없음 (config.sh.new 참고해 병합)" >&2; exit 1; }
+[ -n "${REVIEWER_CONTRACT_VERSION:-}" ] || { echo "[FAIL] scripts/lib/runtime.sh 에 REVIEWER_CONTRACT_VERSION 이 없음 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라" >&2; exit 1; }
+[ -n "${REVIEW_CHECKER_VERSION:-}" ] || { echo "[FAIL] scripts/lib/runtime.sh 에 REVIEW_CHECKER_VERSION 이 없음 — scripts/ 가 서로 다른 버전이다(혼합 설치). install.sh 를 다시 실행하라" >&2; exit 1; }
 SCHEMA_FILE="$SKILL_DIR/schemas/impl-review.schema.json"
 [ -f "$SCHEMA_FILE" ] || { echo "[FAIL] 스키마 없음: $SCHEMA_FILE" >&2; exit 1; }
 for prompt_file in reviewer.md fixer.md; do
@@ -79,9 +79,9 @@ source "$SKILL_DIR/scripts/fast-check.sh"
 # worktree_fingerprint: FIXER_PENDING/REVIEWER_PENDING 에서는 작업 트리+decisions.md 지문(compute_fixer_resume_fingerprint) —
 # 재개 시 달라졌으면 수정자가 일부 고친 뒤 죽은 것이므로 같은 수정을 반복하지 않고 다음 리뷰 라운드로 간다.
 # APPROVE 에서는 범위 지문(compute_approval_fingerprint = feature-scope 범위, 없으면 작업 트리 전체) — 같고 리뷰가 실제 APPROVE 일 때만 승인을 재사용한다.
-# checker_version: 이 체크포인트를 쓴 루프 검사기 버전(config.sh REVIEW_CHECKER_VERSION). APPROVE 재사용 때 현재와 다르면(필드 없는 옛 체크포인트 포함)
+# checker_version: 이 체크포인트를 쓴 루프 검사기 버전(scripts/lib/runtime.sh REVIEW_CHECKER_VERSION). APPROVE 재사용 때 현재와 다르면(필드 없는 옛 체크포인트 포함)
 # 저장된 승인 출력을 현재 검사기로 로컬 재검증(모델 0회)한 뒤에만 재사용한다 — 통과하면 버전을 갱신하고, 무효면 새 attempt 로 리뷰한다.
-# contract_docs_sha256(APPROVE 만): 그 리뷰가 기준으로 읽은 계약 문서의 내용 지문(config.sh review_contract_docs_json approval). 승인 재사용은 작업 트리 지문뿐 아니라
+# contract_docs_sha256(APPROVE 만): 그 리뷰가 기준으로 읽은 계약 문서의 내용 지문(scripts/lib/contract/review.sh review_contract_docs_json approval). 승인 재사용은 작업 트리 지문뿐 아니라
 # 이 값도 현재와 같아야 한다 — 코드가 그대로여도 계약 문서·사용자 결정·conventions.md 가 바뀌었으면 과거 APPROVE 를 재사용하지 않고 새 attempt 로 리뷰한다(필드 없는 옛 체크포인트 포함).
 RESUME_STATE="$WORK_DIR/review-impl.json"
 save_review_checkpoint() { # attempt round next_step review tree worktree_fingerprint [contract_docs_json — APPROVE 만]
@@ -245,7 +245,7 @@ stop_review_output_invalid() { # why — 모델 호출 없이 진단을 돌려�
 # origin 별 필드:
 #   ROUND_1                               1라운드 전용, previous_issue_id="" · fix_ref=""
 #   UNRESOLVED_PREVIOUS                   직전 리뷰에 같은 id 가 있고 previous_issue_id=id · fix_ref=""
-#   FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX previous_issue_id="" · fix_ref 필수(config.sh REVIEW_FIX_REF_RULE — review_fix_ref_violation 이 git tree 로 대조)
+#   FIX_REGRESSION / NEWLY_EXPOSED_BY_FIX previous_issue_id="" · fix_ref 필수(scripts/lib/contract/review.sh REVIEW_FIX_REF_RULE — review_fix_ref_violation 이 git tree 로 대조)
 # 수정과 신규 issue 사이의 의미적 인과관계까지는 보지 않는다(tests/reviewer-cases.md 의 몫).
 validate_review_output() { # review round prev_review prev_tree cur_tree → errors JSON
   local review="$1" round="$2" prev_review="$3" prev_tree="$4" cur_tree="$5" errors prev_ids='[]' changed_list row id ref why schema_errors
@@ -259,7 +259,7 @@ validate_review_output() { # review round prev_review prev_tree cur_tree → err
     jq -c --argjson v "$REVIEWER_CONTRACT_VERSION" '[{issue_id:"", field:"schema_version", observed:(.schema_version|tostring), expected:("현재 리뷰어 계약 버전 " + ($v|tostring)), rule_id:"SCHEMA_VERSION_MISMATCH"}]' "$review"
     return 0
   fi
-  # ③ JSON Schema 전체(required·enum·minItems·minLength·additionalProperties·타입) — 스키마 파일 자체로 검사한다(config.sh json_schema_violations).
+  # ③ JSON Schema 전체(required·enum·minItems·minLength·additionalProperties·타입) — 스키마 파일 자체로 검사한다(scripts/lib/runtime.sh json_schema_violations).
   #    CLI 의 structured output 이 스키마를 강제했다고 가정하지 않는다. 구조가 깨진 출력에는 아래 조건부 규칙을 적용하지 않는다(해석 불가).
   schema_errors="$(json_schema_violations "$SCHEMA_FILE" "$review")" || return 1
   if [ "$(jq 'length' <<< "$schema_errors")" -gt 0 ]; then
@@ -300,7 +300,7 @@ validate_review_output() { # review round prev_review prev_tree cur_tree → err
       )] | add // [])' "$review")" || return 1
   # DOC_GAP 의 code_refs: gap 을 구현 단위에 연결하는 유일한 입력이다(doc_gap_record_review → gaps[].paths). ref 하나라도 파일 경로로 확정할 수 없으면
   # 체크포인트를 만들기 전에 거부한다 — 비정규 ref 만 버리고 남은 경로로 기록하면 빠진 파일의 unit 은 gap 해결로 인정받지 못하고, 사용자가 그 사실을 알 수 없다.
-  # 정규화는 줄 범위 제거와 선행 "./" 제거뿐이다(config.sh code_ref_path). 파일 실재 규칙은 워커 undecided[].paths 와 같다(repo_file_path_violation).
+  # 정규화는 줄 범위 제거와 선행 "./" 제거뿐이다(scripts/lib/runtime.sh code_ref_path). 파일 실재 규칙은 워커 undecided[].paths 와 같다(repo_file_path_violation).
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     if [ "$(jq -r '.ok' <<< "$row")" = true ]; then
@@ -467,7 +467,7 @@ ATTEMPT_DIR="$WORK_DIR/reviews/impl-attempt-$attempt_tag"
 mkdir -p "$ATTEMPT_DIR"
 echo "리뷰 산출물: $ATTEMPT_DIR (attempt $attempt)"
 
-# 라운드별 작업 트리 스냅샷은 config.sh 의 snapshot_worktree_tree (tree 객체). 라운드 간 tree 끼리 diff 하면
+# 라운드별 작업 트리 스냅샷은 scripts/lib/runtime.sh 의 snapshot_worktree_tree (tree 객체). 라운드 간 tree 끼리 diff 하면
 # "수정자가 실제로 바꾼 것"이 정확히 나온다.
 # 리뷰 기준선: 러너가 워커 진입 직전에 기록한 worker-baseline.tree. 없으면(구버전 산출물) HEAD 로 대체하되
 # 수정자에게 기준선 없음을 알려 범위 밖 변경 자동 원복을 막는다.
@@ -507,7 +507,7 @@ stop_with() { # exit-code status [extra jq assignments]  — 사용자·문서 �
 # 리뷰어가 기준 문서로 읽는 계약 문서(prompts/reviewer.md 의 입력: implementation·approach·design·request·decisions)의 **내용** 해시를 넣는다 —
 # 코드(tree)가 그대로여도 계약이 바뀌었으면 저장된 출력은 다른 계약에 대한 리뷰다. 파일별로 따로 들어 무엇이 달라졌는지 진단할 수 있게 한다.
 # 검사기 버전(REVIEW_CHECKER_VERSION)은 넣지 않는다 — 입력이 아니라 판정 도구이고, 넣으면 검사기를 고친 뒤의 로컬 재검증이 불가능해진다.
-# (문서 목록·해시 계산은 config.sh review_contract_docs_json — 승인 캐시의 계약 문서 지문과 같은 함수다.)
+# (문서 목록·해시 계산은 scripts/lib/contract/review.sh review_contract_docs_json — 승인 캐시의 계약 문서 지문과 같은 함수다.)
 review_input_json() { # prev_review prev_tree cur_tree approval_fingerprint
   local prev_sha="" conv_sha="ABSENT" base_tree docs
   docs="$(review_contract_docs_json)" || return 1

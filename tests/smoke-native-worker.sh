@@ -34,9 +34,11 @@ cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/
 cp "$PROJECT_SRC/.claude/hooks/feature_native_agent.sh" "$TMP/repo/.claude/hooks/" || fail "훅 복사 실패"
 HOOK="$TMP/repo/.claude/hooks/feature_native_agent.sh"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 export CLI_LOG="$TMP/cli.log" MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/state"; : > "$CLI_LOG"; : > "$MOCK_LOG"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 # claude CLI 는 어떤 경우에도 불리면 안 된다. codex mock 은 스키마로 역할을 판별한다(검증자 PASS / 리뷰어 APPROVE) — 워커 스키마로 불리면 실패.
 cat > "$TMP/bin/claude" <<'EOS'
@@ -469,7 +471,7 @@ l_stale() { # label — 방금 바꾼 것 때문에 수용 직전 입력 지문�
   [ "$(req_count)" = 1 ] && [ ! -e .agent-work/units/01-intake/done.json ] && [ ! -s "$CLI_LOG" ] || fail "L: $1 불수용인데 새 요청·unit 완료·CLI 호출이 생김"
 }
 lfp() { # scope-file → 지금 설정·작업 트리의 검사 입력 지문(헬퍼 직접 호출 — 모델·검사 명령 0회)
-  ( set -e; source "$CFG"; source .claude/skills/feature/scripts/fast-check.sh; check_plan_input_fingerprint .agent-work/units/01-intake/check-plan.json "$1" )
+  ( set -e; source "$LOADER"; source .claude/skills/feature/scripts/fast-check.sh; check_plan_input_fingerprint .agent-work/units/01-intake/check-plan.json "$1" )
 }
 # 워커가 자기 scope 안의 선언된 정책 파일을 고친 결과는 수용된다(과잉 차단 없음)
 l_setup "scope 안 정책 파일"

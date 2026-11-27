@@ -9,6 +9,9 @@
 # 결과 원본은 Claude Code 가 쓴 전사(agent_transcript_path)에서만 읽는다:
 #   · SubagentHandback 도구 호출이 있으면 그 호출의 input.message 가 보고다(SubagentStop 의 last_assistant_message 는 closing text 일 뿐 — 보고로 쓰지 않는다).
 #   · 없으면 stop_reason=end_turn 인 마지막 assistant 메시지의 text.
+#   · 단, SubagentStop 은 턴 종료일 뿐 작업 완료의 증거가 아니다. SubagentHandback 이 없는데 그 Agent 가 인계 뒤 띄운 백그라운드 Bash 명령
+#     (run_in_background 또는 Claude Code 의 자동 이동)의 종결 알림이 전사에 아직 없거나, 마지막 종결 알림 뒤의 새 보고가 아직 없으면 중간 종료다 —
+#     캡처하지 않고 상태도 그대로 둔다. 명령이 끝나면 같은 Agent 가 다시 깨어나고 다음 SubagentStop 이 보고를 캡처한다(아래 read_summary 의 background).
 #   · 요청↔Agent 결속은 이벤트 순서 추측이 아니라 내용이다: 그 Agent 가 마지막으로 받은 프롬프트의 첫 줄(요청 경로)과 전체 해시.
 #
 # 요청 상태 전이(이 훅이 쓰는 것):
@@ -16,6 +19,8 @@
 #                                                   도구가 실행되지 않는다 — 이 훅의 allow 는 실행의 증거가 아니다(다른 훅의 거부를 이 훅은 볼 수 없다).
 #   DISPATCHING ──PostToolUse(같은 tool_use_id·세션·도구, 실행 성공 응답)──▶ DISPATCHED
 #   DISPATCHING|DISPATCHED ──SubagentStop(전사 결속 통과)──▶ RESULT_READY      SubagentStop 이 PostToolUse 보다 먼저 올 수 있다(foreground Agent).
+#                                                   백그라운드 대기 중의 중간 종료(위)는 전이하지 않는다 — 흔적(STOP_BACKGROUND_PENDING /
+#                                                   STOP_BACKGROUND_REPORT_PENDING, detail 에 task id)만 남긴다.
 #   늦은·중복 PostToolUse 는 상태를 바꾸지 않는다(보조 기록만). 다른 호출의 이벤트(tool_use_id·세션·agent id 불일치)는 흔적만 남기고 무시한다.
 #   DISPATCHING 에서 PostToolUse 가 끝내 오지 않으면 '실행 여부 불명'이다 — 이 훅은 같은 요청의 두 번째 dispatch 를 거부한다.
 #   거부 확인과 재시도(redispatch)·정리(discard)는 러너(native-agent-bridge.sh)가 메인 전사의 증거로 판정한다.
@@ -63,14 +68,15 @@ request_valid() { # request-file
 
 # feature 전용 Agent 의 이벤트인데 요청에 결속하지 못한 경우의 흔적(JSONL). 일반 Agent·subagent 이벤트는 여기 오지 않는다.
 # 캡처가 왜 없었는지(이벤트 미발화 / 프롬프트 미인식 / 상태 불일치)를 사후에 가릴 수 있어야 한다 — 조용한 exit 만으로는 구분되지 않는다.
-trace() { # reason [request-file]
+trace() { # reason [request-file] [detail-json]
   local dir="${FEATURE_NATIVE_HOOK_TRACE_DIR:-}"
   if [ -z "$dir" ]; then
     if [ -n "${2:-}" ] && [ -f "${2:-}" ]; then dir="$(dirname "$(dirname "$2")")"; else dir="${CLAUDE_PROJECT_DIR:-.}/.agent-work/native-agent"; fi
   fi
   mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s' "$payload" | jq -c --arg r "$1" --arg now "$(now)" --arg req "${2:-}" \
-    '{at:$now, event:.hook_event_name, reason:$r, request:$req, agent_id:(.agent_id // null), agent_type:(.agent_type // null), session_id:(.session_id // null), transcript:(.agent_transcript_path // null)}' \
+  printf '%s' "$payload" | jq -c --arg r "$1" --arg now "$(now)" --arg req "${2:-}" --argjson x "${3:-null}" \
+    '{at:$now, event:.hook_event_name, reason:$r, request:$req, agent_id:(.agent_id // null), agent_type:(.agent_type // null), session_id:(.session_id // null), transcript:(.agent_transcript_path // null)}
+     + (if $x == null then {} else {detail:$x} end)' \
     >> "$dir/hook-trace.jsonl" 2>/dev/null || true
 }
 # 재개(SendMessage)된 Agent 가 받는 메시지는 전사에 isMeta user 레코드로, 하네스가 앞뒤에 고정 문구를 붙인 형태로 남는다(Claude Code 2.1.330 실측).
@@ -227,6 +233,48 @@ case "$event" in
                        elif $last != null and $last.message.stop_reason=="end_turn" then {source:"final_message", text:([$last.message.content[]? | select(.type=="text") | .text] | join(""))}
                        else null end),
               last_stop_reason: ($last.message.stop_reason // null),
+              # background: 인계 뒤 이 Agent 가 띄운 백그라운드 Bash 명령과 그 종결 알림(Claude Code 2.1.332 실제 전사에서 관측한 형식만 — 범용 파서가 아니다).
+              #   실행: Bash tool_use(비어 있지 않은 id)에 tool_use_id 로 결속된 tool_result. task id 는
+              #         ① 그 user 레코드의 구조화 필드 toolUseResult.backgroundTaskId(비어 있지 않은 문자열 — 레코드에 tool_result 가 하나일 때만. 실제 전사에서 일반 Bash 결과 3081건에는
+              #            이 키가 없고 백그라운드 결과에는 문자열로 있다), 없으면
+              #         ② 결과 첫머리 문구 — "Command running in background with ID: <id>"(run_in_background) / "Command was moved to the background (ID: <id>)"(180초 자동 이동,
+              #            관측 3건 모두 구조화 필드 없음) / "Command did not complete within its <N>s timeout and was moved to the background (ID: <id>)"(시간 초과 이동).
+              #         같은 (tool_use_id, task id) 는 한 번만 센다(가장 이른 결과).
+              #   종결: type user · isMeta true · origin.kind "task-notification" · 문자열 content 인 레코드 안의 <task-notification> 블록 하나하나.
+              #         블록마다 <task-id>·<tool-use-id> 가 각각 최대 1개(둘 다 없으면 무효), <status> 가 정확히 1개이고 종결 값(completed·failed·killed·stopped —
+              #         실제 전사에서 관측한 값이 이 넷뿐이고 모두 종결: 완료 / "failed with exit code" / "was stopped" / "did not finish before the previous session ended")이고,
+              #         그 실행 뒤에 기록됐으며, 블록에 있는 ID 가 전부 그 실행과 일치할 때만 그 실행을 끝낸다. 한 레코드에 여러 알림이 합쳐질 수 있다(joinedNotice*).
+              #         평범한 user/assistant 텍스트·도구 결과 안의 같은 모양 문자열, 실행 전·인계 전 알림, 진행 중·모르는 status, 모순된 ID 는 종결 증거가 아니다.
+              #   pending: 종결되지 않은 실행의 task id. resolved_last_at: 종결된 실행들의 종결 알림 위치 중 가장 늦은 것. last_assistant_at: 마지막 assistant 레코드 위치.
+              #   (위치 = 인계 프롬프트 뒤 레코드의 순번.) 문구·형식을 알아보지 못하면 실행이 없는 것으로 보인다 — 그때는 종전 동작이다(러너가 JSON 이 아닌 보고를 불수용).
+              background: (([.[$p.key+1:] | to_entries[]]) as $after
+                | ([$after[] | .value | select(.type=="assistant") | .message.content[]? | select(type=="object" and .type=="tool_use" and (.id|type)=="string" and (.id|length) > 0)
+                    | {key:.id, value:(.name // "")}] | from_entries) as $tool_names
+                | ([$after[] | .key as $i | .value | select(.type=="user" and (.message.content|type)=="array")
+                    | ((.toolUseResult // null) | if type=="object" and (.backgroundTaskId|type)=="string" and (.backgroundTaskId|length) > 0 then .backgroundTaskId else null end) as $structured
+                    | ([.message.content[] | select(type=="object" and .type=="tool_result")] | length) as $nresults
+                    | .message.content[]
+                    | select(type=="object" and .type=="tool_result" and (.tool_use_id|type)=="string" and (.tool_use_id|length) > 0)
+                    | select($tool_names[.tool_use_id] == "Bash")
+                    | .tool_use_id as $tu
+                    | (.content | if type=="string" then . elif type=="array" then ([.[]? | select(type=="object" and .type=="text") | .text // ""] | join("")) else "" end)
+                    | (capture("^Command (running in background with ID: |was moved to the background \\(ID: |did not complete within its [0-9]+s timeout and was moved to the background \\(ID: )(?<id>[A-Za-z0-9_-]+)")? // null) as $m
+                    | (if $structured != null and $nresults == 1 then $structured elif $m != null then $m.id else null end) as $task
+                    | select($task != null) | {tu:$tu, task:$task, at:$i}]
+                   | group_by([.tu, .task]) | map(min_by(.at))) as $launched
+                | ([$after[] | .key as $i | .value
+                    | select(.type=="user" and .isMeta==true and (.origin|type)=="object" and .origin.kind=="task-notification" and (.message.content|type)=="string")
+                    | .message.content | scan("<task-notification>([\\s\\S]*?)</task-notification>") | .[0]
+                    | {at:$i, tasks:[scan("<task-id>([^<]*)</task-id>") | .[0]], tus:[scan("<tool-use-id>([^<]*)</tool-use-id>") | .[0]], st:[scan("<status>([^<]*)</status>") | .[0]]}
+                    | select((.tasks|length) <= 1 and (.tus|length) <= 1 and ((.tasks|length) + (.tus|length)) >= 1 and (.st|length) == 1
+                             and (.st[0] == "completed" or .st[0] == "failed" or .st[0] == "killed" or .st[0] == "stopped"))
+                    | {at, task:(.tasks[0] // null), tu:(.tus[0] // null)}]) as $terminal
+                | ([$launched[] | . as $l
+                    | {task:$l.task, done:([$terminal[] | select(.at > $l.at and (.task == null or .task == $l.task) and (.tu == null or .tu == $l.tu)) | .at] | min)}]) as $runs
+                | { pending: ([$runs[] | select(.done == null) | .task] | unique),
+                    resolved: ([$runs[] | select(.done != null) | .task] | unique),
+                    resolved_last_at: ([$runs[] | .done // empty] | max),
+                    last_assistant_at: ([$after[] | select(.value.type=="assistant") | .key] | max) }),
               # usage: API 요청(message id)별 마지막 usage 를 합산한다. 누락을 0 으로 숨기지 않는다 —
               #   usage 가 없는 요청 수(usage_missing_requests)와 네 토큰 필드 중 하나라도 없거나 숫자가 아니거나 음수인 요청 수(usage_incomplete_requests)를 같이 남긴다.
               #   usage.iterations 에 본 요청(type message)이 아닌 항목(advisor_message 등 보조 모델 호출)이 있는 요청 수(usage_side_iteration_requests)도 센다 —
@@ -265,10 +313,22 @@ case "$event" in
     # SubagentStop 은 전사의 마지막 레코드(보고를 담은 SubagentHandback 호출·최종 메시지)가 디스크에 쓰이기 전에 발화할 수 있다
     # (Claude Code 2.1.330 실모델 POC: 보고 레코드 timestamp 와 훅 실행이 같은 초 — 캡처에는 앞의 두 요청만 있었다).
     # 보고가 아직 없으면 잠깐 기다리며 다시 읽는다. 끝까지 없으면 NO_REPORT 로 남긴다(러너가 성공 보고로 받지 않는다) — 추측으로 채우지 않는다.
+    # 백그라운드 보류 사유(background_hold)가 있으면 그것도 같은 제한된 재읽기로 확인한다: 종결 알림·새 보고 레코드가 SubagentStop 뒤에 쓰일 수 있다.
+    # 끝까지 보류 사유가 남으면 아래에서 캡처하지 않고 흔적만 남긴다(무한 대기·재호출 없음).
+    # background_hold: SubagentHandback 이 보고면 없음(그대로 보고다). 아니면
+    #   STOP_BACKGROUND_PENDING        — 인계 뒤 띄운 백그라운드 명령 중 종결 알림이 없는 것이 있다(Agent 가 그 완료를 기다리며 멈춘 중간 종료).
+    #   STOP_BACKGROUND_REPORT_PENDING — 명령은 모두 종결됐지만 마지막 종결 알림 뒤에 기록된 assistant 레코드가 없다(알림 전의 대기 텍스트를 보고로 읽지 않는다).
+    background_hold() { printf '%s' "$1" | jq -r '
+      if .report.source == "SubagentHandback" then ""
+      elif ((.background.pending // []) | length) > 0 then "STOP_BACKGROUND_PENDING"
+      elif ((.background.resolved // []) | length) > 0 and ((.background.last_assistant_at // -1) < (.background.resolved_last_at // -1)) then "STOP_BACKGROUND_REPORT_PENDING"
+      else "" end'; }
     summary=""; tries=0
     while :; do
       summary="$(read_summary)" || { trace TRANSCRIPT_UNREADABLE; exit 0; }
-      printf '%s' "$summary" | jq -e '.report != null and ((.report.text // "")|length) > 0' >/dev/null 2>&1 && break
+      if [ -z "$(background_hold "$summary")" ]; then
+        printf '%s' "$summary" | jq -e '.report != null and ((.report.text // "")|length) > 0' >/dev/null 2>&1 && break
+      fi
       tries=$((tries + 1)); [ "$tries" -lt "${FEATURE_NATIVE_REPORT_WAIT_TRIES:-20}" ] || break
       sleep 0.5
     done
@@ -294,6 +354,14 @@ case "$event" in
     fi
     bound_agent="$(jq -r '.dispatched_agent_id // ""' "$req")"
     [ -z "$bound_agent" ] || [ "$bound_agent" = "$stop_agent" ] || { trace STOP_AGENT_MISMATCH "$req"; exit 0; }
+    # 백그라운드 대기 중의 중간 종료(정체성 결속을 통과한 뒤, 보고 파일·RESULT_READY 전에 판단): SubagentStop 은 Agent 의 '턴 종료'일 뿐 작업 완료의 증거가 아니다.
+    # 보류 사유(위 background_hold)가 남았으면 이 시점의 텍스트·JSON·빈 종료는 보고가 아니다 — 캡처 파일을 쓰지 않고 요청 상태(DISPATCHING/DISPATCHED)도 바꾸지 않는다
+    # (RESULT_READY 전이는 한 번뿐이라 여기서 잡으면 진짜 보고를 잃는다). 명령이 끝나면 Claude Code 가 같은 Agent 를 다시 깨우고, 그 뒤의 SubagentStop 이 보고를 캡처한다.
+    hold="$(background_hold "$summary")"
+    if [ -n "$hold" ]; then
+      trace "$hold" "$req" "$(printf '%s' "$summary" | jq -c '{background_pending:(.background.pending // []), background_resolved:(.background.resolved // [])}')"
+      exit 0
+    fi
     # 알려진 재개 포장이면 벗긴 본문이 Agent 가 받은 payload 다. 그 밖에는 메시지 전체가 payload 여야 한다.
     # (명령 치환이 끝의 개행을 지우지 않도록 표식 문자를 붙였다 뗀다 — 해시는 바이트 단위다.)
     wrapper=none

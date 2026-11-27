@@ -23,6 +23,7 @@ SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CASES_DIR="$SOURCE_ROOT/tests/worker-cases"
 LIB_DIR="$CASES_DIR/lib"
 SRC_CONFIG="$SOURCE_ROOT/.claude/skills/feature/config.sh"
+SRC_RUNTIME_LIB="$SOURCE_ROOT/.claude/skills/feature/scripts/lib/runtime.sh"
 
 # 사례 이름 인자는 승인 파일을 소모하기 전에 검사한다 (오타·셸 주석 잔재 '#' 로 승인이 낭비되지 않게)
 if [ -n "${1:-}" ] && [ ! -f "$CASES_DIR/$1/expected.json" ]; then
@@ -106,7 +107,7 @@ chmod +x "$SCRATCH/bin/real-claude" "$SCRATCH/bin/real-codex"
 # install-smoke.sh 의 fake_consensus_pass 와 같은 방식으로 production consensus-loop.sh 를 가짜 검증자(PASS 리뷰를 -o 경로에 씀)로 한 번 돌려
 # 러너가 인정하는 체크포인트(consensus-impl.json: 포맷/계약 버전 · target=impl · 실제 PASS 리뷰 경로 · 현재 입력 지문)를 production 헬퍼로 만든다.
 # 검증 로직·지문 계산은 복제하지 않는다 — 결과는 같은 config.sh 의 consensus_pass_current impl 로 확인한다. 검증자 CLI 는 이 단계에서만 codex 로 고정한다.
-VALIDATOR_CONTRACT_CFG="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SRC_CONFIG" | cut -d= -f2 | cut -d' ' -f1)"
+VALIDATOR_CONTRACT_CFG="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$SRC_RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 [ -n "$VALIDATOR_CONTRACT_CFG" ] || { echo "[FAIL] config.sh 의 VALIDATOR_CONTRACT_VERSION 을 읽지 못함" >&2; exit 1; }
 FAKE_PASS_CODEX="$SCRATCH/bin/fake-codex-pass"
 printf '%s\n' \
@@ -124,7 +125,7 @@ fake_impl_consensus_pass() { # target-root → 0 성공 / 1 실패(메시지 std
     mv "$cfg.fixture-keep" "$cfg"; echo "impl 합의 PASS 체크포인트 생성 실패 — $root/consensus-setup.log" >&2; return 1
   fi
   mv "$cfg.fixture-keep" "$cfg"
-  (cd "$root" && source .claude/skills/feature/config.sh && consensus_pass_current impl) \
+  (cd "$root" && source .claude/skills/feature/scripts/lib/bootstrap.sh && consensus_pass_current impl) \
     || { echo "impl 합의 PASS 가 현재 입력 지문에 유효하지 않음(production consensus_pass_current) — $root/.agent-work/consensus-impl.json" >&2; return 1; }
   # 가짜 검증자 호출의 telemetry 는 워커 회귀의 usage 가 아니다 — 워커 호출 전에 비운다(usage.jsonl 은 워커 행만 모은다)
   : > "$root/.agent-work/usage.jsonl"
@@ -137,7 +138,7 @@ fake_impl_consensus_pass() { # target-root → 0 성공 / 1 실패(메시지 std
 # (상위 feature-run 이 DOC_GAP 을 APPROACH_GAP/NEED_DOCS=exit 3 으로 바꾸는 것은 러너 층의 변환이지 워커 rc 가 아니다.)
 invoke_unit_in_target() { # unit-id  (cwd = temp 저장소)
   local id="$1"
-  source .claude/skills/feature/config.sh
+  source .claude/skills/feature/scripts/lib/bootstrap.sh
   SKILL_DIR="$PWD/.claude/skills/feature"
   source "$SKILL_DIR/scripts/worker-invoke.sh"
   log() { echo "[$(date '+%F %T')] [worker-regression] $*"; }
@@ -281,7 +282,7 @@ if [ -s "$SCRATCH/usage.jsonl" ]; then
   # 행 단위: usage schema v3 필드 그대로 (cost_usd = provider 보고값, codex 는 null / estimated_cost_usd = 가격표 추정, claude 는 null)
   jq -r '"  \(.regression_case): \(.cli) \(.model) exit=\(.exit_code) tokens_total=\(.tokens_total // "n/a") input_effective=\(.input_effective // "n/a") output=\(.output // "n/a") reported_cost_usd=\(.cost_usd // "n/a") estimated_cost_usd=\(.estimated_cost_usd // "n/a") duration_ms=\(.duration_ms // "n/a")"' "$SCRATCH/usage.jsonl"
   # 합계: config.sh 의 usage_summary 재사용 — 비용 집계 공식을 여기서 복제하지 않는다. 마지막 사례의 config.sh(TEST_CMD/LINT_CMD 만 true) 를 source 한다.
-  summary_json="$(cd "$target" && source .claude/skills/feature/config.sh && usage_summary "$SCRATCH/usage.jsonl")"
+  summary_json="$(cd "$target" && source .claude/skills/feature/scripts/lib/bootstrap.sh && usage_summary "$SCRATCH/usage.jsonl")"
   printf '%s' "$summary_json" | jq -r '"  합계: invocations=\(.invocations) tokens_total=\(.input_uncached + .cache_read + .cache_write + .output) input_effective=\(.input_uncached + .cache_read + .cache_write) output=\(.output) reasoning_output=\(.reasoning_output) reported_cost_usd=\(.reported_cost_usd) estimated_cost_usd=\(.estimated_cost_usd) combined_cost_usd_estimate=\(.combined_cost_usd_estimate) cost_unknown_invocations=\(.cost_unknown_invocations)"'
 else
   echo "  (usage 행 없음 — 워커 CLI 가 telemetry 를 남기지 않았거나 호출 전에 실패)"

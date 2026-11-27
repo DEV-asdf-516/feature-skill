@@ -62,7 +62,7 @@ cleanup_hint() { echo "[INFO] 정리(직접 실행 — 이 스크립트는 지�
 cd "$target" || exit 1
 target="$(pwd)"
 # shellcheck source=/dev/null
-source "$cfg"
+source "$target/.claude/skills/feature/scripts/lib/bootstrap.sh"
 [ "$PROJECT_ROOT" = "$target" ] || { echo "[FAIL] PROJECT_ROOT($PROJECT_ROOT)가 probe worktree($target)가 아니다." >&2; exit 1; }
 [ "$(role_backend WORKER)" = codex_app_server ] || { echo "[FAIL] WORKER 가 Codex App Server backend 가 아니다($(role_backend WORKER))." >&2; exit 1; }
 command -v "$CODEX_BIN" >/dev/null 2>&1 || { echo '[FAIL] codex 바이너리가 없다.' >&2; exit 1; }

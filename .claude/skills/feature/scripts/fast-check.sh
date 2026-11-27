@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================
 # 프로젝트 빠른 검사 연결 (선택 기능) — LLM 구현 리뷰 전에 적용 프로젝트가 제공한 결정론적 검사를 돌린다
-# 파일 경로: .claude/skills/feature/scripts/fast-check.sh   (source 전용 — impl-review-loop.sh 가 config.sh 뒤에 읽는다)
+# 파일 경로: .claude/skills/feature/scripts/fast-check.sh   (source 전용 — impl-review-loop.sh 가 로더 뒤에 읽는다)
 #
 # 이 파일은 명령 연결·결과 구분·증거 보존만 한다. 어떤 도구로 무엇을 검사할지는 프로젝트가 정한다 — 언어·프레임워크·규칙 파일 형식을 여기 넣지 않는다.
 # 헬퍼를 config.sh 가 아니라 scripts/ 에 둔 이유: config.sh 는 사용자 편집 파일이라 설치가 덮어쓰지 않는다. 여기 있으면 옛 config.sh 를 그대로 둔 설치도

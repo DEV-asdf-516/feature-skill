@@ -38,10 +38,15 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; s/^MAX_IMPL_ROUNDS=.*/MAX_IMPL_ROUNDS=1/" "$CFG" && rm -f "$CFG.bak"
 # 역할별 CLI 고정(스모크 역할 CLI 고정 원칙): 리뷰어 = codex(세션 resume·marker 규약을 함께 본다), 수정자 = claude. 쓰지 않는 역할도 가짜 bin 으로만 간다.
 sed -i.bak 's/^REVIEWER_CLI=.*/REVIEWER_CLI="codex"/; s/^VALIDATOR_CLI=.*/VALIDATOR_CLI="codex"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 cp "$CFG" "$TMP/side/config.good.sh"
+REVIEW_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/contract/review.sh"; SESSION_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/backend/session.sh"
+cp "$RUNTIME_LIB" "$TMP/side/runtime.good.sh"; cp "$REVIEW_LIB" "$TMP/side/review.good.sh"; cp "$SESSION_LIB" "$TMP/side/session.good.sh"
+restore_rt_mods() { cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB" && cp "$TMP/side/review.good.sh" "$REVIEW_LIB" && cp "$TMP/side/session.good.sh" "$SESSION_LIB"; }   # config.good.sh 원복 지점마다 이 스모크가 바꾸는 런타임 모듈도 원본으로
 cd "$TMP/repo" || exit 1
 git init -q
 printf '.agent-work/\n.claude/\n' > .gitignore
@@ -53,9 +58,9 @@ for doc in request design implementation approach; do printf '# %s\n' "$doc" > "
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > .agent-work/worker-result.json
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
 REVIEW_LOOP=".claude/skills/feature/scripts/impl-review-loop.sh"
-V="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+V="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1
 mkdir -p "$MOCK_STATE"
 
@@ -102,7 +107,7 @@ reset_case() { # 테스트 환경 정리(파이프라인 동작 아님)
   : > "$MOCK_LOG"; rm -f "$MOCK_STATE"/codex.n "$MOCK_STATE"/review-*.json
   rm -rf .agent-work/reviews/impl-attempt-* .agent-work/reviews/invalid-review.json .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/state.json
   rm -f .agent-work/.session-* .agent-work/usage.jsonl; : > .agent-work/decisions.md
-  cp "$TMP/side/config.good.sh" "$CFG"
+  cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods
   git checkout -q -- src/u01.txt
   awk 'NR==3{print "line 3 worker";next}{print}' src/u01.txt > "$MOCK_STATE/u01.new" && cp "$MOCK_STATE/u01.new" src/u01.txt   # 워커의 변경(리뷰 대상)
 }
@@ -212,15 +217,15 @@ pass "R5b: 새 세션의 무효 출력도 재실행은 리뷰어 0회(같은 프
 
 # ===== R6: 검사기 버그 수정 뒤 저장된 출력 로컬 재검증 =====
 sabotage_checker() { # fix_ref 대조가 항상 실패하는 '버그 있는 검사기'
-  perl -0pi -e 's/(review_fix_ref_violation\(\) \{[^\n]*\n)/$1  echo "simulated checker bug"; return 1\n/' "$CFG"
-  grep -q 'simulated checker bug' "$CFG" || fail "R6: 검사기 변조 픽스처 실패"
+  perl -0pi -e 's/(review_fix_ref_violation\(\) \{[^\n]*\n)/$1  echo "simulated checker bug"; return 1\n/' "$REVIEW_LIB"
+  grep -q 'simulated checker bug' "$REVIEW_LIB" || fail "R6: 검사기 변조 픽스처 실패"
 }
 reset_case; sabotage_checker
 review_of "$ISSUE" > "$MOCK_STATE/review-1.json"; review_of "$(reg R-02 'src/u01.txt:L8-L8')" > "$MOCK_STATE/review-2.json"
 rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"
 [ "$rc" -eq 4 ] && inv '.errors[0].observed' | grep -q 'simulated checker bug' || { tail -20 "$TMP/loop.log"; fail "R6: 전제(버그 있는 검사기가 유효한 출력을 거부) 실패 (rc $rc)"; }
 [ -f "$MARKER" ] || fail "R6: 전제 — 미수용 marker 없음"
-cp "$TMP/side/config.good.sh" "$CFG"   # 검사기 버그 수정(리뷰어에게 주는 지시·계약 버전은 그대로)
+cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods   # 검사기 버그 수정(리뷰어에게 주는 지시·계약 버전은 그대로)
 : > "$MOCK_LOG"; rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"
 [ "$(codex_calls)" -eq 0 ] || fail "R6: 로컬 재검증이 리뷰어를 다시 부름: $(cat "$MOCK_LOG")"
 [ "$rc" -eq 2 ] && [ "$(st .status)" = MAX_ROUNDS_EXCEEDED ] || { tail -20 "$TMP/loop.log"; fail "R6: 재검증된 출력이 유효한 리뷰로 처리되지 않음 (rc $rc, $(st .status))"; }
@@ -233,7 +238,7 @@ pass "R6: 검사기 수정 뒤 같은 입력·같은 계약이면 저장된 출�
 reset_case; sabotage_checker
 review_of "$ISSUE" > "$MOCK_STATE/review-1.json"; review_of "$(reg R-02 'src/u01.txt:L8-L8')" > "$MOCK_STATE/review-2.json"
 rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"; [ "$rc" -eq 4 ] || fail "R6: 전제 실패 (rc $rc)"
-cp "$TMP/side/config.good.sh" "$CFG"
+cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods
 echo "edit after the invalid review" >> src/u01.txt
 : > "$MOCK_LOG"; rc="$(run_loop)"
 [ "$rc" -eq 4 ] && [ "$(codex_calls)" -eq 0 ] && st .why | grep -q '입력' || { tail -20 "$TMP/loop.log"; fail "R6: 입력이 바뀌었는데 0회 중단이 아님 (rc $rc, 리뷰어 $(codex_calls)회, why: $(st .why))"; }
@@ -255,14 +260,14 @@ pass "R6: 입력이 달라졌으면 리뷰어 0회로 멈추고, --new-attempt �
 reset_case; sabotage_checker
 review_of "$ISSUE" > "$MOCK_STATE/review-1.json"; review_of "$(reg R-02 'src/u01.txt:L8-L8')" > "$MOCK_STATE/review-2.json"
 rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"; [ "$rc" -eq 4 ] || fail "R6b: 전제 실패 (rc $rc)"
-cp "$TMP/side/config.good.sh" "$CFG"   # 검사기 버그 수정
-perl -0pi -e 's/(role_session_accept\(\) \{[^\n]*\n)/$1  if [ "\$1" = REVIEWER ]; then echo "simulated session accept failure" >&2; return 1; fi\n/' "$CFG"
-grep -q 'simulated session accept failure' "$CFG" || fail "R6b: 세션 확정 실패 주입 픽스처 실패"
+cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods   # 검사기 버그 수정
+perl -0pi -e 's/(role_session_accept\(\) \{[^\n]*\n)/$1  if [ "\$1" = REVIEWER ]; then echo "simulated session accept failure" >&2; return 1; fi\n/' "$SESSION_LIB"
+grep -q 'simulated session accept failure' "$SESSION_LIB" || fail "R6b: 세션 확정 실패 주입 픽스처 실패"
 : > "$MOCK_LOG"; rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"
 [ "$rc" -eq 1 ] && [ "$(codex_calls)" -eq 0 ] && grep -q '리뷰어 세션 확정 실패' "$TMP/loop.log" || { tail -20 "$TMP/loop.log"; fail "R6b: 전제(재검증 수용 중 세션 확정 실패로 중단) 실패 (rc $rc, 리뷰어 $(codex_calls)회)"; }
 jq -e '.active==true and .status=="REVIEW_OUTPUT_INVALID"' .agent-work/reviews/invalid-review.json >/dev/null || fail "R6b: 세션 확정이 실패했는데 무효 기록이 이미 닫힘($(inv .status)) — 재실행이 새 리뷰 호출로 간다"
 [ -f "$MARKER" ] || fail "R6b: 세션 확정 실패인데 marker 가 해제됨"
-cp "$TMP/side/config.good.sh" "$CFG"   # 실패 원인 제거
+cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods   # 실패 원인 제거
 : > "$MOCK_LOG"; rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"
 [ "$(codex_calls)" -eq 0 ] || fail "R6b: 중간 실패 뒤 재실행이 리뷰어를 다시 부름: $(cat "$MOCK_LOG")"
 [ "$rc" -eq 2 ] && [ "$(st .status)" = MAX_ROUNDS_EXCEEDED ] || { tail -20 "$TMP/loop.log"; fail "R6b: 재실행이 같은 저장 출력을 이어 처리하지 않음 (rc $rc, $(st .status))"; }
@@ -275,10 +280,10 @@ pass "R6b: 재검증 수용 중 세션 확정 실패 → 무효 기록 active �
 reset_case; sabotage_checker
 review_of "$ISSUE" > "$MOCK_STATE/review-1.json"; review_of "$(reg R-02 'src/u01.txt:L8-L8')" > "$MOCK_STATE/review-2.json"
 rc="$(FAKE_EDIT_CMD="$FIX_LINE8" run_loop)"; [ "$rc" -eq 4 ] || fail "R7: 전제 실패 (rc $rc)"
-cp "$TMP/side/config.good.sh" "$CFG"
-tree_r7="$( ( source "$CFG"; snapshot_worktree_tree ) )"
+cp "$TMP/side/config.good.sh" "$CFG"; restore_rt_mods
+tree_r7="$( ( source "$LOADER"; snapshot_worktree_tree ) )"
 printf '\n## 결정 X (REQUIRED)\n리뷰 뒤에 바뀐 계약\n' >> .agent-work/approach.md
-[ "$( ( source "$CFG"; snapshot_worktree_tree ) )" = "$tree_r7" ] || fail "R7: 전제 — 계약 문서 변경이 source tree 를 바꿈(사례가 '코드는 그대로'를 검증하지 못함)"
+[ "$( ( source "$LOADER"; snapshot_worktree_tree ) )" = "$tree_r7" ] || fail "R7: 전제 — 계약 문서 변경이 source tree 를 바꿈(사례가 '코드는 그대로'를 검증하지 못함)"
 : > "$MOCK_LOG"; rc="$(run_loop)"
 [ "$rc" -eq 4 ] && [ "$(codex_calls)" -eq 0 ] && [ "$(fixer_calls)" -eq 0 ] || { tail -20 "$TMP/loop.log"; fail "R7: 계약 문서가 바뀌었는데 저장된 출력이 재사용됨 (rc $rc, 리뷰어 $(codex_calls)회)"; }
 st .why | grep -q '계약 문서 approach.md' || fail "R7: 달라진 계약 문서가 진단에 없음: $(st .why)"
@@ -291,28 +296,28 @@ pass "R7: 리뷰 입력 지문이 계약 문서 내용을 포함 — 코드가 �
 
 # ===== R3b: hunk 없는 변경(파일 mode 만) — 어떤 줄 범위도 fix_ref 가 될 수 없다 =====
 reset_case
-t1="$( ( source "$CFG"; snapshot_worktree_tree ) )"; chmod +x src/u01.txt; t2="$( ( source "$CFG"; snapshot_worktree_tree ) )"; chmod -x src/u01.txt
+t1="$( ( source "$LOADER"; snapshot_worktree_tree ) )"; chmod +x src/u01.txt; t2="$( ( source "$LOADER"; snapshot_worktree_tree ) )"; chmod -x src/u01.txt
 git diff --no-renames --name-only "$t1" "$t2" > "$TMP/changed.txt"
 grep -qx 'src/u01.txt' "$TMP/changed.txt" && [ -z "$(git diff -U0 "$t1" "$t2" | grep '^@@')" ] || fail "R3b: 전제(mode 만 바뀐 tree — 변경 파일이지만 hunk 없음) 실패"
 for ref in 'src/u01.txt:L999999-L999999' 'src/u01.txt:L1-L1'; do
-  why="$( ( source "$CFG"; review_fix_ref_violation "$ref" "$t1" "$t2" "$TMP/changed.txt" ) )" && fail "R3b: hunk 없는 변경의 fix_ref '$ref' 가 통과됨"
+  why="$( ( source "$LOADER"; review_fix_ref_violation "$ref" "$t1" "$t2" "$TMP/changed.txt" ) )" && fail "R3b: hunk 없는 변경의 fix_ref '$ref' 가 통과됨"
   printf '%s' "$why" | grep -q 'hunk 가 없음' || fail "R3b: 거부 사유가 hunk 없음이 아님: $why"
 done
 pass "R3b: 파일 mode 만 바뀐 변경은 임의의 줄 번호(L999999)도 L1 도 fix_ref 로 인정하지 않는다"
 
 # ===== R8: 검사기 버전만 바뀜 → 저장된 APPROVE 도 그대로 믿지 않고 로컬 재검증 =====
-K="$(grep -E '^REVIEW_CHECKER_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-bump_checker() { sed -i.bak "s/^REVIEW_CHECKER_VERSION=.*/REVIEW_CHECKER_VERSION=$1/" "$CFG" && mv "$CFG.bak" "$TMP/side/config.bak.$1"; }
+K="$(grep -E '^REVIEW_CHECKER_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+bump_checker() { sed -i.bak "s/^REVIEW_CHECKER_VERSION=.*/REVIEW_CHECKER_VERSION=$1/" "$RUNTIME_LIB" && mv "$RUNTIME_LIB.bak" "$TMP/side/runtime.bak.$1"; }
 LOOP_GOOD="$TMP/side/impl-review-loop.good.sh"; cp "$REVIEW_LOOP" "$LOOP_GOOD"
 reset_case
 review_of > "$MOCK_STATE/review-1.json"
 rc="$(run_loop)"; [ "$rc" -eq 0 ] && jq -e --argjson k "$K" '.next_step=="APPROVE" and .checker_version==$k' .agent-work/review-impl.json >/dev/null || { tail -20 "$TMP/loop.log"; fail "R8: 전제(승인 + 체크포인트에 검사기 버전 기록) 실패 (rc $rc)"; }
-( source "$CFG"; impl_approval_current ) || fail "R8: 전제 — 같은 검사기 버전에서 승인이 유효하지 않음"
+( source "$LOADER"; impl_approval_current ) || fail "R8: 전제 — 같은 검사기 버전에서 승인이 유효하지 않음"
 bump_checker "$((K + 1))"
-( source "$CFG"; impl_approval_current ) && fail "R8: 검사기 버전이 바뀌었는데 러너의 승인 판정이 옛 APPROVE 를 그대로 유효로 봄"
+( source "$LOADER"; impl_approval_current ) && fail "R8: 검사기 버전이 바뀌었는데 러너의 승인 판정이 옛 APPROVE 를 그대로 유효로 봄"
 : > "$MOCK_LOG"; rc="$(run_loop)"
 [ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 0 ] && grep -q '로컬 재검증' "$TMP/loop.log" || { tail -20 "$TMP/loop.log"; fail "R8: 검사기 버전 변경 뒤 승인이 로컬 재검증(리뷰어 0회)으로 재사용되지 않음 (rc $rc, $(codex_calls)회)"; }
-jq -e --argjson k "$((K + 1))" '.next_step=="APPROVE" and .checker_version==$k and .attempt==1' .agent-work/review-impl.json >/dev/null && ( source "$CFG"; impl_approval_current ) || fail "R8: 재검증 뒤 체크포인트의 검사기 버전이 갱신되지 않음"
+jq -e --argjson k "$((K + 1))" '.next_step=="APPROVE" and .checker_version==$k and .attempt==1' .agent-work/review-impl.json >/dev/null && ( source "$LOADER"; impl_approval_current ) || fail "R8: 재검증 뒤 체크포인트의 검사기 버전이 갱신되지 않음"
 # 새 검사기가 저장된 승인 출력을 거부하면 승인을 재사용하지 않는다(새 attempt 로 리뷰)
 bump_checker "$((K + 2))"
 perl -0pi -e 's/(validate_review_output\(\) \{[^\n]*\n)/$1  printf "%s" \x27[{"issue_id":"","field":"(root)","observed":"simulated stricter checker","expected":"x","rule_id":"SIMULATED"}]\x27; return 0\n/' "$REVIEW_LOOP"
@@ -361,11 +366,11 @@ r11_invalid 지어낸-경로 '["src/u01.txt:L3-L3","./src/ghost/Invented.java:L1
 r11_invalid 디렉터리 '["src"]' 'code_refs[0]' '디렉터리'
 : > "$MOCK_LOG"; rc="$(run_loop)"; [ "$rc" -eq 4 ] && [ "$(codex_calls)" -eq 0 ] || fail "R11: 거부된 출력의 재실행이 리뷰어를 다시 부름 (rc $rc)"
 # 정규화: 줄 범위(여러 구간)와 선행 "./" 만 뗀다 — 검사기와 gap 기록이 같은 정의(code_ref_path)를 쓴다. FIX_CODE 의 code_refs 는 이 검사 대상이 아니다
-r11_errors() { ( set -- "$1"; source "$CFG"; SCHEMA_FILE="$PROJECT_ROOT/.claude/skills/feature/schemas/impl-review.schema.json"
+r11_errors() { ( set -- "$1"; source "$LOADER"; SCHEMA_FILE="$PROJECT_ROOT/.claude/skills/feature/schemas/impl-review.schema.json"
   eval "$(sed -n '/^validate_review_output() {/,/^}/p' "$REVIEW_LOOP")"; validate_review_output "$1" 1 "" "" "" | jq -c '[.[].rule_id]' ); }
 review_of "$(docgap '["./src/u01.txt:L3-L3,L8-L8","src/u01.txt"]')" > "$TMP/r11-ok.json"
 [ "$(r11_errors "$TMP/r11-ok.json")" = '[]' ] || fail "R11: 정규화 가능한 code_refs(선행 ./·여러 줄 범위·줄 범위 없음)가 거부됨: $(r11_errors "$TMP/r11-ok.json")"
-[ "$( ( source "$CFG"; jq -c "$JQ_PATH_DEFS"'[.issues[].code_refs[] | code_ref_path | select(plain_file_path)] | unique' "$TMP/r11-ok.json" ) )" = '["src/u01.txt"]' ] || fail "R11: gap 기록의 paths 정규화가 검사기와 다름"
+[ "$( ( source "$LOADER"; jq -c "$JQ_PATH_DEFS"'[.issues[].code_refs[] | code_ref_path | select(plain_file_path)] | unique' "$TMP/r11-ok.json" ) )" = '["src/u01.txt"]' ] || fail "R11: gap 기록의 paths 정규화가 검사기와 다름"
 review_of "$(issue '.code_refs=["/abs/x.java:L1","src/u01.txt:L3-L3"]')" > "$TMP/r11-fix.json"
 [ "$(r11_errors "$TMP/r11-fix.json")" = '[]' ] || fail "R11: FIX_CODE issue 의 code_refs 까지 경로 검사 대상이 됨: $(r11_errors "$TMP/r11-fix.json")"
 pass "R11: DOC_GAP code_refs 는 일부만 비정규·지어낸 경로여도 REVIEW_OUTPUT_INVALID(gap 체크포인트 없음, 재실행 리뷰어 0회), 선행 ./·줄 범위만 정규화"
@@ -375,40 +380,40 @@ reset_case
 review_of > "$MOCK_STATE/review-1.json"
 rc="$(run_loop)"; [ "$rc" -eq 0 ] && jq -e '.next_step=="APPROVE" and ([.contract_docs_sha256 | keys[]] | sort) == ["approach.md","conventions.md","decisions.md#USER-QUESTION","design.md","implementation.md","request.md"]' .agent-work/review-impl.json >/dev/null \
   || { tail -20 "$TMP/loop.log"; fail "R10: 전제(승인 체크포인트에 계약 문서 지문 기록) 실패 (rc $rc): $(cat .agent-work/review-impl.json)"; }
-( source "$CFG"; impl_approval_current ) || fail "R10: 전제 — 승인 직후 승인이 유효하지 않음"
+( source "$LOADER"; impl_approval_current ) || fail "R10: 전제 — 승인 직후 승인이 유효하지 않음"
 # 판정 이력(사용자 결정이 아닌 줄)이 decisions.md 에 쌓여도 승인은 유지된다
 echo '- [round 1] B-01 REJECT 사유 기록' >> .agent-work/decisions.md
 : > "$MOCK_LOG"; rc="$(run_loop)"
-[ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 0 ] && ( source "$CFG"; impl_approval_current ) || fail "R10: 판정 이력 줄 추가만으로 승인이 무효가 됨 (rc $rc, 리뷰어 $(codex_calls)회)"
+[ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 0 ] && ( source "$LOADER"; impl_approval_current ) || fail "R10: 판정 이력 줄 추가만으로 승인이 무효가 됨 (rc $rc, 리뷰어 $(codex_calls)회)"
 # 계약 문서 본문 변경(코드는 그대로) → 러너 판정·루프 모두 과거 APPROVE 를 쓰지 않는다
-tree_r10="$( ( source "$CFG"; snapshot_worktree_tree ) )"
+tree_r10="$( ( source "$LOADER"; snapshot_worktree_tree ) )"
 printf '\n## 결정 Y (REQUIRED)\n승인 뒤에 바뀐 계약\n' >> .agent-work/approach.md
-[ "$( ( source "$CFG"; snapshot_worktree_tree ) )" = "$tree_r10" ] && [ "$( ( source "$CFG"; compute_approval_fingerprint ) )" = "$(cat .agent-work/approved.fingerprint)" ] || fail "R10: 전제 — 문서 변경이 작업 트리 지문을 바꿈"
-( source "$CFG"; impl_approval_current ) && fail "R10: 계약 문서가 바뀌었는데 러너의 승인 판정이 과거 APPROVE 를 유효로 봄"
+[ "$( ( source "$LOADER"; snapshot_worktree_tree ) )" = "$tree_r10" ] && [ "$( ( source "$LOADER"; compute_approval_fingerprint ) )" = "$(cat .agent-work/approved.fingerprint)" ] || fail "R10: 전제 — 문서 변경이 작업 트리 지문을 바꿈"
+( source "$LOADER"; impl_approval_current ) && fail "R10: 계약 문서가 바뀌었는데 러너의 승인 판정이 과거 APPROVE 를 유효로 봄"
 review_of > "$MOCK_STATE/review-2.json"
 : > "$MOCK_LOG"; rc="$(run_loop)"
 [ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 1 ] && grep -q '다른 계약에 대한 승인' "$TMP/loop.log" && [ -f .agent-work/reviews/impl-attempt-02/reviewer-round-01.json ] \
   || { tail -20 "$TMP/loop.log"; fail "R10: 계약 변경 뒤 과거 APPROVE 가 재사용됨 (rc $rc, 리뷰어 $(codex_calls)회)"; }
-( source "$CFG"; impl_approval_current ) || fail "R10: 새 계약으로 다시 리뷰한 승인이 유효하지 않음"
+( source "$LOADER"; impl_approval_current ) || fail "R10: 새 계약으로 다시 리뷰한 승인이 유효하지 않음"
 # 사용자 결정 추가도 계약 변경이다
 echo '- [USER-QUESTION][scope=impl] 조회 방식 → Map 사전 인덱스' >> .agent-work/decisions.md
-( source "$CFG"; impl_approval_current ) && fail "R10: 사용자 결정이 추가됐는데 과거 APPROVE 가 유효로 판정됨"
+( source "$LOADER"; impl_approval_current ) && fail "R10: 사용자 결정이 추가됐는데 과거 APPROVE 가 유효로 판정됨"
 # 계약 문서 지문이 없는 옛 체크포인트는 같다고 증명할 수 없다
 : > .agent-work/decisions.md; printf '# approach\n' > .agent-work/approach.md
 reset_case; review_of > "$MOCK_STATE/review-1.json"; rc="$(run_loop)"; [ "$rc" -eq 0 ] || fail "R10: 전제 실패 (rc $rc)"
 jq 'del(.contract_docs_sha256)' .agent-work/review-impl.json > "$TMP/ck.tmp" && cp "$TMP/ck.tmp" .agent-work/review-impl.json
-( source "$CFG"; impl_approval_current ) && fail "R10: 계약 문서 지문 없는 옛 승인 체크포인트가 유효로 판정됨"
+( source "$LOADER"; impl_approval_current ) && fail "R10: 계약 문서 지문 없는 옛 승인 체크포인트가 유효로 판정됨"
 pass "R10: 승인 캐시는 계약 문서(본문 + 사용자 결정) 지문에 묶인다 — 코드가 같아도 계약이 바뀌면 새 attempt 로 리뷰, 판정 이력만 늘면 유지"
 
 # ===== R10b: conventions.md 만 바뀌어도(생성·변경·삭제) 과거 APPROVE 를 재사용하지 않는다 =====
 conv_case() { # 단계-이름 — 직전 승인이 무효로 판정되고, 루프가 새 attempt 로 리뷰어 1회를 불러 다시 승인하는지 확인
-  ( source "$CFG"; compute_approval_fingerprint ) > "$TMP/fp.now"
+  ( source "$LOADER"; compute_approval_fingerprint ) > "$TMP/fp.now"
   [ "$(cat "$TMP/fp.now")" = "$(cat .agent-work/approved.fingerprint)" ] || fail "R10b($1): 전제 — conventions 변경이 범위 작업 트리 지문을 바꿈(사례가 '코드는 그대로'를 검증하지 못함)"
-  ( source "$CFG"; impl_approval_current ) && fail "R10b($1): conventions.md 가 달라졌는데 러너의 승인 판정이 과거 APPROVE 를 유효로 봄"
+  ( source "$LOADER"; impl_approval_current ) && fail "R10b($1): conventions.md 가 달라졌는데 러너의 승인 판정이 과거 APPROVE 를 유효로 봄"
   n_before="$(cat "$MOCK_STATE/codex.n")"; review_of > "$MOCK_STATE/review-$((n_before + 1)).json"
   : > "$MOCK_LOG"; rc="$(run_loop)"
   [ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 1 ] && grep -q '다른 계약에 대한 승인' "$TMP/loop.log" || { tail -20 "$TMP/loop.log"; fail "R10b($1): conventions 변경 뒤 과거 APPROVE 가 재사용됨 (rc $rc, 리뷰어 $(codex_calls)회)"; }
-  ( source "$CFG"; impl_approval_current ) || fail "R10b($1): 새 컨벤션으로 다시 리뷰한 승인이 유효하지 않음"
+  ( source "$LOADER"; impl_approval_current ) || fail "R10b($1): 새 컨벤션으로 다시 리뷰한 승인이 유효하지 않음"
   : > "$MOCK_LOG"; rc="$(run_loop)"
   [ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 0 ] || fail "R10b($1): conventions 가 그대로인데 승인이 재사용되지 않음 (rc $rc, 리뷰어 $(codex_calls)회)"
 }
@@ -422,11 +427,11 @@ printf '# conventions\n1. 표현 변환은 응답 DTO 에서 한다\n' > convent
 mv conventions.md "$TMP/side/conventions.removed.md";                                                conv_case 삭제
 [ "$(jq -r '.contract_docs_sha256["conventions.md"]' .agent-work/review-impl.json)" = ABSENT ] || fail "R10b: 컨벤션 삭제 뒤 승인 지문이 ABSENT 가 아님"
 # 무효 출력의 로컬 재검증용 지문(파일 전체 decisions + conventions_sha256)과 승인용 지문은 분리돼 있다
-[ "$( ( source "$CFG"; review_contract_docs_json ) | jq -c 'keys')" = '["approach.md","decisions.md","design.md","implementation.md","request.md"]' ] || fail "R10b: 무효 출력용 계약 문서 지문의 키가 승인용과 섞임"
+[ "$( ( source "$LOADER"; review_contract_docs_json ) | jq -c 'keys')" = '["approach.md","decisions.md","design.md","implementation.md","request.md"]' ] || fail "R10b: 무효 출력용 계약 문서 지문의 키가 승인용과 섞임"
 # 옛 포맷의 승인 체크포인트(지문 의미가 다름)는 해석하지 않고 새 attempt 로 리뷰한다
-CKV="$(grep -E '^REVIEW_CHECKPOINT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CKV="$(grep -E '^REVIEW_CHECKPOINT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 jq --argjson v "$((CKV - 1))" '.version=$v' .agent-work/review-impl.json > "$TMP/ck.tmp" && cp "$TMP/ck.tmp" .agent-work/review-impl.json
-( source "$CFG"; impl_approval_current ) && fail "R10b: 옛 포맷의 승인 체크포인트가 유효로 판정됨"
+( source "$LOADER"; impl_approval_current ) && fail "R10b: 옛 포맷의 승인 체크포인트가 유효로 판정됨"
 n_before="$(cat "$MOCK_STATE/codex.n")"; review_of > "$MOCK_STATE/review-$((n_before + 1)).json"
 : > "$MOCK_LOG"; rc="$(run_loop)"
 [ "$rc" -eq 0 ] && [ "$(codex_calls)" -eq 1 ] && grep -q '포맷 버전 불일치' "$TMP/loop.log" || { tail -20 "$TMP/loop.log"; fail "R10b: 옛 포맷 체크포인트의 승인이 재사용됨 (rc $rc, 리뷰어 $(codex_calls)회)"; }

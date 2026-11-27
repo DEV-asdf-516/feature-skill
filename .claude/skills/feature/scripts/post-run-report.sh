@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================
 # DONE 뒤 사후 분석 보고서 — 비용·검증·실패 회고와 규칙 승격 "후보" (모델 호출 0회, 기존 기록의 결정론적 집계만)
-# 파일 경로: .claude/skills/feature/scripts/post-run-report.sh   (source 전용 — feature-run.sh 가 config.sh·fast-check.sh 뒤에 읽는다)
+# 파일 경로: .claude/skills/feature/scripts/post-run-report.sh   (source 전용 — feature-run.sh 가 로더·fast-check.sh 뒤에 읽는다)
 #
 # 산출물: $WORK_DIR/post-run-report.json 하나 —
 #   {version, status:"DONE", source_fingerprint, generated_at, cost_summary, verification_summary, failure_analysis[], rule_candidates[]}
 #
 # 이 파일이 하는 일과 하지 않는 일:
-#   - 읽기만 한다: usage.jsonl(+ config.sh usage_summary 의 같은 숫자), run-state.json, fast-check/·units/<id>/unit-check/·risk-verify/ 의 history.jsonl,
+#   - 읽기만 한다: usage.jsonl(+ scripts/lib/telemetry.sh usage_summary 의 같은 숫자), run-state.json, fast-check/·units/<id>/unit-check/·risk-verify/ 의 history.jsonl,
 #     units/<id>/targeted-test.history.jsonl, reviews/verify.history.jsonl, reviews/impl-attempt-*/reviewer-round-*.json, cli-anomalies.jsonl.
 #     그 파일들을 다시 쓰거나 지우지 않고, 프로덕션 코드·git index·계약 문서·승인 지문을 건드리지 않는다. 쓰는 파일은 보고서 하나뿐이다.
 #   - 멱등: 유효한 보고서가 이미 있고 source_fingerprint(승인 지문)가 같으면 다시 만들지 않는다. generated_at 은 벽시계가 아니라 DONE 기록 시각이라
@@ -78,7 +78,7 @@ post_run_report_write() { # 성공하면 0(새로 만들었으면 한 줄 요약
     unit_hist+=("${d}unit-check/history.jsonl"); test_hist+=("${d}targeted-test.history.jsonl")
   done
   usage_rows="$(_prr_jsonl "$WORK_DIR/usage.jsonl")" || return 1
-  # config.sh usage_summary — 종료 보고·usage-summary.json 과 같은 함수(숫자를 따로 계산하지 않는다). 그 함수는 파일 전체를 한 번에 파싱하므로 읽을 수 없는 줄이
+  # scripts/lib/telemetry.sh usage_summary — 종료 보고·usage-summary.json 과 같은 함수(숫자를 따로 계산하지 않는다). 그 함수는 파일 전체를 한 번에 파싱하므로 읽을 수 없는 줄이
   # 하나라도 있으면 실패한다 — 그때는 읽힌 줄만 담은 임시 사본으로 같은 함수를 부르고, 빠진 줄은 아래 record_integrity·cost_summary 가 드러낸다(0 달러로 세지 않는다).
   if [ "$(_prr_corrupt usage "$WORK_DIR/usage.jsonl" | jq 'length')" -gt 0 ]; then
     usage_clean="$POST_RUN_REPORT.usage.tmp"

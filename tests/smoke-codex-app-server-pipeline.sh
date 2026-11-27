@@ -31,9 +31,11 @@ cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/
 cp "$PROJECT_SRC/.claude/hooks/feature_native_agent.sh" "$TMP/repo/.claude/hooks/" || fail "훅 복사 실패"
 HOOK="$TMP/repo/.claude/hooks/feature_native_agent.sh"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 export CLI_LOG="$TMP/cli.log" MOCK_LOG="$TMP/calls.log" FAKE_LOG="$TMP/fake.log" FAKE_STATE="$TMP/state"; : > "$CLI_LOG"; : > "$MOCK_LOG"; : > "$FAKE_LOG"
-V="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-RV="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+V="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+RV="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 # claude CLI 는 호출을 기록하고 실패하는 stub(불리면 사례가 깨진다). codex 는 가짜 App Server — exec 가 불리면 FAKE_LOG 에 "EXEC" 가 남는다.
 printf '%s\n' '#!/usr/bin/env bash' "echo \"claude \$*\" >> \"$CLI_LOG\"; exit 9" > "$TMP/bin/claude"
 printf '#!/usr/bin/env bash\nexec node "%s" "$@"\n' "$PROJECT_SRC/tests/fake-codex-app-server.mjs" > "$TMP/bin/codex"
@@ -166,7 +168,7 @@ roles="$(jq -sr '[.[] | "\(.role):\(.backend)"] | group_by(.) | map("\(.[0])=\(l
 # 응답이 소실된 design 검증자 호출만 unknown(0 아님)이고, 나머지 다섯은 호출별 증분이다 — 재개 호출(워커 unit 02 · 리뷰어 R2)도 누적값이 아니라 1000 이다
 jq -s -e '[.[] | select(.backend=="codex_app_server")] | (map(select(.usage_observation_status=="complete" and .input_effective==1000)) | length)==5
   and (map(select(.usage_observation_status!="complete" and .input_effective==null and .estimated_cost_usd==null)) | length)==1' .agent-work/usage.jsonl >/dev/null || fail "E1: App Server 사용량 행 불일치: $(jq -c '{role,label,usage_observation_status,input_effective,usage_error}' .agent-work/usage.jsonl)"
-( source "$CFG"; usage_summary ) | jq -e '.invocations==7 and .by_source["codex-app-server"].invocations==6 and .by_cli.claude_native.invocations==1 and .cost_unknown_invocations==1' >/dev/null || fail "E1: usage_summary 가 두 backend 를 함께 집계하지 않음"
+( source "$LOADER"; usage_summary ) | jq -e '.invocations==7 and .by_source["codex-app-server"].invocations==6 and .by_cli.claude_native.invocations==1 and .cost_unknown_invocations==1' >/dev/null || fail "E1: usage_summary 가 두 backend 를 함께 집계하지 않음"
 [ "$(grep -c '^full-test$' "$MOCK_LOG")" = 1 ] || fail "E1: 최종 테스트가 1회가 아님: $(cat "$MOCK_LOG")"
 ! grep -q '^EXEC ' "$FAKE_LOG" || fail "E1: codex exec 가 호출됨: $(grep '^EXEC' "$FAKE_LOG")"
 [ ! -s "$CLI_LOG" ] || fail "E1: claude CLI 가 불림: $(cat "$CLI_LOG")"

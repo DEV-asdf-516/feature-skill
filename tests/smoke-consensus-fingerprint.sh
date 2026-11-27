@@ -28,6 +28,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|; s|^VALIDATOR_CLI=.*|VALIDATOR_CLI=\"codex\"|; s|^WORKER_CLI=.*|WORKER_CLI=\"codex\"|" "$CFG" && rm -f "$CFG.bak"   # 검증자·워커 픽스처가 codex mock 에 있으므로 CLI 를 명시 고정(모델 기본값 독립)
 cd "$TMP/repo" || exit 1
 git init -q
@@ -46,8 +48,8 @@ cat > .agent-work/implementation-units.json <<'EOF'
 EOF
 RUN=".claude/skills/feature/scripts/feature-run.sh"
 LOOP=".claude/skills/feature/scripts/consensus-loop.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-CHECKPOINT_VERSION="$(grep -E '^CONSENSUS_CHECKPOINT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+CHECKPOINT_VERSION="$(grep -E '^CONSENSUS_CHECKPOINT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT"
 : > "$MOCK_LOG"
 
@@ -88,9 +90,9 @@ chmod +x "$TMP/bin/codex" "$TMP/bin/claude"
 fake_pass() { # design|impl — 가짜 검증자가 PASS 를 -o 에 쓴다
   bash "$LOOP" "$1" > "$TMP/consensus-$1.log" 2>&1 || { cat "$TMP/consensus-$1.log"; fail "픽스처: $1 합의 PASS 체크포인트 생성 실패"; }
 }
-current() { ( source "$CFG"; consensus_pass_current "$1" ) && echo true || echo false; }
-pass_fp() { ( source "$CFG"; consensus_pass_fingerprint "$1" ); }
-upstream_fp() { ( source "$CFG"; consensus_upstream_fingerprint "$1" ); }
+current() { ( source "$LOADER"; consensus_pass_current "$1" ) && echo true || echo false; }
+pass_fp() { ( source "$LOADER"; consensus_pass_fingerprint "$1" ); }
+upstream_fp() { ( source "$LOADER"; consensus_upstream_fingerprint "$1" ); }
 run_runner() { : > "$MOCK_LOG"; bash "$RUN" > "$TMP/run.log" 2>&1; echo $?; }
 reason() { jq -r '.reason' .agent-work/run-state.json; }
 detail() { jq -r '.detail // .message // ""' .agent-work/run-state.json; }
@@ -214,7 +216,7 @@ grep -q 'DECISION_SCOPE_REQUIRED' "$TMP/loop-legacy.log" || { cat "$TMP/loop-leg
 [ "$(llm_calls)" -eq 0 ] || fail "F: 합의 루프 단독 실행에서 LLM 이 호출됨"
 # 태그를 붙이면 진행된다 (자동 추정은 없었음 — 사용자가 고친 뒤에야 지문에 들어간다)
 sed -i.bak 's/^- \[USER-QUESTION\] 옛 형식/- [USER-QUESTION][scope=impl] 옛 형식/' .agent-work/decisions.md && rm -f .agent-work/decisions.md.bak
-( source "$CFG"; [ -z "$(consensus_unscoped_user_decisions)" ] ) || fail "F: 태그를 붙였는데 여전히 unscoped 로 판정"
+( source "$LOADER"; [ -z "$(consensus_unscoped_user_decisions)" ] ) || fail "F: 태그를 붙였는데 여전히 unscoped 로 판정"
 [ "$(current design)" = true ] || fail "F: 태그(scope=impl)를 붙인 뒤 design PASS 가 깨짐"
 [ "$(current impl)" = false ] || fail "F: 태그(scope=impl)를 붙인 뒤 impl PASS 가 무효화되지 않음"
 pass "F: 옛 형식 [USER-QUESTION] → LLM 0회, DECISION_SCOPE_REQUIRED(러너·루프 모두), 태그 후 정상 분리"

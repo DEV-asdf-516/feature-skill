@@ -45,19 +45,22 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex-must-not-run\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"echo full-test >> $TMP/calls.log\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
 # 역할별 CLI 고정: 이 스모크는 CLI 규약이 아니라 상태 전이를 보므로 모든 역할을 mock claude 로 고정한다(쓰지 않는 codex 는 호출되면 실패하는 스텁)
 sed -i.bak 's/^REVIEWER_CLI=.*/REVIEWER_CLI="claude"/; s/^VALIDATOR_CLI=.*/VALIDATOR_CLI="claude"/; s/^FIXER_CLI=.*/FIXER_CLI="claude"/; s/^DESIGNER_CLI=.*/DESIGNER_CLI="claude"/; s/^WORKER_CLI=.*/WORKER_CLI="claude"/' "$CFG" && rm -f "$CFG.bak"
 printf '#!/usr/bin/env bash\necho "CODEX-CALLED $*" >> "%s/calls.log"; exit 9\n' "$TMP" > "$TMP/bin/codex-must-not-run"; chmod +x "$TMP/bin/codex-must-not-run"
 cp "$CFG" "$TMP/side/config.good.sh"
+cp "$RUNTIME_LIB" "$TMP/side/runtime.good.sh"   # 이 스모크가 바꾸는 런타임 모듈(버전 상수·런타임 계약 표식) — config.good.sh 원복 지점마다 같이 되돌린다
 cd "$TMP/repo" || exit 1
 git init -q
 printf '.agent-work/\n.claude/\n' > .gitignore
 mkdir -p src && for u in 01 02 03 04; do echo "base $u" > "src/u$u.txt"; done
 git add -A && git -c user.email=smoke@test -c user.name=smoke commit -qm baseline
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-VC="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-RC="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+VC="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+RC="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VC="$VC" MOCK_RC="$RC"
 mkdir -p "$MOCK_STATE"
 
@@ -163,9 +166,9 @@ set_section() { # file heading new-body — heading 은 그대로 두고 그 절
 }
 fresh() { # 테스트 환경 초기화(파이프라인 동작 아님)
   git checkout -q -- src; rm -rf .agent-work "$MOCK_STATE"/prompt-*.txt "$MOCK_STATE"/validator-prompt-*.txt "$MOCK_STATE"/undecided-* "$MOCK_STATE"/fail-test-* "$MOCK_STATE"/review-invalid "$MOCK_STATE"/review-docgap* "$MOCK_STATE"/gap-undecided* "$MOCK_STATE"/gap-crash*
-  cp "$TMP/side/config.good.sh" "$CFG"; write_docs
+  cp "$TMP/side/config.good.sh" "$CFG"; cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB"; write_docs
 }
-tree_now() { ( source "$CFG"; snapshot_worktree_tree ); }
+tree_now() { ( source "$LOADER"; snapshot_worktree_tree ); }
 # 사용자 역할: 러너가 내준 현재 확정 대상 지문(unit-contract-impact.request.json)을 그대로 적어 영향을 확정한다
 impact() { # affected-json unaffected-json
   jq -n --arg fp "$(jq -r .target_fingerprint .agent-work/unit-contract-impact.request.json)" --argjson a "$1" --argjson u "$2" \
@@ -247,15 +250,15 @@ cp -R .agent-work "$TMP/side/agent-work.rv"; for u in 01 02 03 04; do cp "src/u$
 rc="$(run_runner --new-review-attempt)"
 [ "$rc" -eq 0 ] && [ "$(calls reviewer)" -eq 1 ] && [ -z "$(workers)" ] && [ -f .agent-work/reviews/impl-attempt-02/reviewer-round-01.json ] || { tail -20 "$TMP/run.log"; fail "RV: --new-review-attempt 가 새 attempt 리뷰 1회 → DONE 이 아님 (rc $rc)"; }
 pass "RV: 리뷰어 출력 계약 위반 → NEED_USER/REVIEW_OUTPUT_INVALID, 재실행 모델 0회, --new-review-attempt 로만 새 리뷰"
-restore_rv() { rm -rf .agent-work; cp -R "$TMP/side/agent-work.rv" .agent-work; for u in 01 02 03 04; do cp "$TMP/side/u$u.rv" "src/u$u.txt"; done; cp "$TMP/side/config.good.sh" "$CFG"; }
+restore_rv() { rm -rf .agent-work; cp -R "$TMP/side/agent-work.rv" .agent-work; for u in 01 02 03 04; do cp "$TMP/side/u$u.rv" "src/u$u.txt"; done; cp "$TMP/side/config.good.sh" "$CFG"; cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB"; }
 
 # ===== R8/R9: 이미 DONE 인 unit 04 의 관련 절 변경 → stale, 워커 재대조 + 테스트 뒤 새 done.json =====
 restore_rv
 fp04="$(done_fp 04)"; fp01="$(done_fp 01)"
 set_section design.md D04 'design of unit 04 — 환불 승인 요청에도 사유 표시'
 set_section implementation.md 04 'what unit 04 does + 사유 표시'
-( source "$CFG"; unit_done_valid 04-unit ) && fail "R8: 문서가 바뀌었는데 unit 04 완료 체크포인트가 유효로 판정됨(unit JSON 은 그대로)"
-( source "$CFG"; unit_done_valid 03-unit ) || fail "R9: unit 04 의 독립 절만 바뀌었는데 unit 03 완료가 무효가 됨"
+( source "$LOADER"; unit_done_valid 04-unit ) && fail "R8: 문서가 바뀌었는데 unit 04 완료 체크포인트가 유효로 판정됨(unit JSON 은 그대로)"
+( source "$LOADER"; unit_done_valid 03-unit ) || fail "R9: unit 04 의 독립 절만 바뀌었는데 unit 03 완료가 무효가 됨"
 rc="$(run_runner --new-review-attempt)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R8: stale unit 재실행이 DONE 이 아님 (rc $rc/$(reason))"; }
 [ "$(workers)" = "worker 04-unit" ] && [ "$(calls 'test-04')" -eq 1 ] || fail "R8: stale unit 04 가 워커 재대조 + targeted test 를 거치지 않음: $(paste -sd'|' "$MOCK_LOG")"
@@ -274,11 +277,11 @@ rc="$(run_runner)"
 [ -z "$(workers)" ] && [ "$(tree_now)" = "$tree_before" ] || fail "R12: 워커가 호출됐거나 source 가 자동 원복·변경됨"
 [ -f .agent-work/units/03-unit/done.json ] && [ -f .agent-work/units/04-unit/done.json ] || fail "R12: 뒤 unit 체크포인트를 러너가 지움"
 jq -e '.completed_units==["01-unit"]' .agent-work/implementation-context.json >/dev/null 2>&1 || true   # (context 는 유효한 완료 prefix 로만 재구성된다 — 아래 함수 검사)
-( source "$CFG"; impl_context_write && jq -e '.completed_units==["01-unit"]' "$IMPL_CONTEXT_FILE" >/dev/null ) || fail "R12: implementation-context 가 유효한 완료 prefix(01)로만 재구성되지 않음"
+( source "$LOADER"; impl_context_write && jq -e '.completed_units==["01-unit"]' "$IMPL_CONTEXT_FILE" >/dev/null ) || fail "R12: implementation-context 가 유효한 완료 prefix(01)로만 재구성되지 않음"
 # R12b: 의도하지 않은 참조 절 수정은 원래 내용으로 되돌리면 풀린다 — 지문이 다시 맞아 완료 체크포인트가 그대로 쓰이고 워커는 0회
 set_section approach.md A02 'how unit 02 is built'
-[ "$( ( source "$CFG"; unit_contract_status 02-unit ) )" = CURRENT ] && ( source "$CFG"; unit_done_valid 02-unit && unit_done_valid 03-unit && unit_done_valid 04-unit ) \
-  || fail "R12b: 참조 절을 원래 내용으로 되돌렸는데 완료 체크포인트가 다시 유효해지지 않음($( ( source "$CFG"; unit_contract_status 02-unit ) ))"
+[ "$( ( source "$LOADER"; unit_contract_status 02-unit ) )" = CURRENT ] && ( source "$LOADER"; unit_done_valid 02-unit && unit_done_valid 03-unit && unit_done_valid 04-unit ) \
+  || fail "R12b: 참조 절을 원래 내용으로 되돌렸는데 완료 체크포인트가 다시 유효해지지 않음($( ( source "$LOADER"; unit_contract_status 02-unit ) ))"
 rc="$(run_runner)"
 [ "$(reason)" != UNIT_CHECKPOINT_CHAIN_STALE ] && [ "$(reason)" != UNIT_CONTRACT_STALE ] && [ -z "$(workers)" ] || fail "R12b: 절 원복 뒤에도 재실행을 요구하거나 워커를 다시 부름 (rc $rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"
 pass "R12: 계약이 바뀐 선행 unit + 완료된 후행 unit → 기존 UNIT_CHECKPOINT_CHAIN_STALE, 자동 restore·재실행 없음 / 절을 원래 내용으로 되돌리면 체크포인트 그대로(워커 0회)"
@@ -330,7 +333,7 @@ rc="$(run_runner)"
   || { tail -20 "$TMP/run.log"; fail "R18f: DONE 의 실제 재실행이 미리 보기의 안내(모델 0회 즉시 종료)와 다름 (rc $rc): $(paste -sd'|' "$MOCK_LOG")"; }
 # (g) 미리 보기는 실패 경로에서도 run-state 를 쓰지 않는다 — preflight 오류가 DONE 을 ENV_ERROR 로 덮으면 다음 일반 재실행이 DONE 조기 종료를 지나친다
 restore_rv; cp "$TMP/state.done" .agent-work/run-state.json; sum_done="$(state_sum)"
-printf '\nFEATURE_RUNTIME_CONTRACT_VERSION=999\n' >> "$CFG"
+sed -i.bak "s/^FEATURE_RUNTIME_CONTRACT_VERSION=3$/FEATURE_RUNTIME_CONTRACT_VERSION=999/" "$RUNTIME_LIB" && rm -f "$RUNTIME_LIB.bak"
 rc="$(preview)"
 [ "$rc" -eq 1 ] && [ "$(state_sum)" = "$sum_done" ] && jq -e '.status=="DONE"' .agent-work/run-state.json >/dev/null && [ ! -e .agent-work/.runner.lock ] \
   || { cat "$TMP/impact.log"; fail "R18g: 실패한 미리 보기가 run-state·산출물을 바꿨거나 락을 남김(rc $rc, status $(jq -r .status .agent-work/run-state.json))"; }
@@ -400,24 +403,24 @@ for u in 01 02 03 04; do
   jq '.version=1 | del(.unit_contract_fingerprint, .contract_local_fingerprint, .contract_global_fingerprint)' ".agent-work/units/$u-unit/done.json" > "$TMP/d.tmp" && cp "$TMP/d.tmp" ".agent-work/units/$u-unit/done.json"
   rm -rf ".agent-work/units/$u-unit/contract" ".agent-work/units/$u-unit/worker-contract.json"
 done
-( source "$CFG"; unit_done_valid 01-unit ) && fail "R16: 계약 지문 없는 done.json v1 이 유효로 판정됨"
+( source "$LOADER"; unit_done_valid 01-unit ) && fail "R16: 계약 지문 없는 done.json v1 이 유효로 판정됨"
 rc="$(run_runner)"
 [ "$rc" -eq 2 ] && [ "$(reason)" = UNIT_CONTRACT_IMPACT_REQUIRED ] && [ ! -s "$MOCK_LOG" ] || { tail -20 "$TMP/run.log"; fail "R16: 스냅샷 없는 과거 unit 이 0회 중단이 아님 (rc $rc/$(reason))"; }
 # 포맷만 v2 로 고쳐 써도(스냅샷 없이) 유효해지지 않는다
 jq '.version=2 | .unit_contract_fingerprint="forged"' .agent-work/units/01-unit/done.json > "$TMP/d.tmp" && cp "$TMP/d.tmp" .agent-work/units/01-unit/done.json
-( source "$CFG"; unit_done_valid 01-unit ) && fail "R16: done.json 포맷만 맞춘 위조가 유효로 판정됨"
+( source "$LOADER"; unit_done_valid 01-unit ) && fail "R16: done.json 포맷만 맞춘 위조가 유효로 판정됨"
 impact '[]' '["01-unit","02-unit","03-unit","04-unit"]'
 rc="$(run_runner --new-review-attempt)"
 [ "$rc" -eq 0 ] && [ -z "$(workers)" ] || { tail -20 "$TMP/run.log"; fail "R16: 사용자가 baseline 을 확정했는데 진행되지 않거나 워커가 재호출됨 (rc $rc/$(reason))"; }
 jq -e '.baseline_source=="user-confirmed-unaffected"' .agent-work/units/02-unit/contract/contract.json >/dev/null || fail "R16: 사용자 확정 baseline 의 출처가 기록되지 않음"
 # 검증 계약·리뷰 계약 버전이 바뀌면 이전 PASS·APPROVE 는 현재 계약의 것이 아니다
-( source "$CFG"; consensus_pass_current design && consensus_pass_current impl && impl_approval_current && all_units_done ) || fail "R16: 전제(현재 계약에서 PASS·APPROVE·DONE 유효) 실패"
-sed -i.bak "s/^VALIDATOR_CONTRACT_VERSION=.*/VALIDATOR_CONTRACT_VERSION=$((VC + 1))/" "$CFG" && rm -f "$CFG.bak"
-( source "$CFG"; consensus_pass_current design || consensus_pass_current impl || consensus_stage_accepted impl ) && fail "R16: 검증 계약 버전이 바뀌었는데 이전 PASS 가 유효로 판정됨"
-cp "$TMP/side/config.good.sh" "$CFG"
-sed -i.bak "s/^REVIEWER_CONTRACT_VERSION=.*/REVIEWER_CONTRACT_VERSION=$((RC + 1))/" "$CFG" && rm -f "$CFG.bak"
-( source "$CFG"; impl_approval_current ) && fail "R16: 리뷰어 계약 버전이 바뀌었는데 이전 APPROVE 가 유효로 판정됨"
-cp "$TMP/side/config.good.sh" "$CFG"
+( source "$LOADER"; consensus_pass_current design && consensus_pass_current impl && impl_approval_current && all_units_done ) || fail "R16: 전제(현재 계약에서 PASS·APPROVE·DONE 유효) 실패"
+sed -i.bak "s/^VALIDATOR_CONTRACT_VERSION=.*/VALIDATOR_CONTRACT_VERSION=$((VC + 1))/" "$RUNTIME_LIB" && rm -f "$RUNTIME_LIB.bak"
+( source "$LOADER"; consensus_pass_current design || consensus_pass_current impl || consensus_stage_accepted impl ) && fail "R16: 검증 계약 버전이 바뀌었는데 이전 PASS 가 유효로 판정됨"
+cp "$TMP/side/config.good.sh" "$CFG"; cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB"
+sed -i.bak "s/^REVIEWER_CONTRACT_VERSION=.*/REVIEWER_CONTRACT_VERSION=$((RC + 1))/" "$RUNTIME_LIB" && rm -f "$RUNTIME_LIB.bak"
+( source "$LOADER"; impl_approval_current ) && fail "R16: 리뷰어 계약 버전이 바뀌었는데 이전 APPROVE 가 유효로 판정됨"
+cp "$TMP/side/config.good.sh" "$CFG"; cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB"
 pass "R16: done.json v1·포맷만 맞춘 위조·계약 버전이 다른 PASS/APPROVE 는 재사용되지 않고, 과거 unit 은 명시적 baseline 확정 뒤에만 이어진다"
 
 # ===== R13: design PASS 뒤 scope=impl 순수 구현 결정 → design 검증자 0회 =====
@@ -451,7 +454,7 @@ rc="$(run_runner)"
 [ "$(calls validator)" -eq 0 ] || fail "R14: 영향 확정 뒤 재실행이 검증자를 다시 부름: $(paste -sd'|' "$MOCK_LOG")"
 grep -q '환불 승인·취소 승인 요청 Slack 에도 사유를 넣는가' .agent-work/reviews/user-decisions-design.md || fail "R14: design 검증자 입력(user-decisions-design.md)에 최신 scope=design 결정이 없음"
 grep -q 'user-decisions-design.md' "$MOCK_STATE/validator-prompt-design.txt" || fail "R14: design 검증자 프롬프트가 결정 파일을 입력으로 주지 않음"
-[ "$( ( source "$CFG"; consensus_user_decision_lines design ) )" = "$(tail -n +2 .agent-work/reviews/user-decisions-design.md)" ] || fail "R14: 검증자에게 준 결정 집합과 지문에 들어가는 결정 집합이 다름"
+[ "$( ( source "$LOADER"; consensus_user_decision_lines design ) )" = "$(tail -n +2 .agent-work/reviews/user-decisions-design.md)" ] || fail "R14: 검증자에게 준 결정 집합과 지문에 들어가는 결정 집합이 다름"
 for t in design impl; do
   grep -q '요구 변경/추가' "$MOCK_STATE/validator-prompt-$t.txt" && grep -q '명시한 대상·범위 안에서만' "$MOCK_STATE/validator-prompt-$t.txt" \
     && grep -q '원 요구가 그대로 기준' "$MOCK_STATE/validator-prompt-$t.txt" && grep -q '주장만으로는 옛 요구가 대체되지 않는다' "$MOCK_STATE/validator-prompt-$t.txt" \
@@ -460,7 +463,7 @@ done
 [ "$(jq -r .next_step .agent-work/doc-gap-resume.json)" = SUPERSEDED ] || fail "R14: 재합의 뒤 옛 pending gap 이 SUPERSEDED 로 남지 않음($(jq -r .next_step .agent-work/doc-gap-resume.json))"
 [ "$(workers)" = "worker 04-unit" ] && block 04 'UNIT TURN' | grep -qx 'kind=RESUME' && block 04 'CHANGED CONTRACT' | grep -q '^+design of unit 04 — 환불 승인·취소 승인 요청에도 사유 표시(리마인드 제외)$' \
   || fail "R14: unit 04 가 변경 계약(RESUME + design 절 diff)으로 다시 돌지 않음: $(workers)"
-( source "$CFG"; consensus_pass_current design && consensus_pass_current impl ) || fail "R14: 재합의 뒤 PASS 가 현재 입력에 대해 유효하지 않음"
+( source "$LOADER"; consensus_pass_current design && consensus_pass_current impl ) || fail "R14: 재합의 뒤 PASS 가 현재 입력에 대해 유효하지 않음"
 pass "R14/R15: 늦게 나온 제품 요구는 request.md 변경 기록 + scope=design 으로 design 검증자 입력에 들어가고, 옛 gap 체크포인트로 재합의를 건너뛰지 않는다"
 
 # ===== R17: 리뷰 DOC_GAP 사용자 해결 예외는 그 gap 과 연결된 unit 의 approach 절 변경에만 적용된다 =====
@@ -475,7 +478,7 @@ restore_r17() { mv .agent-work "$TMP/side/agent-work.r17.spent.$RANDOM"; cp -R "
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R17a: gap 과 연결된 unit 의 approach 절만 바뀌었는데 DONE 이 아님 (rc $rc/$(reason))"; }
 [ -z "$(workers)" ] && [ "$(calls review-gap-worker)" -eq 1 ] && [ "$(calls validator)" -eq 0 ] || fail "R17a: review-gap 워커 1회(검증자·unit 워커 0회)가 아님: $(paste -sd'|' "$MOCK_LOG")"
-[ "$( ( source "$CFG"; unit_contract_status 04-unit ) )" = STALE ] && ( source "$CFG"; unit_done_valid 04-unit && unit_done_valid 02-unit ) || fail "R17a: 연결된 unit 04 의 계약 변경이 gap 해결로 인정되지 않음"
+[ "$( ( source "$LOADER"; unit_contract_status 04-unit ) )" = STALE ] && ( source "$LOADER"; unit_done_valid 04-unit && unit_done_valid 02-unit ) || fail "R17a: 연결된 unit 04 의 계약 변경이 gap 해결로 인정되지 않음"
 # (b) 같은 해결에서 gap 과 무관한 unit 02 의 approach 절까지 고침 → 02 는 정상 stale. review-gap 워커·리뷰어를 부르기 전에 모델 0회로 멈춘다
 restore_r17
 set_section approach.md A02 'how unit 02 is built — gap 과 무관한 변경'
@@ -489,8 +492,8 @@ jq -r '.detail' .agent-work/run-state.json | grep -q 'approach.md#A02 — 어느
 gap_state() { jq -r '[.next_step, .resolved_impl_fingerprint, .recorded_at] | join("|")' .agent-work/doc-gap-resume.json; }
 r17_recorded="$(jq -r .recorded_at .agent-work/doc-gap-resume.json)"
 [ "$(gap_state)" = "WAITING_USER||$r17_recorded" ] && [ ! -e .agent-work/.doc-gap-resume.candidate.json ] || fail "R17b: 사전 검사 실패 뒤 체크포인트가 WAITING_USER 가 아니거나 지문이 고정됨: $(gap_state)"
-( source "$CFG"; doc_gap_resolved_current ) && fail "R17b: 사전 검사 실패인데 해결 provenance 가 유효로 판정됨(지문이 먼저 고정됨)"
-( source "$CFG"; doc_gap_repair_preflight; [ "$?" -eq 2 ] && [ "$DOC_GAP_PREFLIGHT_KIND" = DOC_GAP_SCOPE_EXCEEDED ] ) || fail "R17b: 후보 상태 사전 검사가 범위 위반으로 판정하지 않음"
+( source "$LOADER"; doc_gap_resolved_current ) && fail "R17b: 사전 검사 실패인데 해결 provenance 가 유효로 판정됨(지문이 먼저 고정됨)"
+( source "$LOADER"; doc_gap_repair_preflight; [ "$?" -eq 2 ] && [ "$DOC_GAP_PREFLIGHT_KIND" = DOC_GAP_SCOPE_EXCEEDED ] ) || fail "R17b: 후보 상태 사전 검사가 범위 위반으로 판정하지 않음"
 [ "$(gap_state)" = "WAITING_USER||$r17_recorded" ] || fail "R17b: 사전 검사 함수가 실제 체크포인트를 바꿈: $(gap_state)"
 # 복구 ①: 무관한 절을 gap 발생 시점으로 되돌리면 **같은 체크포인트**에서 다시 평가돼 진행된다(체크포인트 삭제·재합의 없음)
 set_section approach.md A02 'how unit 02 is built'
@@ -501,8 +504,8 @@ rc="$(run_runner)"
 # (c) 연결된 unit 이어도 전역 입력이 같이 바뀌면 gap 해결로 설명되지 않는다
 restore_r17
 echo '- [USER-QUESTION][scope=impl] 공통 오류 응답 형식 → 기존 형식 유지' >> .agent-work/decisions.md
-( source "$CFG"; doc_gap_accept ) || fail "R17c: 전제(gap 수리) 실패"
-( source "$CFG"; unit_done_valid 04-unit ) && fail "R17c: 전역 입력이 바뀌었는데 unit 04 완료가 gap 예외로 유지됨"
+( source "$LOADER"; doc_gap_accept ) || fail "R17c: 전제(gap 수리) 실패"
+( source "$LOADER"; unit_done_valid 04-unit ) && fail "R17c: 전역 입력이 바뀌었는데 unit 04 완료가 gap 예외로 유지됨"
 # (d) 같은 unit 의 다른 approach 절(B04 — gap 과 무관)까지 고침 → A04 에 tag 가 있어도 B04 변경은 덮이지 않는다
 restore_r17
 set_section approach.md B04 'second approach rule of the last unit — gap 과 무관하게 바뀐 계약'
@@ -516,17 +519,17 @@ set_section approach.md B04 'second approach rule of the last unit — [review-i
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] && [ -z "$(workers)" ] && [ "$(calls review-gap-worker)" -eq 1 ] && [ "$(calls validator)" -eq 0 ] \
   || { tail -30 "$TMP/run.log"; fail "R17d: tag 를 보완했는데 같은 체크포인트로 진행되지 않음 (rc $rc/$(reason)): $(paste -sd'|' "$MOCK_LOG")"; }
-( source "$CFG"; unit_done_valid 04-unit ) || fail "R17d: tag 보완 뒤 unit 04 의 A04·B04 변경이 해결로 인정되지 않음"
+( source "$LOADER"; unit_done_valid 04-unit ) || fail "R17d: tag 보완 뒤 unit 04 의 A04·B04 변경이 해결로 인정되지 않음"
 # (e) 연결된 unit 의 절이어도 어느 gap 의 해결인지 표시가 없으면 확정할 수 없다 → 자동 승인하지 않는다
 restore_r17
 set_section approach.md A04 'how unit 04 is built — 결정: a (tag 없음)'
-( source "$CFG"; doc_gap_accept ) || fail "R17e: 전제(gap 수리) 실패"
-( source "$CFG"; unit_done_valid 04-unit ) && fail "R17e: gap tag 표시가 없는 approach 절 변경이 gap 해결로 인정됨"
+( source "$LOADER"; doc_gap_accept ) || fail "R17e: 전제(gap 수리) 실패"
+( source "$LOADER"; unit_done_valid 04-unit ) && fail "R17e: gap tag 표시가 없는 approach 절 변경이 gap 해결로 인정됨"
 # (f) new_file_roots 는 끝 슬래시가 있어도(src/gen/) 그 아래 파일을 가리킨 gap 과 연결된다. 접두만 같은 다른 디렉터리(src/generic/)는 아니다
 printf '{"gaps":[{"tag":"review-issue=R-07","refs":["approach.md:L1-L1","src/gen/New.java:L3-L4"],"location":"src/gen/New.java:L3-L4"},{"tag":"review-issue=R-08","refs":[],"location":"src/generic/Other.java:L1-L1"}]}\n' > "$TMP/gaps.json"
 for root in 'src/gen/' 'src/gen'; do
   uj_f="$(jq -nc --arg r "$root" '{scope:{files:[], new_file_roots:[$r]}}')"
-  linked_f="$( ( source "$CFG"; DOC_GAP_RESUME="$TMP/gaps.json"; _unit_gap_linked_tags "$uj_f" ) )"
+  linked_f="$( ( source "$LOADER"; DOC_GAP_RESUME="$TMP/gaps.json"; _unit_gap_linked_tags "$uj_f" ) )"
   [ "$linked_f" = '["review-issue=R-07"]' ] \
     || fail "R17f: new_file_roots '$root' 아래 파일의 gap 이 연결되지 않거나 다른 디렉터리의 gap 이 연결됨"
 done
@@ -547,8 +550,8 @@ jq -n --arg q "$Q" '{gaps:[
   {tag:"L8", location:"Same.java 어딘가 (설명) / ../etc/passwd", paths:["src/gen/New.java"]},
   {tag:"L9", refs:["approach.md:L1-L1", "src/generic/Other.java:L1-L1"], location:"src/generic/Other.java:L1-L1"},
   {tag:"L10", location:"등록 흐름 전반 (설명)"}]}' > "$TMP/p-gaps.json"
-plinks() { ( source "$CFG"; DOC_GAP_RESUME="$TMP/p-gaps.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" doc_gap_links ); }
-plinked() { ( source "$CFG"; DOC_GAP_RESUME="$TMP/p-gaps.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" _unit_gap_linked_tags "$1" ); }
+plinks() { ( source "$LOADER"; DOC_GAP_RESUME="$TMP/p-gaps.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" doc_gap_links ); }
+plinked() { ( source "$LOADER"; DOC_GAP_RESUME="$TMP/p-gaps.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" _unit_gap_linked_tags "$1" ); }
 PL="$(plinks)" || fail "R17p: doc_gap_links 실행 실패"
 pl() { jq -c --arg t "$1" '.[] | select(.tag==$t) | '"$2" <<< "$PL"; }
 [ "$(pl L1 '.paths')" = '["src/main/resources/db/migration/V81__notification_receiver_history_deleted.sql"]' ] && [ "$(pl L1 '.unresolved')" = '[]' ] || fail "R17p: 끝의 ' (review-issue …)' 설명을 떼고 경로를 얻지 못함: $(pl L1 .)"
@@ -567,11 +570,11 @@ uj() { jq -nc --argjson f "$1" --argjson r "$2" '{scope:{files:$f, new_file_root
 [ "$(plinked "$(uj '["src/zzz/Unrelated.java"]' '[]')")" = '[]' ] || fail "R17p: 어느 경로도 scope 안이 아닌 unit 에 gap 이 연결됨(fail-open)"
 # 리뷰 gap 기록: code_refs 가 같은 공용 규칙으로 paths 가 된다. 워커 gap 기록: location 원문 + paths 를 모두 남긴다
 printf '{"issues":[{"id":"R-09","action":"DOC_GAP","user_question":"q","options":["a","b"],"basis_refs":["approach.md:L1-L1"],"code_refs":["src/a:b/Colon.java:L3-L4","./src/a/X.java:L1-L2,L9-L9","src/a/X.java:L20-L21"],"impact":"i"}]}\n' > "$TMP/p-review.json"
-[ "$(jq -c "$( ( source "$CFG"; printf '%s' "$JQ_PATH_DEFS" ) )"'[.issues[].code_refs[] | code_ref_path | select(plain_file_path)] | unique' "$TMP/p-review.json")" = '["src/a/X.java","src/a:b/Colon.java"]' ] || fail "R17p: code_refs → paths 정규화 불일치"
+[ "$(jq -c "$( ( source "$LOADER"; printf '%s' "$JQ_PATH_DEFS" ) )"'[.issues[].code_refs[] | code_ref_path | select(plain_file_path)] | unique' "$TMP/p-review.json")" = '["src/a/X.java","src/a:b/Colon.java"]' ] || fail "R17p: code_refs → paths 정규화 불일치"
 # worker_result_valid 와 스키마: paths 계약
 wr() { printf '{"status":"UNDECIDED","undecided":[{"kind":"DOC_GAP","location":"자유 설명","decision_needed":"q","options":["a","b"]%s}],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' "$1" > "$TMP/p-result.json"; }
-wr_valid() { ( source "$CFG"; worker_result_valid "$TMP/p-result.json" ); }
-wr_schema() { [ "$( ( source "$CFG"; json_schema_violations "$SKILL_SRC/schemas/worker-result.schema.json" "$TMP/p-result.json" ) )" = '[]' ]; }
+wr_valid() { ( source "$LOADER"; worker_result_valid "$TMP/p-result.json" ); }
+wr_schema() { [ "$( ( source "$LOADER"; json_schema_violations "$SKILL_SRC/schemas/worker-result.schema.json" "$TMP/p-result.json" ) )" = '[]' ]; }
 wr ',"paths":["src/u01.txt","src/a:b/Colon.java"]'; wr_valid && wr_schema || fail "R17p: 정상 paths 가 거부됨(검사기·스키마)"
 for bad in '' ',"paths":[]' ',"paths":[""]' ',"paths":[1]' ',"paths":"src/u01.txt"'; do
   wr "$bad"; wr_valid && fail "R17p: worker_result_valid 가 잘못된 paths 형태를 수용: ${bad:-(paths 없음)}"; wr_schema && fail "R17p: 스키마가 잘못된 paths 형태를 수용: ${bad:-(paths 없음)}"
@@ -579,19 +582,19 @@ done
 for bad in '["/abs/X.java"]' '["../X.java"]' '["./src/u01.txt"]' '["src/*.java"]' '["src/u0?.txt"]' '["src/u01.txt","src/u01.txt"]' '["src/dir/"]' '["src//u01.txt"]'; do
   wr ",\"paths\":$bad"; wr_valid && fail "R17p: worker_result_valid 가 비정규 경로를 수용: $bad"
 done
-wr ',"paths":["src/u01.txt"]'; [ -z "$( ( source "$CFG"; worker_undecided_path_violations "$TMP/p-result.json" ) )" ] || fail "R17p: 실재하는 파일 경로가 위반으로 판정됨"
-wr ',"paths":["src"]'; ( source "$CFG"; worker_undecided_path_violations "$TMP/p-result.json" ) | grep -q '^1:src:디렉터리' || fail "R17p: 디렉터리 경로가 거부되지 않음"
-wr ',"paths":["src/ghost/Invented.java"]'; ( source "$CFG"; worker_undecided_path_violations "$TMP/p-result.json" ) | grep -q '^1:src/ghost/Invented.java:' || fail "R17p: 실재하지 않고 범위 밖인(지어낸) 경로가 거부되지 않음"
-wr ',"paths":["src/gen/New.java"]'; [ -z "$( ( source "$CFG"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" worker_undecided_path_violations "$TMP/p-result.json" ) )" ] || fail "R17p: new_file_roots 아래의 신규 파일 경로가 거부됨"
+wr ',"paths":["src/u01.txt"]'; [ -z "$( ( source "$LOADER"; worker_undecided_path_violations "$TMP/p-result.json" ) )" ] || fail "R17p: 실재하는 파일 경로가 위반으로 판정됨"
+wr ',"paths":["src"]'; ( source "$LOADER"; worker_undecided_path_violations "$TMP/p-result.json" ) | grep -q '^1:src:디렉터리' || fail "R17p: 디렉터리 경로가 거부되지 않음"
+wr ',"paths":["src/ghost/Invented.java"]'; ( source "$LOADER"; worker_undecided_path_violations "$TMP/p-result.json" ) | grep -q '^1:src/ghost/Invented.java:' || fail "R17p: 실재하지 않고 범위 밖인(지어낸) 경로가 거부되지 않음"
+wr ',"paths":["src/gen/New.java"]'; [ -z "$( ( source "$LOADER"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" worker_undecided_path_violations "$TMP/p-result.json" ) )" ] || fail "R17p: new_file_roots 아래의 신규 파일 경로가 거부됨"
 # (리뷰 반영) 옛 리뷰 gap 의 refs 는 basis_refs + code_refs 다 — 계약 근거 파일(basis)이 gap 의 코드 위치로 섞여 무관한 unit 이 연결되면 안 된다
 [ "$(pl L9 '.paths')" = '["src/generic/Other.java"]' ] || fail "R17p: refs 의 문서 참조가 경로로 섞임: $(pl L9 .)"
 jq -n '{issues:[{id:"R-31",action:"DOC_GAP",basis_refs:["src/b/Y.java:L1-L9"],code_refs:["src/a/X.java:L8-L12","src/a:b/Colon.java:L1-L2,L5-L6"]},
                 {id:"R-32",action:"DOC_GAP",basis_refs:["src/b/Y.java:L1-L9"],code_refs:["src/a/X.java:L8-L12"]}]}' > "$TMP/p-orig-review.json"
-p_sha="$( ( source "$CFG"; sha256_stdin < "$TMP/p-orig-review.json" ) )"
+p_sha="$( ( source "$LOADER"; sha256_stdin < "$TMP/p-orig-review.json" ) )"
 jq -n --arg r "$TMP/p-orig-review.json" --arg sha "$p_sha" '{origin:"review", review:$r, review_sha256:$sha, gaps:[
   {key:"R-31", tag:"B1", refs:["src/b/Y.java:L1-L9","src/a/X.java:L8-L12"], location:"코드 위치가 아닌 설명"},
   {key:"R-99", tag:"B2", refs:["src/b/Y.java:L1-L9","src/a/X.java:L8-L12"], location:"src/a/X.java:L8-L12"}]}' > "$TMP/p-gaps-review.json"
-plinks_r() { ( source "$CFG"; DOC_GAP_RESUME="$1"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" doc_gap_links ); }
+plinks_r() { ( source "$LOADER"; DOC_GAP_RESUME="$1"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json" doc_gap_links ); }
 PLR="$(plinks_r "$TMP/p-gaps-review.json")" || fail "R17p: doc_gap_links(옛 리뷰 gap) 실행 실패"
 [ "$(jq -c '.[] | select(.tag=="B1") | [.paths, .unresolved]' <<< "$PLR")" = '[["src/a/X.java","src/a:b/Colon.java"],[]]' ] \
   || fail "R17p: 내용이 확인된 원본 리뷰의 code_refs 를 쓰지 않았거나 basis_refs(src/b/Y.java)가 섞임: $(jq -c '.[] | select(.tag=="B1")' <<< "$PLR")"
@@ -600,14 +603,14 @@ jq '.review_sha256="0000"' "$TMP/p-gaps-review.json" > "$TMP/p-gaps-review-bad.j
 PLR="$(plinks_r "$TMP/p-gaps-review-bad.json")" || fail "R17p: doc_gap_links(해시 불일치) 실행 실패"
 [ "$(jq -c '.[] | select(.tag=="B1") | [.paths, (.unresolved|length)]' <<< "$PLR")" = '[[],1]' ] && [ "$(jq -c '.[] | select(.tag=="B2") | .paths' <<< "$PLR")" = '["src/a/X.java"]' ] \
   || fail "R17p: 해시가 맞지 않는 리뷰의 code_refs 를 썼거나 location 해석이 틀림: $(jq -c . <<< "$PLR")"
-( source "$CFG"; DOC_GAP_RESUME="$TMP/p-gaps-review.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json"
+( source "$LOADER"; DOC_GAP_RESUME="$TMP/p-gaps-review.json"; UNITS_MANIFEST_LOCK="$TMP/none.json"; UNITS_MANIFEST_FILE="$TMP/none.json"; SCOPE_MANIFEST_OVERRIDE="$TMP/p-scope.json"
   [ "$(_unit_gap_linked_tags "$(jq -nc '{scope:{files:["src/b/Y.java"],new_file_roots:[]}}')")" = '[]' ] ) || fail "R17p: 계약 근거(basis_refs) 파일만 가진 unit 에 리뷰 gap 이 연결됨"
 # (리뷰 반영) 분류: 유효하지 않은 unit 이 없어도 수리(repair)에서는 **현재 gap** 의 위치 미확정이 중단 사유다. prior gap 의 미확정·repair 가 아닌 재검사는 통과
 pdiag() { jq -nc --argjson prior "$1" '{stale:[], unresolved:[{tag:"worker-gap=review-gap#2", key:"review-gap#2", prior:$prior, location:"Missing.java:L1-L2", unresolved:[{token:"Missing.java", candidates:[]}]}]}'; }
-( source "$CFG"; doc_gap_diagnosis_classify "$(pdiag false)" repair; [ "$?" -eq 2 ] && [ "$DOC_GAP_PREFLIGHT_KIND" = DOC_GAP_LOCATION_UNRESOLVED ] && printf '%s' "$DOC_GAP_PREFLIGHT_DETAIL" | grep -q '"Missing.java" 후보 없음' ) \
+( source "$LOADER"; doc_gap_diagnosis_classify "$(pdiag false)" repair; [ "$?" -eq 2 ] && [ "$DOC_GAP_PREFLIGHT_KIND" = DOC_GAP_LOCATION_UNRESOLVED ] && printf '%s' "$DOC_GAP_PREFLIGHT_DETAIL" | grep -q '"Missing.java" 후보 없음' ) \
   || fail "R17p: stale unit 이 없으면 현재 gap 의 위치 미확정이 수리를 통과함"
-( source "$CFG"; doc_gap_diagnosis_classify "$(pdiag true)" repair ) || fail "R17p: 앞서 해결된 gap(prior)의 위치 미확정만으로 수리가 막힘(정상 재개 호환 깨짐)"
-( source "$CFG"; doc_gap_diagnosis_classify "$(pdiag false)" ) || fail "R17p: 이미 고정된 체크포인트의 재검사(repair 아님)가 stale unit 없이 막힘"
+( source "$LOADER"; doc_gap_diagnosis_classify "$(pdiag true)" repair ) || fail "R17p: 앞서 해결된 gap(prior)의 위치 미확정만으로 수리가 막힘(정상 재개 호환 깨짐)"
+( source "$LOADER"; doc_gap_diagnosis_classify "$(pdiag false)" ) || fail "R17p: 이미 고정된 체크포인트의 재검사(repair 아님)가 stale unit 없이 막힘"
 pass "R17p: 새 기록은 paths 만, 옛 기록은 코드 위치(검증된 원본 리뷰의 code_refs → location)의 제한된 해석 — basis_refs 는 연결 근거가 아니다(설명·' / '·',L범위'·경로 안 ':'), basename 은 유일할 때만 — 모호·없음·자유 문자열은 unresolved. paths 계약은 검사기·스키마가 함께 본다"
 
 # ===== R20: 지어낸 경로의 미결정은 gap 체크포인트를 만들지 않는다 =====
@@ -636,7 +639,7 @@ jq -e '.origin=="worker" and .unit_id=="" and .next_step=="WAITING_USER" and .re
        and ([.prior_gaps[] | [.tag, .paths, (.review_sha256|length)]]==[["review-issue=R-01",["src/u02.txt"],64],["review-issue=R-02",["src/u02.txt"],64]])' .agent-work/doc-gap-resume.json >/dev/null \
   || fail "R19: 새 gap 체크포인트에 location 원문·paths 또는 앞 gap 2건(prior_gaps — paths 포함)이 없음: $(cat .agent-work/doc-gap-resume.json)"
 cp -R .agent-work "$TMP/side/agent-work.r19"; for u in 01 02 03 04; do cp "src/u$u.txt" "$TMP/side/u$u.r19"; done
-restore_r19() { mv .agent-work "$TMP/side/agent-work.r19.spent.$RANDOM"; cp -R "$TMP/side/agent-work.r19" .agent-work; for u in 01 02 03 04; do cp "$TMP/side/u$u.r19" "src/u$u.txt"; done; cp "$TMP/side/config.good.sh" "$CFG"; }
+restore_r19() { mv .agent-work "$TMP/side/agent-work.r19.spent.$RANDOM"; cp -R "$TMP/side/agent-work.r19" .agent-work; for u in 01 02 03 04; do cp "$TMP/side/u$u.r19" "src/u$u.txt"; done; cp "$TMP/side/config.good.sh" "$CFG"; cp "$TMP/side/runtime.good.sh" "$RUNTIME_LIB"; }
 r19_answer() { # 사용자 역할: 두 gap 의 답 + 각 gap 의 코드가 속한 unit 의 approach 절에 tag
   echo '- [USER-QUESTION][scope=impl][worker-gap=review-gap#1] 등록 링크 계약 → a' >> .agent-work/decisions.md
   echo '- [USER-QUESTION][scope=impl][worker-gap=review-gap#2] 알림 분류 기준 → b' >> .agent-work/decisions.md
@@ -653,8 +656,8 @@ r19_answer
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R19a: 답·tag 를 적었는데 DONE 이 아님 (rc $rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }
 [ -z "$(workers)" ] && [ "$(calls review-gap-worker)" -eq 1 ] && [ "$(calls validator)" -eq 0 ] && [ "$(calls fixer)" -eq 0 ] || fail "R19a: review-gap 워커 1회(unit 워커·검증자·디자이너 0회)가 아님: $(paste -sd'|' "$MOCK_LOG")"
-for u in 01 02 03 04; do ( source "$CFG"; unit_done_valid "$u-unit" ) || fail "R19a: unit $u 완료가 유효하지 않음"; done
-( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01","review-issue=R-02"]' ] ) || fail "R19a: 앞 리뷰 gap 2건(prior_gaps)이 계속 인정되지 않음"
+for u in 01 02 03 04; do ( source "$LOADER"; unit_done_valid "$u-unit" ) || fail "R19a: unit $u 완료가 유효하지 않음"; done
+( source "$LOADER"; [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01","review-issue=R-02"]' ] ) || fail "R19a: 앞 리뷰 gap 2건(prior_gaps)이 계속 인정되지 않음"
 jq -e '.worker_run.state=="DONE" and (.worker_run.result_sha256|length)==64' .agent-work/doc-gap-resume.json >/dev/null || fail "R19a: 이 gap 의 review-gap 워커 실행 기록(DONE)이 없음"
 # (b) tag 누락 → 고정 전 사전 검사에서 멈춘다(WAITING_USER, 모델 0회). 후보 잔재가 있어도 검사를 건너뛰지 않는다. tag 보완 뒤 같은 체크포인트로 진행
 restore_r19; r19_answer
@@ -665,7 +668,7 @@ r19_refused b DOC_GAP_SCOPE_EXCEEDED
 jq -r '.detail' .agent-work/run-state.json | grep -q '유효하지 않은 완료 unit: 03-unit\.' && jq -r '.detail' .agent-work/run-state.json | grep -q 'approach.md#A03 — 어느 gap 의 해결인지 표시(tag) 없는 변경' \
   || fail "R19b: 바뀐 unit·절이 detail 에 구분돼 있지 않음: $(jq -r .detail .agent-work/run-state.json)"
 # 후보 검사 중 강제 종료를 흉내낸다: '통과한 것처럼 보이는' 후보 파일을 남겨도 다음 실행은 체크포인트(WAITING_USER)에서 다시 검사한다
-jq --arg fp "$( ( source "$CFG"; consensus_pass_fingerprint impl ) )" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING"' .agent-work/doc-gap-resume.json > .agent-work/.doc-gap-resume.candidate.json
+jq --arg fp "$( ( source "$LOADER"; consensus_pass_fingerprint impl ) )" '.resolved_impl_fingerprint=$fp | .next_step="WORKER_PENDING"' .agent-work/doc-gap-resume.json > .agent-work/.doc-gap-resume.candidate.json
 rc="$(run_runner)"; r19_refused b2 DOC_GAP_SCOPE_EXCEEDED
 set_section approach.md A03 'how unit 03 is built — [worker-gap=review-gap#1] 결정: a'
 rc="$(run_runner)"
@@ -709,7 +712,7 @@ jq -r '.detail' .agent-work/run-state.json | grep -q '유효하지 않은 완료
   || fail "R19c7: stale unit 없는 위치 미확정의 원문·후보가 detail 에 없음: $(jq -r .detail .agent-work/run-state.json)"
 # (d) 이 수정 이전에 고정된 체크포인트(WORKER_PENDING + paths 없음 + 정상 지문)는 reset 없이 재검증·재개된다. 고정 뒤 문서를 고치면 새 지문을 발급하지 않는다
 restore_r19; r19_answer
-( source "$CFG"; doc_gap_accept ) || fail "R19d: 전제(옛 흐름의 지문 고정) 실패"
+( source "$LOADER"; doc_gap_accept ) || fail "R19d: 전제(옛 흐름의 지문 고정) 실패"
 jq 'del(.gaps[].paths) | del(.prior_gaps[].paths)' .agent-work/doc-gap-resume.json > "$TMP/g.tmp" && cp "$TMP/g.tmp" .agent-work/doc-gap-resume.json
 cp -R .agent-work "$TMP/side/agent-work.r19d"
 rc="$(run_runner)"
@@ -751,28 +754,28 @@ set_section approach.md B04 'second approach rule of the last unit — [review-i
 rc="$(run_runner)"
 [ "$rc" -eq 0 ] && [ "$(status)" = DONE ] || { tail -30 "$TMP/run.log"; fail "R17g: 앞 gap(A04)·이번 gap(B04) 해결만 있는데 DONE 이 아님 — 앞 해결을 잊음 (rc $rc/$(reason)): $(jq -r .detail .agent-work/run-state.json)"; }
 [ -z "$(workers)" ] && [ "$(calls review-gap-worker)" -eq 1 ] && [ "$(calls validator)" -eq 0 ] || fail "R17g: Gap B 의 review-gap 워커 1회(검증자·unit 워커 0회)가 아님: $(paste -sd'|' "$MOCK_LOG")"
-( source "$CFG"; unit_done_valid 04-unit && [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "R17g: 완료 뒤 unit 04 의 계약 변경(A04 = Gap A, B04 = Gap B)이 해결로 인정되지 않음"
+( source "$LOADER"; unit_done_valid 04-unit && [ "$(doc_gap_prior_valid_tags)" = '["review-issue=R-01"]' ] ) || fail "R17g: 완료 뒤 unit 04 의 계약 변경(A04 = Gap A, B04 = Gap B)이 해결로 인정되지 않음"
 # 원본 리뷰와의 연결이 깨지면(리뷰 내용이 기록 당시와 다름) 그 해결로는 덮지 않는다
 cp "$REVIEW_GA" "$TMP/side/review-ga.json"; printf '\n' >> "$REVIEW_GA"
-( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 원본 리뷰 내용이 달라졌는데 앞선 해결이 유효로 남음"
-( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: 원본 리뷰와 연결이 깨진 앞선 해결로 unit 04 의 A04 변경이 덮임"
+( source "$LOADER"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 원본 리뷰 내용이 달라졌는데 앞선 해결이 유효로 남음"
+( source "$LOADER"; unit_done_valid 04-unit ) && fail "R17g: 원본 리뷰와 연결이 깨진 앞선 해결로 unit 04 의 A04 변경이 덮임"
 cp "$TMP/side/review-ga.json" "$REVIEW_GA"
 cp .agent-work/doc-gap-resume.json "$TMP/side/gap-b.json"
 # 검증 근거가 없는 기록(원본 리뷰 해시·답 줄 원문이 없는 옛 형식)은 인정하지 않는다 — 확인할 수 없는 이력이 계약 변경을 덮지 않는다
 for strip in 'del(.prior_gaps[0].review_sha256)' '.prior_gaps[0].review_sha256=""' 'del(.prior_gaps[0].answer)' 'del(.prior_gaps[0].origin)'; do
   jq "$strip" "$TMP/side/gap-b.json" > .agent-work/doc-gap-resume.json
-  ( source "$CFG"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)이 유효로 인정됨"
-  ( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)으로 unit 04 의 A04 변경이 덮임"
+  ( source "$LOADER"; [ "$(doc_gap_prior_valid_tags)" = '[]' ] ) || fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)이 유효로 인정됨"
+  ( source "$LOADER"; unit_done_valid 04-unit ) && fail "R17g: 검증 근거 없는 앞선 해결 기록($strip)으로 unit 04 의 A04 변경이 덮임"
 done
 # 앞 해결 기록이 없으면(이 수정 이전의 동작) A04 변경은 설명되지 않는다 — 재현 대조군
 jq 'del(.prior_gaps)' "$TMP/side/gap-b.json" > .agent-work/doc-gap-resume.json
-( source "$CFG"; unit_done_valid 04-unit ) && fail "R17g: prior_gaps 없이도 앞 gap 의 절 변경이 인정됨(대조군이 결함을 재현하지 못함)"
+( source "$LOADER"; unit_done_valid 04-unit ) && fail "R17g: prior_gaps 없이도 앞 gap 의 절 변경이 인정됨(대조군이 결함을 재현하지 못함)"
 cp "$TMP/side/gap-b.json" .agent-work/doc-gap-resume.json
-( source "$CFG"; unit_done_valid 04-unit ) || fail "R17g: 체크포인트 복원 뒤 unit 04 가 유효하지 않음"
+( source "$LOADER"; unit_done_valid 04-unit ) || fail "R17g: 체크포인트 복원 뒤 unit 04 가 유효하지 않음"
 pass "R17g: 연속 리뷰 DOC_GAP — 앞 gap 의 원본 리뷰·이슈 ID·사용자 결정이 prior_gaps 로 보존돼 앞 해결의 절 변경이 계속 인정되고, 같은 id 는 @2 로 구분되며, 연결이 깨지면 인정하지 않는다"
 
 # ===== R18: 피처 범위 안 conventions.md 의 자기 무효화 예외 (feature 061) =====
-conv_fp() { ( source "$CFG"; printf '%s %s' "$(consensus_pass_fingerprint design)" "$(consensus_pass_fingerprint impl)" ); }
+conv_fp() { ( source "$LOADER"; printf '%s %s' "$(consensus_pass_fingerprint design)" "$(consensus_pass_fingerprint impl)" ); }
 conv_in_scope() { # conventions.md 를 전체 범위와 unit 01 의 scope 에 넣는다
   jq '.files += ["conventions.md"]' .agent-work/feature-scope.json > "$TMP/doc.tmp" && cp "$TMP/doc.tmp" .agent-work/feature-scope.json
   jq '.units[0].scope.files += ["conventions.md"]' .agent-work/implementation-units.json > "$TMP/doc.tmp" && cp "$TMP/doc.tmp" .agent-work/implementation-units.json
@@ -786,12 +789,12 @@ rc="$(run_runner)"
 [ "$(workers)" = "worker 01-unit worker 02-unit worker 03-unit worker 04-unit" ] && [ "$(calls validator)" -eq 2 ] && [ "$(calls reviewer)" -eq 1 ] \
   || fail "R18a: unit 워커 각 1회·검증자 2회(design·impl 최초 합의)·리뷰어 1회가 아님: $(paste -sd'|' "$MOCK_LOG")"
 grep -q 'CONV-V2 unit 01' conventions.md || fail "R18a: 전제 — 워커가 conventions.md 를 고치지 않음"
-[ "$(conv_fp)" = "$fp_before" ] && ( source "$CFG"; consensus_pass_current design && consensus_pass_current impl ) || fail "R18a: 워커의 conventions 변경이 design·impl PASS 지문을 바꿈"
-( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V1' && ! ( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V2' || fail "R18a: 계약 지문용 conventions 가 워커 기준선 내용이 아님"
+[ "$(conv_fp)" = "$fp_before" ] && ( source "$LOADER"; consensus_pass_current design && consensus_pass_current impl ) || fail "R18a: 워커의 conventions 변경이 design·impl PASS 지문을 바꿈"
+( source "$LOADER"; conventions_contract_content ) | grep -q 'CONV-V1' && ! ( source "$LOADER"; conventions_contract_content ) | grep -q 'CONV-V2' || fail "R18a: 계약 지문용 conventions 가 워커 기준선 내용이 아님"
 grep -q 'CONV-V1' "$MOCK_STATE/prompt-01.txt" && ! grep -q 'CONV-V2' "$MOCK_STATE/prompt-01.txt" || fail "R18a: 최초 워커 턴의 conventions 가 기준 내용이 아님"
 grep -q 'PROJECT CONVENTIONS — 현재 파일 전문' "$MOCK_STATE/prompt-02.txt" && grep -q 'CONV-V2 unit 01' "$MOCK_STATE/prompt-02.txt" || fail "R18a: 뒤 unit 워커(재개 턴)가 바뀐 conventions.md 를 받지 못함"
 grep -q 'CONV-V2 unit 01' "$MOCK_STATE/reviewer-system.txt" || fail "R18a: 리뷰어가 바뀐 conventions.md 를 받지 못함"
-for u in 01 02 03 04; do ( source "$CFG"; unit_done_valid "$u-unit" ) || fail "R18a: unit $u 완료가 conventions 변경으로 무효가 됨"; done
+for u in 01 02 03 04; do ( source "$LOADER"; unit_done_valid "$u-unit" ) || fail "R18a: unit $u 완료가 conventions 변경으로 무효가 됨"; done
 rc="$(run_runner)"; [ "$rc" -eq 0 ] && [ ! -s "$MOCK_LOG" ] || fail "R18a: DONE 뒤 재실행에서 모델이 호출됨(승인·합의가 conventions 변경으로 무효): $(paste -sd'|' "$MOCK_LOG")"
 # (b) 범위 안이어도 워커 기준선이 생기기 전에는 예외가 없다 — 합의는 현재 파일을 본다
 mv "$MOCK_STATE/conv-edit-01" "$MOCK_STATE/conv-edit-01.used"   # 이후 사례의 워커는 conventions.md 를 고치지 않는다
@@ -802,9 +805,9 @@ fp_before="$(conv_fp)"; echo '- CONV-V3 합의 전 사용자 변경' >> conventi
 fresh; printf '# conventions\n- CONV-V1 기존 규칙\n' > conventions.md
 rc="$(run_runner)"; [ "$rc" -eq 0 ] && [ -f .agent-work/worker-baseline.tree ] || { tail -20 "$TMP/run.log"; fail "R18c: 전제(범위 밖 conventions 로 DONE) 실패 (rc $rc)"; }
 echo '- CONV-V4 피처와 무관한 변경' >> conventions.md
-( source "$CFG"; consensus_pass_current design ) && fail "R18c: 범위 밖 conventions.md 변경인데 design PASS 가 유효로 남음(예외가 범위 밖까지 적용됨)"
-( source "$CFG"; conventions_contract_content ) | grep -q 'CONV-V4' || fail "R18c: 범위 밖인데 계약 지문용 conventions 가 현재 파일이 아님"
-[ "$( ( source "$CFG"; unit_contract_status 01-unit ) )" != CURRENT ] || fail "R18c: 범위 밖 conventions.md 변경인데 unit 계약이 CURRENT"
+( source "$LOADER"; consensus_pass_current design ) && fail "R18c: 범위 밖 conventions.md 변경인데 design PASS 가 유효로 남음(예외가 범위 밖까지 적용됨)"
+( source "$LOADER"; conventions_contract_content ) | grep -q 'CONV-V4' || fail "R18c: 범위 밖인데 계약 지문용 conventions 가 현재 파일이 아님"
+[ "$( ( source "$LOADER"; unit_contract_status 01-unit ) )" != CURRENT ] || fail "R18c: 범위 밖 conventions.md 변경인데 unit 계약이 CURRENT"
 mv conventions.md "$TMP/side/conventions.r18.md"   # 테스트 환경 정리
 pass "R18: 범위 안 conventions.md 는 워커가 고쳐도 지문이 기준선 내용에 고정돼 DONE 까지 가고 뒤 워커·리뷰어는 최신본을 받는다 — 기준선 전·범위 밖 변경은 종전대로 무효"
 

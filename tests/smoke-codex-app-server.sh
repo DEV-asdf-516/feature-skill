@@ -28,6 +28,8 @@ unset CODEX_APP_GUARD_REVIEWED_SHA256   # 사용자 환경에 등록된 가드 �
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 # 새 설치의 기본값을 검증한다 — CODEX_BACKEND 줄은 건드리지 않는다(소스 config.sh 의 기본값이 app_server 여야 한다).
 grep -q '^CODEX_BACKEND="app_server"' "$CFG" || fail "소스 config.sh 의 CODEX_BACKEND 기본값이 app_server 가 아니다"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
@@ -47,7 +49,7 @@ for doc in request design implementation approach; do printf '# %s\n' "$doc" > "
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 REVIEW_LOOP=".claude/skills/feature/scripts/impl-review-loop.sh"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 SCHEMA=".claude/skills/feature/schemas/impl-review.schema.json"
 WORKER_SCHEMA_FILE=".claude/skills/feature/schemas/worker-result.schema.json"
 export FAKE_LOG="$TMP/calls.log" FAKE_STATE="$TMP/state" MOCK_LOG="$TMP/calls.log" FEATURE_LIVE_TEE=1
@@ -72,12 +74,12 @@ reset_case() {
   rm -rf .agent-work/.session-* .agent-work/usage.jsonl .agent-work/cli-anomalies.jsonl .agent-work/codex-app-server "$TMP/side"; mkdir -p "$TMP/side"
 }
 ro_call() { # key out [prompt]
-  ( set -e; source "$CFG"; run_readonly_json_role REVIEWER "$1" "smoke-$1" "$SCHEMA" "$2" "${3:-prompt}" "" )
+  ( set -e; source "$LOADER"; run_readonly_json_role REVIEWER "$1" "smoke-$1" "$SCHEMA" "$2" "${3:-prompt}" "" )
 }
 edit_call() { # ROLE key raw [schema out] → run_edit_role 의 반환값
-  ( source "$CFG"; run_edit_role "$1" "$2" "smoke-$2" "$3" "prompt" "" "${4:-}" "${5:-}" )
+  ( source "$LOADER"; run_edit_role "$1" "$2" "smoke-$2" "$3" "prompt" "" "${4:-}" "${5:-}" )
 }
-accept() { ( set -e; source "$CFG"; role_session_accept "$1" "$2" "smoke-accept" ); }
+accept() { ( set -e; source "$LOADER"; role_session_accept "$1" "$2" "smoke-accept" ); }
 rec() { printf '.agent-work/.session-%s.codex-turn.json' "$1"; }
 state_of() { jq -r '.state' "$(rec "$1")"; }
 code_of() { jq -r '.outcome.code // ""' "$(rec "$1")"; }
@@ -298,13 +300,13 @@ pass "C4: PREPARED/THREAD_READY(모델 0회 확정)는 이어 가고 SEND_UNCONF
 
 # ===== C5: 결과를 남기고 Shell 이 죽은 경우 — 읽기 전용은 입력 지문이 같을 때만 새 turn 없이 수용, 편집 역할·다른 입력은 멈춘다 =====
 reset_case
-( source "$CFG"; codex_app_invoke REVIEWER readonly c5 smoke-c5 "$SCHEMA" "$TMP/side/c5.json" "prompt" ) >/dev/null 2>&1 || fail "C5: 준비 실패"
+( source "$LOADER"; codex_app_invoke REVIEWER readonly c5 smoke-c5 "$SCHEMA" "$TMP/side/c5.json" "prompt" ) >/dev/null 2>&1 || fail "C5: 준비 실패"
 [ "$(state_of c5)" = RESULT_READY ] && [ ! -f "$TMP/side/c5.json" ] || fail "C5: 준비 상태 불일치"
 ro_call c5 "$TMP/side/c5.json" "another prompt" > "$TMP/c5.log" 2>&1 && fail "C5: 다른 프롬프트인데 저장된 결과를 썼다"
 expect_fail C5 "$TMP/c5.log" CODEX_TURN_RESULT_UNCONSUMED
 ro_call c5 "$TMP/side/c5.json" > "$TMP/c5b.log" 2>&1 || { cat "$TMP/c5b.log"; fail "C5: 같은 입력의 결과 재사용 실패"; }
 [ "$(turns)" -eq 1 ] && [ "$(grep -c . .agent-work/usage.jsonl)" -eq 1 ] && [ "$(state_of c5)" = CONSUMED ] || fail "C5: 재사용이 새 turn·중복 usage 행을 만들었다"
-( source "$CFG"; codex_app_invoke WORKER edit c5w smoke-c5w "$WORKER_SCHEMA_FILE" "$TMP/side/c5w.log" "prompt" ) >/dev/null 2>&1 || fail "C5: 편집 준비 실패"
+( source "$LOADER"; codex_app_invoke WORKER edit c5w smoke-c5w "$WORKER_SCHEMA_FILE" "$TMP/side/c5w.log" "prompt" ) >/dev/null 2>&1 || fail "C5: 편집 준비 실패"
 edit_call WORKER c5w "$TMP/side/c5w.log" "$WORKER_SCHEMA_FILE" "$TMP/side/c5w-result.json" > "$TMP/c5w.log" 2>&1 && fail "C5: 편집 역할의 미소비 결과 위에서 진행됨"
 expect_fail C5 "$TMP/c5w.log" CODEX_TURN_RESULT_UNCONSUMED
 [ "$(turns)" -eq 2 ] || fail "C5: 편집 역할 재실행이 turn 을 보냈다"
@@ -324,7 +326,7 @@ pass "C6: 미수용 재개 응답 → SESSION_RESUME_UNCERTAIN, 호출자가 수
 # ===== C7: 호출마다 key 가 바뀌는 역할(합의 루프의 검증자)도 같은 호출 지점의 불명 기록 위에서는 다시 보내지 않는다 =====
 reset_case
 val_call() { # key out [prompt] — consensus-loop 과 같이 key 는 호출마다 고유, label 은 호출 지점마다 고정
-  ( set -e; source "$CFG"; run_readonly_json_role VALIDATOR "$1" "design-validator-round-01" "$SCHEMA" "$2" "${3:-prompt}" "" )
+  ( set -e; source "$LOADER"; run_readonly_json_role VALIDATOR "$1" "design-validator-round-01" "$SCHEMA" "$2" "${3:-prompt}" "" )
 }
 FAKE_SCENARIO=crash_before_turn_response val_call validator-design-round-01-aaaa "$TMP/side/c7.json" >/dev/null 2>&1 && fail "C7: 죽은 호출이 성공"
 [ "$(state_of validator-design-round-01-aaaa)" = UNKNOWN ] || fail "C7: 준비 상태 불일치"
@@ -401,7 +403,7 @@ pass "B1: legacy_exec 원장·marker / claude CLI / native Agent 세션 → App 
 # ===== B2: App Server 세션 → legacy_exec 로 바꿔도 잇지 않는다, 원장 설정 변경도 자동 fresh 없음 =====
 reset_case
 ro_call b2 "$TMP/side/b2a.json" >/dev/null 2>&1 && accept REVIEWER b2 || fail "B2: 준비 실패"
-( set -e; source "$CFG"; CODEX_BACKEND=legacy_exec; run_readonly_json_role REVIEWER b2 smoke-b2 "$SCHEMA" "$TMP/side/b2b.json" prompt "" ) > "$TMP/b2.log" 2>&1 && fail "B2: App Server 세션을 codex exec 로 이었다"
+( set -e; source "$LOADER"; CODEX_BACKEND=legacy_exec; run_readonly_json_role REVIEWER b2 smoke-b2 "$SCHEMA" "$TMP/side/b2b.json" prompt "" ) > "$TMP/b2.log" 2>&1 && fail "B2: App Server 세션을 codex exec 로 이었다"
 expect_fail B2 "$TMP/b2.log" SESSION_BACKEND_MISMATCH
 [ "$(execs)" -eq 0 ] || fail "B2: codex exec 가 호출됨"
 before="$(turns)"; cp .agent-work/.session-b2.codex.json "$TMP/b2-ledger.json"
@@ -416,7 +418,7 @@ pass "B2: App Server 원장 → legacy_exec 금지(exec 0회), 모델·effort·r
 # ===== B3: Feature Worker 저널이 codex exec 로 시작된 피처는 App Server 로 옮겨 가지 않는다 =====
 reset_case
 ( set -e
-  source "$CFG"
+  source "$LOADER"
   SKILL_DIR="$TMP/repo/.claude/skills/feature"; WORKER_SCHEMA="$SKILL_DIR/schemas/worker-result.schema.json"
   log() { echo "$*"; }; env_error() { echo "[ENV] $*" >&2; exit 1; }
   stop_need_user() { echo "[STOP] $1 $2" >&2; exit 2; }; stop_need_docs() { exit 3; }
@@ -435,18 +437,18 @@ pass "B3: codex exec 로 시작한 Feature Worker 저널 → WORKER_SESSION_MISM
 reset_case
 ro_call i1 "$TMP/side/i1.json" >/dev/null 2>&1 && accept REVIEWER i1 || fail "I1: 준비 실패"
 rm -rf "$TMP/repo2"; cp -R "$TMP/repo" "$TMP/repo2"; rm -rf "$TMP/repo2/.agent-work/.session-"* "$TMP/repo2/.agent-work/codex-app-server"
-( cd "$TMP/repo2" && set -e && source .claude/skills/feature/config.sh && run_readonly_json_role REVIEWER i1 smoke-i1 "$SCHEMA" "$TMP/side/i1-repo2.json" prompt "" ) > "$TMP/i1.log" 2>&1 || { cat "$TMP/i1.log"; fail "I1: 다른 루트의 호출 실패"; }
+( cd "$TMP/repo2" && set -e && source .claude/skills/feature/scripts/lib/bootstrap.sh && run_readonly_json_role REVIEWER i1 smoke-i1 "$SCHEMA" "$TMP/side/i1-repo2.json" prompt "" ) > "$TMP/i1.log" 2>&1 || { cat "$TMP/i1.log"; fail "I1: 다른 루트의 호출 실패"; }
 grep '^rpc thread/start ' "$FAKE_LOG" | tail -1 | grep -q "cwd=${ROOT}2\$" || fail "I1: 다른 루트의 호출이 자기 루트를 cwd 로 쓰지 않음: $(grep '^rpc thread/start' "$FAKE_LOG" | tail -1)"
 [ "$(jq -r .project_root "$TMP/repo2/.agent-work/.session-i1.codex-turn.json")" = "${ROOT}2" ] && [ "$(jq -r .thread_id "$TMP/repo2/.agent-work/.session-i1.codex-turn.json")" != "$(jq -r .thread_id .agent-work/.session-i1.codex.json)" ] \
   || fail "I1: 두 루트가 같은 thread·기록을 공유한다"
 cp .agent-work/.session-i1.codex.json "$TMP/repo2/.agent-work/.session-i1.codex.json"
-( cd "$TMP/repo2" && set -e && source .claude/skills/feature/config.sh && run_readonly_json_role REVIEWER i1 smoke-i1 "$SCHEMA" "$TMP/side/i1-repo2b.json" prompt "" ) > "$TMP/i1.log" 2>&1 && fail "I1: 다른 루트의 원장으로 resume 됨"
+( cd "$TMP/repo2" && set -e && source .claude/skills/feature/scripts/lib/bootstrap.sh && run_readonly_json_role REVIEWER i1 smoke-i1 "$SCHEMA" "$TMP/side/i1-repo2b.json" prompt "" ) > "$TMP/i1.log" 2>&1 && fail "I1: 다른 루트의 원장으로 resume 됨"
 expect_fail I1 "$TMP/i1.log" SESSION_LEDGER_MISMATCH
 # 같은 저장소의 git worktree(Git common dir 공유): 러너와 같이 FEATURE_PROJECT_ROOT 로 worktree 를 넘긴다 — 기록 루트는 원본이 아니라 현재 worktree 다.
 git worktree add -q "$TMP/wt" -b smoke-wt >/dev/null 2>&1 || fail "I1: git worktree 생성 실패"
 WT="$(cd "$TMP/wt" && pwd)"
 mkdir -p "$WT/.claude/hooks" "$WT/.agent-work" && cp .claude/hooks/core_rules.md "$WT/.claude/hooks/"
-( cd "$WT" && set -e && FEATURE_PROJECT_ROOT="$WT" && export FEATURE_PROJECT_ROOT && source "$CFG" && run_readonly_json_role REVIEWER i1 smoke-i1 "$ROOT/$SCHEMA" "$TMP/side/i1-wt.json" prompt "" ) > "$TMP/i1.log" 2>&1 || { cat "$TMP/i1.log"; fail "I1: worktree 의 호출 실패"; }
+( cd "$WT" && set -e && FEATURE_PROJECT_ROOT="$WT" && export FEATURE_PROJECT_ROOT && source "$LOADER" && run_readonly_json_role REVIEWER i1 smoke-i1 "$ROOT/$SCHEMA" "$TMP/side/i1-wt.json" prompt "" ) > "$TMP/i1.log" 2>&1 || { cat "$TMP/i1.log"; fail "I1: worktree 의 호출 실패"; }
 grep '^rpc thread/start ' "$FAKE_LOG" | tail -1 | grep -q "cwd=$WT\$" && grep '^rpc turn/start ' "$FAKE_LOG" | tail -1 | grep -q "cwd=$WT " || fail "I1: worktree 호출의 thread/turn cwd 가 worktree 가 아님"
 [ "$(jq -r .project_root "$WT/.agent-work/.session-i1.codex-turn.json")" = "$WT" ] && [ "$(jq -r .thread_id "$WT/.agent-work/.session-i1.codex-turn.json")" != "$(jq -r .thread_id .agent-work/.session-i1.codex.json)" ] \
   || fail "I1: worktree 가 원본 저장소의 세션을 이어 썼다"
@@ -465,8 +467,8 @@ cp "$ICFG" "$TMP/i2-config.keep"
 bash "$PROJECT_SRC/install.sh" "$INST" > "$TMP/i2b.log" 2>&1 || { tail -20 "$TMP/i2b.log"; fail "I2: 재설치 실패"; }
 cmp -s "$ICFG" "$TMP/i2-config.keep" || fail "I2: 재설치가 기존 config.sh 를 바꿨다"
 grep -q 'CODEX_BACKEND 줄이 없습니다' "$TMP/i2b.log" && grep -q 'legacy_exec' "$TMP/i2b.log" || fail "I2: 명시적 전환 안내가 없다"
-[ "$( cd "$INST" && source "$ICFG" && role_backend REVIEWER )" = codex_cli ] || fail "I2: CODEX_BACKEND 줄이 없는 기존 설정이 조용히 새 backend 로 취급됨"
-sed -i.bak 's/^FEATURE_RUNTIME_CONTRACT_VERSION=.*/FEATURE_RUNTIME_CONTRACT_VERSION=2/' "$ICFG" && rm -f "$ICFG.bak"
+[ "$( cd "$INST" && source "$INST/.claude/skills/feature/scripts/lib/bootstrap.sh" && role_backend REVIEWER )" = codex_cli ] || fail "I2: CODEX_BACKEND 줄이 없는 기존 설정이 조용히 새 backend 로 취급됨"
+printf 'FEATURE_RUNTIME_CONTRACT_VERSION=2\n' >> "$ICFG"   # 구 설정: 런타임 소유 줄(분리 이전의 런타임 계약 표식)이 남은 config.sh
 cp "$ICFG" "$TMP/i2-config.old"
 bash "$PROJECT_SRC/install.sh" "$INST" > "$TMP/i2c.log" 2>&1 && fail "I2: 옛 config.sh 본문(런타임 계약 2) 위에 새 스크립트가 설치됨"
 grep -q '혼합 설치 방지' "$TMP/i2c.log" && cmp -s "$ICFG" "$TMP/i2-config.old" || fail "I2: 혼합 설치 거부·config 보존이 아님"
@@ -524,7 +526,7 @@ reset_case
 FAKE_SCENARIO=no_usage ro_call u2 "$TMP/side/u2a.json" >/dev/null 2>&1 && accept REVIEWER u2 || fail "U2: 요약 준비 실패"
 ro_call u2 "$TMP/side/u2b.json" >/dev/null 2>&1 || fail "U2: 요약용 재개 호출 실패"
 printf '{"schema_version":4,"invocation_id":"legacy-1","label":"l","role":"VALIDATOR","cli":"codex","model":"gpt-6-astra","cost_usd":null,"estimated_cost_usd":0.5,"usage_observation_status":"complete","source":"codex-events","num_turns":1,"cache_read":0,"output":1}\n' >> .agent-work/usage.jsonl
-( source "$CFG"; usage_summary ) > "$TMP/u2-summary.json" || fail "U2: usage_summary 실패"
+( source "$LOADER"; usage_summary ) > "$TMP/u2-summary.json" || fail "U2: usage_summary 실패"
 jq -e '.invocations==3 and .by_source["codex-app-server"].invocations==2 and .by_source["codex-events"].invocations==1 and .by_cli.codex.invocations==3
   and .estimated_cost_usd==0.5 and .cost_unknown_invocations==2 and .usage_unobserved_invocations==2' "$TMP/u2-summary.json" >/dev/null || fail "U2: 두 backend 합산 요약 불일치: $(jq -c '{invocations,estimated_cost_usd,cost_unknown_invocations,usage_unobserved_invocations,by_source:(.by_source|map_values(.invocations))}' "$TMP/u2-summary.json")"
 pass "U2: 이벤트 없음·필드 손상·기준 없음 → 토큰·비용 null(unknown), 컨텍스트는 마지막 관측 이벤트에서만(앞선 값 잔존 없음), usage_summary 가 exec 행과 App Server 행을 함께 집계"
@@ -567,7 +569,7 @@ pass "U3: 재개 직후 직전 turn 의 사용량 재전송(0·1·2회, 재개 �
 reset_case
 rm -rf .agent-work/reviews/impl-attempt-* .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/feature-scope.lock.json
 git checkout -q -- src/u01.txt
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
 echo "worker edit" >> src/u01.txt
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > .agent-work/worker-result.json
@@ -650,7 +652,7 @@ snap_fail_post_index() {
   compute_index_fingerprint() { echo x >> "$TMP/side/snapcount"; [ "$(grep -c . "$TMP/side/snapcount")" -le 1 ] || return 1; orig_compute_index_fingerprint; }
 }
 ro_call_hooked() { # hook key out
-  ( set -e; source "$CFG"; "$1"; run_readonly_json_role REVIEWER "$2" "smoke-$2" "$SCHEMA" "$3" "prompt" "" )
+  ( set -e; source "$LOADER"; "$1"; run_readonly_json_role REVIEWER "$2" "smoke-$2" "$SCHEMA" "$3" "prompt" "" )
 }
 for hook in snap_fail_pre_tree snap_fail_pre_index; do
   reset_case
@@ -667,7 +669,7 @@ for hook in snap_fail_post_tree snap_fail_post_index; do
 done
 # 호출 전 값이 없는 기록(예전 기록·손상)의 완료 결과를 재사용할 때도 검사를 건너뛰지 않는다
 reset_case
-( source "$CFG"; codex_app_invoke REVIEWER readonly p5r smoke-p5r "$SCHEMA" "$TMP/side/p5r.json" "prompt" ) >/dev/null 2>&1 || fail "P5: 준비 실패"
+( source "$LOADER"; codex_app_invoke REVIEWER readonly p5r smoke-p5r "$SCHEMA" "$TMP/side/p5r.json" "prompt" ) >/dev/null 2>&1 || fail "P5: 준비 실패"
 jq 'del(.pre_index)' "$(rec p5r)" > "$TMP/side/p5r.rec" && cp "$TMP/side/p5r.rec" "$(rec p5r)"
 ro_call p5r "$TMP/side/p5r.json" > "$TMP/p5.log" 2>&1 && fail "P5: index 기준이 없는 기록의 결과가 수용됨"
 expect_fail P5 "$TMP/p5.log" CODEX_APP_SERVER_READONLY_SNAPSHOT_FAILED
@@ -682,7 +684,7 @@ FAKE_SCENARIO=crash_before_turn_response FAKE_APP_EDIT_CMD='echo "partial edit" 
 accept WORKER c8 > "$TMP/c8.log" 2>&1 && fail "C8: 불명 상태인데 세션 수용이 성공(exit 0)했다"
 expect_fail C8 "$TMP/c8.log" CODEX_TURN_UNCERTAIN
 [ ! -f .agent-work/.session-c8.codex.json ] && [ "$(state_of c8)" = UNKNOWN ] || fail "C8: 거부된 수용이 원장·기록을 바꿨다"
-( source "$CFG"; codex_app_stop_if_uncertain c8 "smoke" ) > "$TMP/c8.log" 2>&1 && fail "C8: 불명 편집 기록이 있는데 다음 단계로 가는 판정이 통과됨"
+( source "$LOADER"; codex_app_stop_if_uncertain c8 "smoke" ) > "$TMP/c8.log" 2>&1 && fail "C8: 불명 편집 기록이 있는데 다음 단계로 가는 판정이 통과됨"
 expect_fail C8 "$TMP/c8.log" CODEX_TURN_UNCERTAIN "status c8"
 git checkout -q -- src/u01.txt
 # 이미 확정된 세션 위의 재개 호출이 불명으로 끝난 경우: 원장은 직전 수용 그대로다
@@ -697,7 +699,7 @@ cmp -s .agent-work/.session-c8.codex.json "$TMP/side/c8-ledger.keep" && [ ! -f .
 reset_case; printf '%s' "$WORKER_DONE" > "$FAKE_STATE/reply-default.txt"
 FAKE_SCENARIO=turn_failed edit_call WORKER c8f "$TMP/side/c8f.log" "$WORKER_SCHEMA_FILE" "$TMP/side/c8f-result.json" > "$TMP/c8.log" 2>&1; rc=$?
 [ "$rc" -eq 20 ] && [ "$(state_of c8f)" = TURN_FAILED ] && [ -f .agent-work/.session-c8f.codex.json.new ] || { cat "$TMP/c8.log"; fail "C8: 확인된 실패의 준비 상태 불일치(rc=$rc)"; }
-( source "$CFG"; codex_app_stop_if_uncertain c8f "smoke" ) || fail "C8: 완료가 확인된 실패를 불명으로 판정했다"
+( source "$LOADER"; codex_app_stop_if_uncertain c8f "smoke" ) || fail "C8: 완료가 확인된 실패를 불명으로 판정했다"
 accept WORKER c8f > "$TMP/c8.log" 2>&1 || { cat "$TMP/c8.log"; fail "C8: 완료가 확인된 실패의 수용이 거부됨"; }
 [ -f .agent-work/.session-c8f.codex.json ] && jq -e '.accepted_by_caller==true and .state=="TURN_FAILED"' "$(rec c8f)" >/dev/null || fail "C8: 확인된 실패의 수용 기록 불일치"
 pass "C8: 불명(UNKNOWN) 편집 호출 — 원장 스테이징 없음·수용 거부(exit≠0)·확정 원장 불변, 완료가 확인된 실패(TURN_FAILED)의 수용은 그대로"
@@ -708,7 +710,7 @@ review_fixture() {
   rm -rf .agent-work/reviews/impl-attempt-* .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/feature-scope.lock.json
   : > .agent-work/decisions.md
   git checkout -q -- src/u01.txt
-  ( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+  ( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
   echo "worker edit" >> src/u01.txt
   cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
   printf '%s\n' "$WORKER_DONE" > .agent-work/worker-result.json
@@ -749,7 +751,7 @@ pass "L3: Codex 수정자 TURN_FAILED + 범위 안 변경 → CLI_EXIT_STATUS_MI
 
 # ===== D1: 합의 루프 — Codex 디자이너가 불명으로 끝나면 문서가 바뀌었어도 검증자로 넘기지 않는다(재실행도 모델 0회) =====
 reset_case
-VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+VALIDATOR_CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 cp "$CFG" "$TMP/side-config.keep"
 sed -i.bak 's/^DESIGNER_CLI=.*/DESIGNER_CLI="codex"/; s/^DESIGN_REVISION_MODEL=.*/DESIGN_REVISION_MODEL="gpt-6-astra"/; s/^VALIDATOR_PROFILE=.*/VALIDATOR_PROFILE="none"/' "$CFG" && rm -f "$CFG.bak"
 rm -f .agent-work/consensus-design.json .agent-work/reviews/validator-design-*
@@ -868,7 +870,7 @@ cp "$TMP/worker_guard.keep" .codex/hooks/worker_guard.sh
 # 프로젝트에 맞게 고쳐 쓴 가드: 사용자가 그 지문을 등록하면 통과하고, 등록하지 않으면(또는 다른 지문을 등록하면) 통과하지 못한다
 reset_case; printf '%s' "$WORKER_DONE" > "$FAKE_STATE/reply-default.txt"
 printf '\n# project-specific rule placeholder\n' >> .codex/hooks/worker_guard.sh
-custom_sha="$( source "$CFG"; sha256_stdin < .codex/hooks/worker_guard.sh )"
+custom_sha="$( source "$LOADER"; sha256_stdin < .codex/hooks/worker_guard.sh )"
 CODEX_APP_GUARD_REVIEWED_SHA256="0000000000000000000000000000000000000000000000000000000000000000 not-a-hash" g_call WORKER g3 > "$TMP/g3.log" 2>&1; rc=$?
 [ "$rc" -eq 10 ] && [ "$(jq -r '.hook_gate.reason' "$(rec g3)")" = script_unreviewed ] || { cat "$TMP/g3.log"; cp "$TMP/worker_guard.keep" .codex/hooks/worker_guard.sh; fail "G3: 다른 지문을 등록했는데 고쳐 쓴 가드가 통과됨(rc=$rc)"; }
 CODEX_APP_GUARD_REVIEWED_SHA256="$custom_sha" g_call WORKER g3 > "$TMP/g3.log" 2>&1; rc=$?
@@ -877,7 +879,7 @@ cp "$TMP/worker_guard.keep" .codex/hooks/worker_guard.sh
   || { cat "$TMP/g3.log"; fail "G3: 사용자가 지문을 등록한 가드인데 실행되지 않음(rc=$rc, $(jq -c '.required_hook.reviewed_sha256' "$(rec g3)"))"; }
 # 저장소가 배포하는 실제 가드의 지문은 게이트의 상수와 같다(가드를 고치고 상수를 안 고치면 새 설치의 편집 역할이 전부 멈춘다)
 shipped_sha="$(grep -E '^CODEX_APP_REQUIRED_HOOK_SHA256=' .claude/skills/feature/scripts/codex-app-server.sh | cut -d'"' -f2)"
-[ -n "$shipped_sha" ] && [ "$shipped_sha" = "$( source "$CFG"; sha256_stdin < "$PROJECT_SRC/.codex/hooks/worker_guard.sh" )" ] \
+[ -n "$shipped_sha" ] && [ "$shipped_sha" = "$( source "$LOADER"; sha256_stdin < "$PROJECT_SRC/.codex/hooks/worker_guard.sh" )" ] \
   || fail "G3: 배포 가드(.codex/hooks/worker_guard.sh)의 sha256 이 codex-app-server.sh 의 CODEX_APP_REQUIRED_HOOK_SHA256($shipped_sha)과 다르다 — 가드를 고쳤으면 상수도 고친다"
 # 런타임에 가드를 실행하는 코드가 다시 들어오지 않았다(자식 프로세스는 codex app-server 하나뿐이다)
 ! grep -q 'spawnSync\|execSync\|execFileSync' .claude/skills/feature/scripts/codex-app-server.mjs || fail "G3: 런타임에 동기 자식 프로세스 실행이 있다 — 게이트는 가드 스크립트를 실행하지 않는다"
@@ -891,7 +893,7 @@ FAKE_SCHEMA_DROP=hooks/list ro_call g3ro "$TMP/side/g3ro.json" > "$TMP/g3.log" 2
 rm -f "$PREFLIGHT_CACHE"
 # 기록에 사양이 없다(사양을 만들지 못한 Shell) — 건너뛰지 않고 멈춘다
 reset_case
-( source "$CFG"; codex_app_required_hook_json() { return 1; }; run_edit_role WORKER g3 smoke-g3 "$TMP/side/g3.log" prompt "" "$WORKER_SCHEMA_FILE" "$TMP/side/g3-result.json" ) > "$TMP/g3.log" 2>&1; rc=$?
+( source "$LOADER"; codex_app_required_hook_json() { return 1; }; run_edit_role WORKER g3 smoke-g3 "$TMP/side/g3.log" prompt "" "$WORKER_SCHEMA_FILE" "$TMP/side/g3-result.json" ) > "$TMP/g3.log" 2>&1; rc=$?
 [ "$rc" -eq 10 ] && [ "$(state_of g3)" = FAILED_BEFORE_SEND ] && [ "$(jq -r '.hook_gate.reason' "$(rec g3)")" = spec_missing ] && [ "$(spawns)" -eq 0 ] || { cat "$TMP/g3.log"; fail "G3: 사양 없는 기록이 게이트를 건너뛰었다(rc=$rc, spawn $(spawns))"; }
 # 게이트 없는 런타임과 섞인 설치 — 기록도 서버도 만들지 않는다
 reset_case; RT=".claude/skills/feature/scripts/codex-app-server.mjs"; cp "$RT" "$TMP/runtime.keep"
@@ -909,7 +911,7 @@ reset_case
 git worktree add -q "$TMP/wt-g4" -b smoke-wt-g4 >/dev/null 2>&1 || fail "G4: git worktree 생성 실패"
 WTG="$(cd "$TMP/wt-g4" && pwd)"
 mkdir -p "$WTG/.claude/hooks" "$WTG/.agent-work" "$WTG/.codex/hooks" && cp .claude/hooks/core_rules.md "$WTG/.claude/hooks/" && cp .codex/hooks.json "$WTG/.codex/" && cp .codex/hooks/worker_guard.sh "$WTG/.codex/hooks/"
-wt_call() { ( cd "$WTG" && FEATURE_PROJECT_ROOT="$WTG" && export FEATURE_PROJECT_ROOT && source "$CFG" && run_edit_role WORKER "$1" "smoke-$1" "$TMP/side/$1.log" prompt "" "$ROOT/$WORKER_SCHEMA_FILE" "$TMP/side/$1-result.json" ); }
+wt_call() { ( cd "$WTG" && FEATURE_PROJECT_ROOT="$WTG" && export FEATURE_PROJECT_ROOT && source "$LOADER" && run_edit_role WORKER "$1" "smoke-$1" "$TMP/side/$1.log" prompt "" "$ROOT/$WORKER_SCHEMA_FILE" "$TMP/side/$1-result.json" ); }
 printf '%s' "$WORKER_DONE" > "$FAKE_STATE/reply-default.txt"
 FAKE_HOOK_SOURCE="$ROOT/.codex/hooks.json" wt_call g4 > "$TMP/g4.log" 2>&1 || { cat "$TMP/g4.log"; fail "G4: 원본 저장소의 hooks.json 에서 온 신뢰된 훅인데 worktree 의 워커가 막혔다"; }
 jq -e '.hook_gate.ok==true and (.required_hook.source_paths | length)==2' "$WTG/.agent-work/.session-g4.codex-turn.json" >/dev/null || fail "G4: worktree 의 사양에 원본 저장소 경로가 없음: $(jq -c '.required_hook' "$WTG/.agent-work/.session-g4.codex-turn.json")"
@@ -945,7 +947,7 @@ done
 for leaked in "$$" 1; do
   FEATURE_CONFIG_QUERY_ONLY_PID="$leaked" bash "$REVIEW_LOOP" > "$TMP/g5b.out" 2>&1 && fail "G5b: 환경의 표식($leaked)으로 리뷰 루프가 가드를 지났다"
   grep -q 'CHANGE_ME 항목을 먼저' "$TMP/g5b.out" || { cat "$TMP/g5b.out"; fail "G5b: 리뷰 루프가 가드가 아닌 다른 이유로 멈췄다(표식 $leaked)"; }
-  FEATURE_CONFIG_QUERY_ONLY_PID="$leaked" bash -c 'source "$1"' _ "$CFG" > "$TMP/g5b.out" 2>&1 && fail "G5b: 환경의 표식($leaked)으로 config.sh source 가 가드를 지났다"
+  FEATURE_CONFIG_QUERY_ONLY_PID="$leaked" bash -c 'source "$1"' _ "$LOADER" > "$TMP/g5b.out" 2>&1 && fail "G5b: 환경의 표식($leaked)으로 config.sh source 가 가드를 지났다"
 done
 # 표식을 자기 pid 로 심어도(BASH_ENV — bash 가 스크립트를 시작할 때 읽는 파일) 실행 중인 스크립트가 조회 명령이 아니면 예외를 얻지 못한다
 printf 'FEATURE_CONFIG_QUERY_ONLY_PID=$$\n' > "$TMP/g5b-bashenv.sh"
@@ -954,7 +956,7 @@ for target in "$REVIEW_LOOP" ".claude/skills/feature/scripts/consensus-loop.sh" 
   BASH_ENV="$TMP/g5b-bashenv.sh" bash "$target" > "$TMP/g5b.out" 2>&1 && fail "G5b: BASH_ENV 로 심은 표식으로 $target 가 가드를 지났다"
   grep -q 'CHANGE_ME 항목을 먼저' "$TMP/g5b.out" || { cat "$TMP/g5b.out"; fail "G5b: $target 가 가드가 아닌 다른 이유로 멈췄다(BASH_ENV)"; }
 done
-BASH_ENV="$TMP/g5b-bashenv.sh" bash -c 'source "$1"' _ "$CFG" > "$TMP/g5b.out" 2>&1 && fail "G5b: BASH_ENV 로 심은 표식으로 config.sh source 가 가드를 지났다"
+BASH_ENV="$TMP/g5b-bashenv.sh" bash -c 'source "$1"' _ "$LOADER" > "$TMP/g5b.out" 2>&1 && fail "G5b: BASH_ENV 로 심은 표식으로 config.sh source 가 가드를 지났다"
 for verb in reconcile discard; do
   BASH_ENV="$TMP/g5b-bashenv.sh" bash "$ROOT/.claude/skills/feature/scripts/codex-app-server.sh" "$verb" g5b > "$TMP/g5b.out" 2>&1 && fail "G5b: BASH_ENV 로 심은 표식으로 $verb 가 실행됐다"
   grep -q 'CHANGE_ME 항목을 먼저' "$TMP/g5b.out" || { cat "$TMP/g5b.out"; fail "G5b: $verb 가 가드가 아닌 다른 이유로 멈췄다(BASH_ENV)"; }
@@ -1006,7 +1008,7 @@ for target in .codex/hooks/worker_guard.sh .codex/hooks.json; do
     || { cat "$TMP/g7.log"; fail "G7($target): turn 이 가드 파일을 바꿨는데 결과가 쓰였다(rc=$rc, $(state_of g7) $(code_of g7))"; }
   # 훅 정의는 작업 루트 표기와 원본 저장소(물리 경로) 표기로 두 번 잡힐 수 있다 — 바뀐 것이 그 파일뿐인지만 본다
   jq -e --arg t "/$target" '(.hook_files.changed | length) >= 1 and all(.hook_files.changed[]; endswith($t))' "$(rec g7)" >/dev/null || fail "G7($target): 바뀐 파일 기록 불일치: $(jq -c '.hook_files.changed' "$(rec g7)")"
-  ( source "$CFG"; codex_app_stop_if_uncertain g7 "smoke" ) > "$TMP/g7.log" 2>&1 && fail "G7($target): 가드가 바뀐 호출인데 다음 단계로 가는 판정이 통과됨"
+  ( source "$LOADER"; codex_app_stop_if_uncertain g7 "smoke" ) > "$TMP/g7.log" 2>&1 && fail "G7($target): 가드가 바뀐 호출인데 다음 단계로 가는 판정이 통과됨"
   expect_fail "G7($target)" "$TMP/g7.log" CODEX_APP_SERVER_HOOK_FILES_CHANGED "discard g7"
   accept WORKER g7 > "$TMP/g7.log" 2>&1 && fail "G7($target): 가드가 바뀐 호출의 세션 수용이 성공했다"
   expect_fail "G7($target)" "$TMP/g7.log" CODEX_APP_SERVER_HOOK_FILES_CHANGED
@@ -1083,7 +1085,7 @@ reset_case
 git worktree add -q "$TMP/wt2" -b smoke-wt2 >/dev/null 2>&1 || fail "X2: git worktree 생성 실패"
 WT2="$(cd "$TMP/wt2" && pwd)"
 mkdir -p "$WT2/.claude/hooks" "$WT2/.agent-work" && cp .claude/hooks/core_rules.md "$WT2/.claude/hooks/"
-( cd "$WT2" && set -e && FEATURE_PROJECT_ROOT="$WT2" && export FEATURE_PROJECT_ROOT && source "$CFG" && FAKE_SCENARIO=crash_before_turn_response run_readonly_json_role REVIEWER x2 smoke-x2 "$ROOT/$SCHEMA" "$TMP/side/x2.json" prompt "" ) >/dev/null 2>&1 && fail "X2: 준비 실패"
+( cd "$WT2" && set -e && FEATURE_PROJECT_ROOT="$WT2" && export FEATURE_PROJECT_ROOT && source "$LOADER" && FAKE_SCENARIO=crash_before_turn_response run_readonly_json_role REVIEWER x2 smoke-x2 "$ROOT/$SCHEMA" "$TMP/side/x2.json" prompt "" ) >/dev/null 2>&1 && fail "X2: 준비 실패"
 [ "$(jq -r .state "$WT2/.agent-work/.session-x2.codex-turn.json")" = UNKNOWN ] && [ ! -f "$(rec x2)" ] || fail "X2: 준비 상태 불일치"
 ( cd "$WT2" && with_timeout 30 bash "$CAS_ABS" status x2 ) > "$TMP/x2.out" 2> "$TMP/x2.err"; rc=$?
 [ "$rc" -eq 0 ] && grep -q '^x2  state=UNKNOWN' "$TMP/x2.out" && grep -q "record=.agent-work/.session-x2.codex-turn.json" "$TMP/x2.out" || { cat "$TMP/x2.err" "$TMP/x2.out"; fail "X2: worktree 에서 실행한 status 가 그 worktree 의 기록을 보지 않음(rc=$rc)"; }

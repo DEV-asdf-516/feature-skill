@@ -49,6 +49,7 @@ chmod +x "$TMP/bin/fake-codex-worker" "$TMP/bin/stub-claude"
 export FAKE_WORKER_LOG="$TMP/state/worker.log"
 
 CFG="$COPY/.claude/skills/feature/config.sh"
+RUNTIME_LIB="$COPY/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^WORKER_MODEL=.*|WORKER_MODEL=\"gpt-6-luna\"|; s|^WORKER_CLI=.*|WORKER_CLI=\"codex\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/fake-codex-worker\"|; s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/stub-claude\"|" "$CFG"
 grep -q "fake-codex-worker" "$CFG" || fail "사본 config.sh 에 가짜 워커 CLI 를 고정하지 못함"
 
@@ -63,7 +64,7 @@ run_harness() { # mode case → stdout 을 $TMP/state/<mode>.out 에, rc 반환
   [ ! -f "$COPY/.claude/ALLOW_REAL_LLM_REGRESSION" ] || fail "$mode: 승인 파일이 소모되지 않음"
   return $rc
 }
-in_cfg() { ( cd "$1" && source .claude/skills/feature/config.sh && "${@:2}" ); }   # 사례 temp 저장소의 production 헬퍼 실행
+in_cfg() { ( cd "$1" && source .claude/skills/feature/scripts/lib/bootstrap.sh && "${@:2}" ); }   # 사례 temp 저장소의 production 헬퍼 실행
 
 # ===== A: DOC_GAP → exit 2 + 유효한 provenance 위의 체크포인트 =====
 run_harness DOCGAP case-07-doc-gap-no-new-decision || fail "A: 하네스 exit $? — $TMP/state/DOCGAP.out"
@@ -75,8 +76,8 @@ grep -q 'NEED_USER (UNDECIDED)' "$T/run.log" || fail "A: run_worker 가 NEED_USE
 [ "$(jq -r '.gaps[0].tag' "$T/.agent-work/doc-gap-resume.json")" = "worker-gap=01-summary#1" ] || fail "A: gap tag 불일치: $(jq -c .gaps "$T/.agent-work/doc-gap-resume.json")"
 ck="$T/.agent-work/consensus-impl.json"
 [ "$(jq -r .next_step "$ck")" = PASS ] && [ "$(jq -r .target "$ck")" = impl ] || fail "A: consensus-impl.json 이 impl PASS 체크포인트가 아님"
-[ "$(jq -r .version "$ck")" = "$(grep -E '^CONSENSUS_CHECKPOINT_VERSION=' "$CFG" | cut -d= -f2)" ] || fail "A: 체크포인트 포맷 버전 불일치"
-[ "$(jq -r .contract_version "$ck")" = "$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2)" ] || fail "A: 체크포인트 계약 버전 불일치"
+[ "$(jq -r .version "$ck")" = "$(grep -E '^CONSENSUS_CHECKPOINT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2)" ] || fail "A: 체크포인트 포맷 버전 불일치"
+[ "$(jq -r .contract_version "$ck")" = "$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2)" ] || fail "A: 체크포인트 계약 버전 불일치"
 review="$(jq -r .review "$ck")"
 [ "$review" = ".agent-work/reviews/validator-impl-round-01.json" ] && [ "$(jq -r .verdict "$T/$review")" = PASS ] || fail "A: 체크포인트가 실제 PASS 리뷰를 가리키지 않음: $review"
 [ "$(jq -r .base_consensus_review "$T/.agent-work/doc-gap-resume.json")" = "$review" ] || fail "A: doc-gap 체크포인트의 base_consensus_review 가 consensus-impl.json 과 다름"

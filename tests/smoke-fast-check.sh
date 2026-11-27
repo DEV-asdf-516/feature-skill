@@ -44,6 +44,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"$TMP/bin/full-test\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"echo full-lint >> $TMP/calls.log\"|" "$CFG" && rm -f "$CFG.bak"
 printf '%s\n' '#!/usr/bin/env bash' 'echo full-test >> "$MOCK_LOG"' '[ ! -f "$MOCK_STATE/fail-full-test" ] || { rm -f "$MOCK_STATE/fail-full-test"; echo "full test failed"; exit 1; }' > "$TMP/bin/full-test"
 chmod +x "$TMP/bin/full-test"
@@ -104,8 +106,8 @@ printf '\n## 01\nunit 01 contract\n' >> .agent-work/implementation.md
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/a.txt","src/규칙.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 RUN=".claude/skills/feature/scripts/feature-run.sh"
-CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+CONTRACT="$(grep -E '^VALIDATOR_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1 MOCK_VALIDATOR_CONTRACT="$CONTRACT" MOCK_REVIEW_CONTRACT="$REVIEW_CONTRACT"
 mkdir -p "$MOCK_STATE"
 write_units() { # dir
@@ -387,7 +389,7 @@ reset_tree
 rc="$(run_runner)"; [ "$rc" -eq 0 ] || fail "G4: 픽스처 DONE 실패(exit $rc)"
 resume_at_verify; mode mutate
 rc="$(run_runner)"; expect_error G4 WORKTREE_MODIFIED had-approval
-( source "$CFG"; ! impl_approval_current ) 2>/dev/null || fail "G4: 검사가 코드를 바꾼 뒤에도 기존 승인이 현재 코드에 유효하다고 판정됨"
+( source "$LOADER"; ! impl_approval_current ) 2>/dev/null || fail "G4: 검사가 코드를 바꾼 뒤에도 기존 승인이 현재 코드에 유효하다고 판정됨"
 [ "$(calls full-test)" -eq 0 ] || fail "G4: 검사가 코드를 바꿨는데 verify 로 넘어감"
 mode default
 rc="$(run_runner)"
@@ -463,7 +465,7 @@ reset_tree; mode timeout-stubborn; set_timeout 1
 rc="$(run_runner)"; expect_error N TIMEOUT
 sleep 5   # 정리되지 않았다면 자식이 4초 시점에 src/a.txt 를 바꾼다
 grep -q 'late write by checker child' src/a.txt && fail "N: 타임아웃 뒤에도 검사 자식 프로세스가 살아남아 소스를 바꿈"
-[ "$( (source "$CFG"; snapshot_worktree_tree) 2>/dev/null )" = "$(last_record .tree_after)" ] || fail "N: 사후 스냅샷 이후 작업 트리가 바뀜(정리 전에 스냅샷함)"
+[ "$( (source "$LOADER"; snapshot_worktree_tree) 2>/dev/null )" = "$(last_record .tree_after)" ] || fail "N: 사후 스냅샷 이후 작업 트리가 바뀜(정리 전에 스냅샷함)"
 pass "N: 타임아웃 — 프로세스 그룹 단위로 TERM 을 무시하는 자식까지 정리한 뒤 사후 비교, 늦은 소스 변경 없음"
 
 # ===== 사례 O: 수정 턴 도중 러너 강제 종료 → 재실행은 범위 검사 없이 넘어가지 않는다 =====
@@ -589,7 +591,7 @@ rc="$(run_runner)"
 [ "$(seq_all)" = "worker|unit-test|check|reviewer|full-test|verify-fix|check|check-fix|check" ] || fail "L2: 호출 순서 불일치: $(seq_all)"
 [ "$(calls reviewer)" -eq 1 ] && [ "$(status)" != DONE ] || fail "L2: verify 수정이 만든 위반이 리뷰·DONE 으로 넘어감"
 jq -e '.test_retries==1 and .fast_check_retries==1' .agent-work/run-state.json >/dev/null || fail "L2: verify 한도와 검사 수정 한도가 따로 세어지지 않음: $(jq -c '{test_retries, fast_check_retries}' .agent-work/run-state.json)"
-( source "$CFG"; ! impl_approval_current ) 2>/dev/null || fail "L2: verify 수정 전의 승인이 여전히 유효하다고 판정됨"
+( source "$LOADER"; ! impl_approval_current ) 2>/dev/null || fail "L2: verify 수정 전의 승인이 여전히 유효하다고 판정됨"
 pass "L: verify 실패의 워커 수정 뒤에도 검사 → 새 attempt 리뷰 → 테스트, 수정이 만든 위반은 리뷰어 0회로 중단(한도는 verify 와 따로)"
 
 # ===== 사례 K: 혼합 설치 — fast-check.sh 없음 → 모델 호출 전 중단 =====

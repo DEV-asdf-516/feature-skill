@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================
 # Native Agent bridge — Shell ↔ 대화형 메인 Claude Code 세션의 네이티브 Agent 인계
-# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — config.sh 가 끝에서 읽는다. 단독 실행은 맨 아래 'redispatch'/'discard' 뿐이고, 그 진입은 프로세스당 한 번만 돈다)
+# 파일 경로: .claude/skills/feature/scripts/native-agent-bridge.sh   (source 전용 — 로더(scripts/lib/bootstrap.sh)가 읽는다. 단독 실행은 맨 아래 'redispatch'/'discard' 뿐이고, 그 진입은 프로세스당 한 번만 돈다)
 #
 # Shell 은 현재 대화형 세션의 Agent 도구를 직접 부를 수 없다. 그래서 claude_native 로 라우팅된 역할 호출은 두 번에 나뉜다:
 #   1차 실행  PREPARE  : 요청(requests/<id>.json) + 완전히 렌더링한 payload(requests/<id>.prompt.txt) + pending.json 을 원자적으로 쓰고
@@ -496,12 +496,12 @@ native_log_usage() { # role model label inv rc status
   local cap rates usage chk est='{"estimated_cost_usd":null,"assumptions":null}' basis=null
   cap="$(native_capture_file)"
   usage="$(jq -c '.usage // {}' "$cap")" || usage='{}'
-  # 관측 판정(config.sh 의 claude_native_usage_check): 일부 요청의 usage 누락·필수 필드 누락·음수는 partial — 토큰·비용을 0 이나 부분 합으로 적지 않는다.
+  # 관측 판정(scripts/lib/telemetry.sh 의 claude_native_usage_check): 일부 요청의 usage 누락·필수 필드 누락·음수는 partial — 토큰·비용을 0 이나 부분 합으로 적지 않는다.
   #   context_last_turn 은 이 판정과 따로 간다: 훅이 마지막 본 모델 호출의 usage 만으로 검증해 잰 값(capture.context_last_turn_source 가 있다)은
   #   비용 관측이 partial 이어도 그대로 남긴다 — 워커 세션 교체 판단의 실측값이라, 비용을 모른다고 같이 버리면 교체가 멈춘다. 출처는 context_source 에 적는다.
   #   출처 표식이 없는 캡처(옛 훅 — 누락 필드를 0 으로 읽어 계산했다)의 값은 판정이 transcript 일 때만 쓴다.
   chk="$(claude_native_usage_check "$usage")" || chk='{"status":"unavailable","error":"USAGE_CHECK_FAILED","detail":"usage 판정 실패"}'
-  # native subagent 는 비용을 보고하지 않는다 — 전사에서 읽은 토큰을 가격표(config.sh 의 claude_model_pricing)로 환산한다. 가격표에 없는 모델·환산할 수 없는 usage 는 unknown(0 달러 아님).
+  # native subagent 는 비용을 보고하지 않는다 — 전사에서 읽은 토큰을 가격표(scripts/lib/telemetry.sh 의 claude_model_pricing)로 환산한다. 가격표에 없는 모델·환산할 수 없는 usage 는 unknown(0 달러 아님).
   if rates="$(claude_model_pricing "$2")"; then
     est="$(claude_native_estimate_cost "$usage" "$rates")" || est='{"estimated_cost_usd":null,"assumptions":null}'
     basis="\"$CLAUDE_PRICING_BASIS\""
@@ -593,11 +593,11 @@ native_role_call() { # mode ROLE session label prompt conv schema out raw
 # 프로젝트 루트(= .agent-work 가 있는 곳) 선택 — native_standalone_project_root 한 곳에서 정한다:
 #   ① FEATURE_PROJECT_ROOT 가 있으면 그 경로(명시가 우선). 상대 경로면 실행한 디렉터리 기준으로 풀어 절대 경로로 확정한 뒤에 쓴다.
 #   ② 없으면 현재 디렉터리가 속한 git worktree 의 루트. 다만 그 worktree 가 이 스킬이 설치된 저장소와 **같은 저장소**(git common dir 일치)일 때만이다.
-#      설치 저장소의 main working tree 자신이면 config.sh 의 기본값을 그대로 쓴다(종전 동작).
+#      설치 저장소의 main working tree 자신이면 로더의 기본값을 그대로 쓴다(종전 동작).
 #   ③ 다른 저장소·git 밖에서는 멈춘다 — 설치 위치(원본)의 .agent-work 로 조용히 넘어가지 않고, 무관한 저장소의 .agent-work 도 건드리지 않는다.
-#   이 판정은 단독 복구 명령에만 쓴다. config.sh 를 source 하는 다른 사용처(러너·하위 루프·집계 도구)의 PROJECT_ROOT 기본값과 러너의 경로 재바인딩은 그대로다.
+#   이 판정은 단독 복구 명령에만 쓴다. 로더를 source 하는 다른 사용처(러너·하위 루프·집계 도구)의 PROJECT_ROOT 기본값과 러너의 경로 재바인딩은 그대로다.
 #   agent 정의 위치와 원본 상태 검사(native_origin_root / FEATURE_ORIGIN_ROOT)는 프로젝트 루트와 별개이며 바뀌지 않는다. 다른 worktree 의 요청은 찾지 않는다.
-# 진입은 프로세스당 한 번이다: 아래에서 config.sh 를 source 하면 config.sh 가 이 파일을 다시 source 한다(절대 경로 실행이면 그때도 BASH_SOURCE[0] == $0).
+# 진입은 프로세스당 한 번이다: 아래에서 로더를 source 하면 로더가 이 파일을 다시 source 한다(절대 경로 실행이면 그때도 BASH_SOURCE[0] == $0).
 #   재진입은 함수 정의만 다시 읽고 명령 처리는 하지 않는다. NATIVE_BRIDGE_MAIN_PID 는 export 하지 않는다(부모 프로세스에서 물려받은 값은 pid 가 달라 무시된다).
 _native_git_common_dir() { # dir → 그 저장소의 git common dir(물리 경로)
   ( cd "$1" 2>/dev/null && c="$(git rev-parse --git-common-dir 2>/dev/null)" && cd "$c" 2>/dev/null && pwd -P )
@@ -634,10 +634,10 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${NATIVE_BRIDGE_MAIN_PID:-}" != "$$" ]; 
   native_standalone_project_root "$(cd "$_skill_dir/../../.." && pwd)" || exit 1
   # 스냅샷·세션 원장·산출물 경로($WORK_DIR 상대)는 현재 디렉터리 기준이다 — 정한 루트로 옮겨 PROJECT_ROOT 기준 경로와 같은 트리를 보게 한다.
   cd "$NATIVE_STANDALONE_ROOT" || { echo "[FAIL] 프로젝트 루트로 이동 실패: $NATIVE_STANDALONE_ROOT" >&2; exit 1; }
-  # 설치 저장소 자신이면 config.sh 기본값(종전 문자열)을 그대로 둔다. worktree 면 러너의 재바인딩과 같은 값(git toplevel)을 넘긴다. export 하지 않는다.
+  # 설치 저장소 자신이면 로더의 기본값(종전 문자열)을 그대로 둔다. worktree 면 러너의 재바인딩과 같은 값(git toplevel)을 넘긴다. export 하지 않는다.
   # 명시한 FEATURE_PROJECT_ROOT 는 확정한 절대 경로로 바꿔 넘긴다(상대 경로는 cd 뒤에 뜻이 달라진다).
   if [ "$NATIVE_STANDALONE_ROOT_EXPLICIT" = 1 ] || [ "$(pwd -P)" != "$(cd "$_skill_dir/../../.." && pwd -P)" ]; then FEATURE_PROJECT_ROOT="$NATIVE_STANDALONE_ROOT"; fi
-  source "$_skill_dir/config.sh"
+  source "$_skill_dir/scripts/lib/bootstrap.sh"
   native_pending_present || { echo "[FAIL] pending native 요청이 없다: $(native_pending_file) (프로젝트 루트 $PROJECT_ROOT — 다른 worktree 의 요청이면 그 worktree 루트에서 실행하거나 FEATURE_PROJECT_ROOT 로 지정)" >&2; exit 1; }
   [ "$(native_pending_field '.request_id')" = "$2" ] || { echo "[FAIL] 요청 ID 불일치: 프로젝트 루트 $PROJECT_ROOT 의 pending 요청은 $(native_pending_field '.request_id') 다 — '$2' 가 아니다(다른 worktree 의 요청을 찾아 처리하지 않는다)" >&2; exit 1; }
   cur="$(snapshot_worktree_tree)"

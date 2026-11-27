@@ -45,6 +45,8 @@ pass() { echo "[SMOKE PASS] $*"; }
 mkdir -p "$TMP/repo/.claude/skills" && cp -R "$SKILL_SRC" "$TMP/repo/.claude/skills/feature" || fail "스킬 복사 실패"
 cp "$PROJECT_SRC/.claude/hooks/core_rules.md" "$TMP/repo/.claude/hooks/" 2>/dev/null || echo "core rules" > "$TMP/repo/.claude/hooks/core_rules.md"
 CFG="$TMP/repo/.claude/skills/feature/config.sh"
+LOADER="$TMP/repo/.claude/skills/feature/scripts/lib/bootstrap.sh"
+RUNTIME_LIB="$TMP/repo/.claude/skills/feature/scripts/lib/runtime.sh"
 sed -i.bak "s|^CLAUDE_BACKEND=.*|CLAUDE_BACKEND=\"legacy_cli\"|; s|^CLAUDE_BIN=.*|CLAUDE_BIN=\"$TMP/bin/claude\"|; s|^CODEX_BACKEND=.*|CODEX_BACKEND=\"legacy_exec\"|; s|^CODEX_BIN=.*|CODEX_BIN=\"$TMP/bin/codex\"|; s|^TEST_CMD=\"CHANGE_ME\"|TEST_CMD=\"true\"|; s|^LINT_CMD=\"CHANGE_ME\"|LINT_CMD=\"true\"|" "$CFG" && rm -f "$CFG.bak"
 # 역할별 CLI 고정: 이 스모크는 codex 세션 어댑터 규약을 검증하므로 리뷰어를 codex 로, 수정자를 claude 로 고정한다.
 # production config 의 모델→CLI 매핑이 바뀌어도 사례 의미가 유지된다(스모크 역할 CLI 고정 원칙).
@@ -61,7 +63,7 @@ printf '\n## 01\nunit 01 contract\n\n## 02\nunit 02 contract\n\n## 03\nunit 03 c
 : > .agent-work/decisions.md
 printf '{"version":1,"files":["src/u01.txt"],"new_file_roots":[]}\n' > .agent-work/feature-scope.json
 REVIEW_LOOP=".claude/skills/feature/scripts/impl-review-loop.sh"
-REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$CFG" | cut -d= -f2 | cut -d' ' -f1)"
+REVIEW_CONTRACT="$(grep -E '^REVIEWER_CONTRACT_VERSION=' "$RUNTIME_LIB" | cut -d= -f2 | cut -d' ' -f1)"
 export MOCK_LOG="$TMP/calls.log" MOCK_STATE="$TMP/mock-state" FEATURE_LIVE_TEE=1
 mkdir -p "$MOCK_STATE"
 : > "$MOCK_LOG"
@@ -139,9 +141,9 @@ resume_calls() { grep -c '^codex resume ' "$MOCK_LOG" || true; }
 reset_case() { : > "$MOCK_LOG"; rm -f "$MOCK_STATE"/codex.n "$MOCK_STATE"/review-[0-9]*.json .agent-work/.session-* .agent-work/usage.jsonl .agent-work/cli-anomalies.jsonl; }
 # 어댑터 단위 실행: 하위 셸에서 config 를 소싱해 호출한다 (CODEX_RESUME_CHECKED 캐시도 호출 단위로 초기화됨)
 ro_call() { # key out
-  ( set -e; source "$CFG"; run_readonly_json_role REVIEWER "$1" "smoke-$1" .claude/skills/feature/schemas/impl-review.schema.json "$2" "prompt" "" )
+  ( set -e; source "$LOADER"; run_readonly_json_role REVIEWER "$1" "smoke-$1" .claude/skills/feature/schemas/impl-review.schema.json "$2" "prompt" "" )
 }
-accept() { ( set -e; source "$CFG"; role_session_accept "$1" "$2" "smoke-accept" ); }
+accept() { ( set -e; source "$LOADER"; role_session_accept "$1" "$2" "smoke-accept" ); }
 
 # ===== U1: 같은 key 두 번, accept 없음 → 둘 다 새 exec =====
 reset_case
@@ -243,9 +245,9 @@ pass "U9: key 가 다르면 항상 fresh (검증자 정책은 key 로 구현됨)
 
 # ===== U10: 편집 역할 공용 로직 — accept 후 resume(workspace-write), thread 미확정 신규는 WARN =====
 reset_case
-edit_call() { ( set -e; source "$CFG"; FIXER_CLI=codex run_edit_role FIXER "$1" "smoke-edit-$1" "$TMP/side/edit-$1.raw" "prompt" "" "" "" ); }
+edit_call() { ( set -e; source "$LOADER"; FIXER_CLI=codex run_edit_role FIXER "$1" "smoke-edit-$1" "$TMP/side/edit-$1.raw" "prompt" "" "" "" ); }
 edit_call e1 || fail "U10: 1차 편집 호출 실패"
-( set -e; source "$CFG"; FIXER_CLI=codex role_session_accept FIXER e1 "smoke-accept" ) || fail "U10: accept 실패"
+( set -e; source "$LOADER"; FIXER_CLI=codex role_session_accept FIXER e1 "smoke-accept" ) || fail "U10: accept 실패"
 edit_call e1 || fail "U10: resume 편집 호출 실패"
 line="$(grep '^codex resume ' "$MOCK_LOG")" || fail "U10: 편집 resume 없음"
 case "$line" in *'sandbox_mode="workspace-write"'*) ;; *) fail "U10: workspace-write 샌드박스 없음: $line";; esac
@@ -287,7 +289,7 @@ pass "U13: claude 에 결속된 key 로 codex 라우팅 → 모델 0회 중단 (
 # ===== U14: codex→claude 전환 — 같은 key 면 자동 fresh 없이 중단 =====
 reset_case
 ro_call k14 "$TMP/side/u14a.json" && accept REVIEWER k14 || fail "U14: codex 원장 준비 실패"
-( set -e; source "$CFG"; REVIEWER_CLI=claude run_readonly_json_role REVIEWER k14 smoke-u14 \
+( set -e; source "$LOADER"; REVIEWER_CLI=claude run_readonly_json_role REVIEWER k14 smoke-u14 \
     .claude/skills/feature/schemas/impl-review.schema.json "$TMP/side/u14b.json" "prompt" "" ) > "$TMP/u14.log" 2>&1 \
   && fail "U14: codex 원장 위에서 claude 가 성공"
 grep -q SESSION_CLI_MISMATCH "$TMP/u14.log" || fail "U14: SESSION_CLI_MISMATCH 없음"
@@ -296,9 +298,9 @@ pass "U14: codex 원장에 결속된 key 로 claude 라우팅 → 모델 0회 �
 
 # ===== U15: 편집 역할 resume thread id 불일치 → rc 1 + 이번 -o 결과 제거 =====
 reset_case
-edit_schema_call() { ( set -e; source "$CFG"; FIXER_CLI=codex run_edit_role FIXER "$1" "smoke-e15" "$TMP/side/e15.raw" "prompt" "" .claude/skills/feature/schemas/impl-review.schema.json "$TMP/side/e15-result.json" ); }
+edit_schema_call() { ( set -e; source "$LOADER"; FIXER_CLI=codex run_edit_role FIXER "$1" "smoke-e15" "$TMP/side/e15.raw" "prompt" "" .claude/skills/feature/schemas/impl-review.schema.json "$TMP/side/e15-result.json" ); }
 edit_schema_call e15 || fail "U15: 1차 편집 호출 실패"
-( set -e; source "$CFG"; FIXER_CLI=codex role_session_accept FIXER e15 smoke ) || fail "U15: accept 실패"
+( set -e; source "$LOADER"; FIXER_CLI=codex role_session_accept FIXER e15 smoke ) || fail "U15: accept 실패"
 rm -f "$TMP/side/e15-result.json"
 FAKE_RESUME_TID=tid-999 edit_schema_call e15 > "$TMP/u15.log" 2>&1 && fail "U15: id 불일치인데 rc 0"
 grep -q 'thread id 가 원장과 다름' "$TMP/u15.log" || fail "U15: 불일치 오류 없음"
@@ -310,7 +312,7 @@ reset_case
 ensure_env() { # journal-bound ledger(yes|no) → ensure 종료코드, 로그 $TMP/w.log
   rm -f .agent-work/worker-session.json .agent-work/.session-feature-worker.codex.json
   ( set -e
-    source "$CFG"
+    source "$LOADER"
     SKILL_DIR="$TMP/repo/.claude/skills/feature"; WORKER_SCHEMA="$SKILL_DIR/schemas/worker-result.schema.json"
     WORKER_CLI=codex
     log() { echo "$*"; }; env_error() { echo "[ENV] $*" >&2; exit 1; }
@@ -349,7 +351,7 @@ pass "W2: 원장 소실 → 중단 / 미생성·정상 결속 → 통과 (4분�
 reset_case
 rm -rf .agent-work/reviews/impl-attempt-* .agent-work/review-impl.json .agent-work/approved.fingerprint .agent-work/feature-scope.lock.json
 git checkout -q -- src/u01.txt
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
 echo "worker edit" >> src/u01.txt
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
 printf '{"status":"DONE","undecided":[],"delegated_choices":[],"tests":[],"context_updates":{"upsert":[],"remove":[]}}\n' > .agent-work/worker-result.json
@@ -389,10 +391,10 @@ mv .agent-work/review-impl.json .agent-work/approved.fingerprint "$PREV_ATTEMPTS
 sed -i.bak 's/^FIXER_CLI=.*/FIXER_CLI="codex"/' "$CFG"
 git checkout -q -- src/u01.txt
 : > .agent-work/decisions.md
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
 echo "worker edit" >> src/u01.txt
 cp .agent-work/feature-scope.json .agent-work/feature-scope.lock.json
-( set -e; source "$CFG"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l3-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L3: 수정자 세션 준비 실패"
+( set -e; source "$LOADER"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l3-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L3: 수정자 세션 준비 실패"
 fixer_tid="$(jq -r .thread_id .agent-work/.session-fixer-a01.codex.json)"
 FIXER_MARKER=.agent-work/.session-fixer-a01.resume-pending.json
 printf '%s' "$review_issue" | jq -c --argjson v "$REVIEW_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$MOCK_STATE/review-2.json"
@@ -437,9 +439,9 @@ mkdir -p "$PREV_ATTEMPTS/l3"; mv .agent-work/reviews/impl-attempt-* .agent-work/
 rm -f .agent-work/state.json
 git checkout -q -- src/u01.txt
 : > .agent-work/decisions.md
-( source "$CFG"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
+( source "$LOADER"; snapshot_worktree_tree ) > .agent-work/worker-baseline.tree
 echo "worker edit" >> src/u01.txt
-( set -e; source "$CFG"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l4-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L4: 수정자 세션 준비 실패"
+( set -e; source "$LOADER"; run_edit_role FIXER fixer-a01 seed "$TMP/side/l4-seed.raw" "prompt" "" "" ""; role_session_accept FIXER fixer-a01 seed ) || fail "L4: 수정자 세션 준비 실패"
 printf '%s' "$review_issue" | jq -c --argjson v "$REVIEW_CONTRACT" '{schema_version:$v,verdict:"REQUEST_CHANGES",issues:[.]}' > "$MOCK_STATE/review-2.json"
 printf '{"schema_version":%s,"verdict":"APPROVE","issues":[]}\n' "$REVIEW_CONTRACT" > "$MOCK_STATE/review-1.json"   # marker 를 치운 뒤의 실행(호출 카운터 초기화 뒤 첫 호출)
 : > "$MOCK_LOG"
